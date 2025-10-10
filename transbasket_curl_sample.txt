@@ -1,0 +1,313 @@
+# Transbasket Translation Server - cURL Examples
+
+## 1. Health Check
+
+### Request:
+curl http://localhost:8889/health
+
+### Response:
+{
+  "status": "healthy",
+  "service": "transbasket",
+  "version": "1.0.0"
+}
+
+
+## 2. Basic Translation (Korean to English)
+
+### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T01:23:45.678Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "kor",
+    "to": "eng",
+    "text": "안녕하세요"
+  }'
+
+### Response:
+{
+  "timestamp": "2025-10-10T01:23:45.678Z",
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "translatedText": "Hello"
+}
+
+
+## 3. English to Korean Translation
+
+### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T02:30:00.123Z",
+    "uuid": "123e4567-e89b-12d3-a456-426614174000",
+    "from": "eng",
+    "to": "kor",
+    "text": "Hello, how are you?"
+  }'
+
+### Response:
+{
+  "timestamp": "2025-10-10T02:30:00.123Z",
+  "uuid": "123e4567-e89b-12d3-a456-426614174000",
+  "translatedText": "안녕하세요, 어떻게 지내세요?"
+}
+
+
+## 4. Japanese to English Translation
+
+### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T03:15:30.456Z",
+    "uuid": "9876fedc-ba98-7654-3210-fedcba987654",
+    "from": "jpn",
+    "to": "eng",
+    "text": "こんにちは、元気ですか？"
+  }'
+
+### Response:
+{
+  "timestamp": "2025-10-10T03:15:30.456Z",
+  "uuid": "9876fedc-ba98-7654-3210-fedcba987654",
+  "translatedText": "Hello, how are you?"
+}
+
+
+## 5. Long Text Translation
+
+### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T04:00:00.000Z",
+    "uuid": "abcdef12-3456-7890-abcd-ef1234567890",
+    "from": "kor",
+    "to": "eng",
+    "text": "인공지능 기술의 발전은 우리 사회에 큰 변화를 가져오고 있습니다. 특히 번역 기술의 발전으로 언어 장벽이 점차 낮아지고 있으며, 전 세계 사람들이 더 쉽게 소통할 수 있게 되었습니다."
+  }'
+
+### Response:
+{
+  "timestamp": "2025-10-10T04:00:00.000Z",
+  "uuid": "abcdef12-3456-7890-abcd-ef1234567890",
+  "translatedText": "The advancement of artificial intelligence technology is bringing significant changes to our society. In particular, the development of translation technology is gradually lowering language barriers, making it easier for people around the world to communicate."
+}
+
+
+## 6. Multi-line Text with Newlines
+
+### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T05:10:20.300Z",
+    "uuid": "11111111-2222-3333-4444-555555555555",
+    "from": "eng",
+    "to": "kor",
+    "text": "First line.\nSecond line.\n\nThird line after blank line."
+  }'
+
+### Response:
+{
+  "timestamp": "2025-10-10T05:10:20.300Z",
+  "uuid": "11111111-2222-3333-4444-555555555555",
+  "translatedText": "첫 번째 줄.\n두 번째 줄.\n\n빈 줄 뒤의 세 번째 줄."
+}
+
+
+## Error Examples
+
+### Error 1: Invalid UUID (422 Unprocessable Entity)
+
+#### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T06:00:00.000Z",
+    "uuid": "invalid-uuid",
+    "from": "kor",
+    "to": "eng",
+    "text": "테스트"
+  }'
+
+#### Response:
+{
+  "errorCode": "VALIDATION_ERROR",
+  "errorMessage": "Request validation failed",
+  "timestamp": "2025-10-10T06:00:01.234Z"
+}
+
+
+### Error 2: Invalid Language Code (422 Unprocessable Entity)
+
+#### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T07:00:00.000Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "xyz",
+    "to": "eng",
+    "text": "테스트"
+  }'
+
+#### Response:
+{
+  "errorCode": "VALIDATION_ERROR",
+  "errorMessage": "Request validation failed",
+  "timestamp": "2025-10-10T07:00:01.234Z"
+}
+
+
+### Error 3: Empty Text (422 Unprocessable Entity)
+
+#### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T08:00:00.000Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "kor",
+    "to": "eng",
+    "text": ""
+  }'
+
+#### Response:
+{
+  "errorCode": "VALIDATION_ERROR",
+  "errorMessage": "Request validation failed",
+  "timestamp": "2025-10-10T08:00:01.234Z"
+}
+
+
+### Error 4: Malformed JSON (400 Bad Request)
+
+#### Request:
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{invalid json}'
+
+#### Response:
+{
+  "errorCode": "VALIDATION_ERROR",
+  "errorMessage": "Request validation failed",
+  "timestamp": "2025-10-10T09:00:01.234Z"
+}
+
+
+### Error 5: Translation Service Error (503 Service Unavailable)
+
+#### Response (when OpenAI API is down):
+{
+  "errorCode": "TRANSLATION_ERROR",
+  "errorMessage": "Translation failed",
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp": "2025-10-10T10:00:01.234Z"
+}
+
+#### Headers:
+HTTP/1.1 503 Service Unavailable
+Retry-After: 5
+
+
+## Advanced Examples
+
+### Using with jq for Pretty Output
+
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T11:00:00.000Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "kor",
+    "to": "eng",
+    "text": "안녕하세요"
+  }' | jq .
+
+
+### Save Response to File
+
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T12:00:00.000Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "kor",
+    "to": "eng",
+    "text": "안녕하세요"
+  }' -o response.json
+
+
+### Show HTTP Status Code
+
+curl -w "\nHTTP Status: %{http_code}\n" \
+  -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T13:00:00.000Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "kor",
+    "to": "eng",
+    "text": "안녕하세요"
+  }'
+
+
+### Verbose Output (Show Headers)
+
+curl -v -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T14:00:00.000Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "kor",
+    "to": "eng",
+    "text": "안녕하세요"
+  }'
+
+
+### Timeout Setting (30 seconds)
+
+curl --max-time 30 \
+  -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2025-10-10T15:00:00.000Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "kor",
+    "to": "eng",
+    "text": "안녕하세요"
+  }'
+
+
+## Notes
+
+1. **UUID Format**: Must be a valid UUID v4 (RFC 4122)
+   Example: 550e8400-e29b-41d4-a716-446655440000
+
+2. **Timestamp Format**: Must be RFC 3339 format
+   Example: 2025-10-10T01:23:45.678Z
+
+3. **Language Codes**: Must be ISO 639-2 three-letter codes
+   Common codes: eng, kor, jpn, chi, spa, fre, ger, rus, ara, por
+
+4. **Text Length**:
+   - Minimum: 1 character
+   - Maximum: 10,000 characters
+
+5. **Response Preservation**:
+   The response always preserves the original timestamp and UUID from the request.
+
+6. **Error Handling**:
+   - 400: Malformed JSON
+   - 422: Validation errors (invalid UUID, language code, timestamp, or text)
+   - 500: Internal server errors
+   - 502: OpenAI API client errors (non-retryable)
+   - 503: OpenAI API server errors (retryable, includes Retry-After header)
+   - 504: Request timeout
+
+7. **Newline Handling**:
+   Newlines (\n) in the text are preserved in both request and response.
+   The server properly handles escaped newlines (\\n) from the API response.

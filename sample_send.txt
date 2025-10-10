@@ -1,0 +1,1 @@
+{{PROMPT_PREFIX}} FROM {{LANGUAGE_BASE}} to {{LANGUAGE_TO}} :: 번역요청 text 입니다.
