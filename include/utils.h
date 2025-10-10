@@ -31,4 +31,7 @@ int strip_emoji_and_shortcodes(const char *input, char *output, size_t output_si
 /* Unescape string (convert \\n to \n, \\t to \t, etc.) */
 int unescape_string(const char *input, char *output, size_t output_size);
 
+/* Daemonize the process */
+int daemonize(void);
+
 #endif /* UTILS_H */

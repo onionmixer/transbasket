@@ -11,6 +11,10 @@
 #include <time.h>
 #include <uuid/uuid.h>
 #include <regex.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include "utils.h"
 
 /* ISO 639-2 language codes */
@@ -387,5 +391,71 @@ int unescape_string(const char *input, char *output, size_t output_size) {
     }
 
     output[out_pos] = '\0';
+    return 0;
+}
+
+/* Daemonize the process */
+int daemonize(void) {
+    pid_t pid, sid;
+
+    /* Fork the parent process */
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "Error: fork() failed\n");
+        return -1;
+    }
+
+    /* Exit the parent process */
+    if (pid > 0) {
+        exit(0);
+    }
+
+    /* Create a new session */
+    sid = setsid();
+    if (sid < 0) {
+        fprintf(stderr, "Error: setsid() failed\n");
+        return -1;
+    }
+
+    /* Fork again to ensure we're not a session leader */
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "Error: second fork() failed\n");
+        return -1;
+    }
+
+    /* Exit the first child */
+    if (pid > 0) {
+        exit(0);
+    }
+
+    /* Change working directory to root */
+    if (chdir("/") < 0) {
+        fprintf(stderr, "Error: chdir() failed\n");
+        return -1;
+    }
+
+    /* Reset file mode creation mask */
+    umask(0);
+
+    /* Close standard file descriptors */
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+    /* Redirect standard file descriptors to /dev/null */
+    int fd = open("/dev/null", O_RDWR);
+    if (fd < 0) {
+        return -1;
+    }
+
+    dup2(fd, STDIN_FILENO);
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+
+    if (fd > 2) {
+        close(fd);
+    }
+
     return 0;
 }
