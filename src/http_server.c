@@ -6,12 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <microhttpd.h>
 #include "http_server.h"
 #include "json_handler.h"
 #include "utils.h"
+#include "trans_cache.h"
 
-#define DEFAULT_MAX_WORKERS 10
+#define DEFAULT_MAX_WORKERS 30
 #define TRUNCATE_DISPLAY_LENGTH 50
 #define TRUNCATE_BUFFER_SIZE 100
 
@@ -50,6 +52,60 @@ static int send_json_response(struct MHD_Connection *connection,
     MHD_destroy_response(response);
 
     return ret;
+}
+
+/* Cache background thread - handles periodic save and cleanup */
+static void *cache_background_thread(void *arg) {
+    TranslationServer *server = (TranslationServer *)arg;
+
+    /* Save interval: 5 seconds */
+    const int save_interval = 5;
+
+    /* Cleanup interval and settings */
+    int cleanup_enabled = server->config->cache_cleanup_enabled;
+    int cleanup_days = server->config->cache_cleanup_days;
+    int cleanup_check_interval = 0;
+
+    if (cleanup_enabled) {
+        /* Cleanup interval: 1/10 of cleanup days or minimum 1 hour */
+        cleanup_check_interval = (cleanup_days * 24 * 60 * 60) / 10;
+        if (cleanup_check_interval < 3600) {
+            cleanup_check_interval = 3600;  /* Minimum 1 hour */
+        }
+        fprintf(stderr, "Cache background thread started (save every %d seconds, cleanup check every %d seconds, cleanup after %d days)\n",
+                save_interval, cleanup_check_interval, cleanup_days);
+    } else {
+        fprintf(stderr, "Cache background thread started (save every %d seconds, cleanup disabled)\n",
+                save_interval);
+    }
+
+    int elapsed = 0;
+
+    while (server->cache_bg_running) {
+        sleep(save_interval);
+        elapsed += save_interval;
+
+        if (!server->cache_bg_running) break;
+
+        /* Periodic save */
+        if (trans_cache_save(server->cache) == 0) {
+            // fprintf(stderr, "Cache periodically saved to disk (%d entries)\n", (int)server->cache->size);
+        }
+
+        /* Cleanup check (if enabled) */
+        if (cleanup_enabled && elapsed >= cleanup_check_interval) {
+            elapsed = 0;
+
+            int removed = trans_cache_cleanup(server->cache, cleanup_days);
+
+            if (removed > 0) {
+                fprintf(stderr, "Cache cleanup: removed %d expired entries\n", removed);
+            }
+        }
+    }
+
+    fprintf(stderr, "Cache background thread stopped\n");
+    return NULL;
 }
 
 /* Health check endpoint handler */
@@ -125,7 +181,39 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     fprintf(stderr, "[%s] Translation request received: %s -> %s, text: %s\n",
             request_uuid, req->from_lang, req->to_lang, truncated_text);
 
-    /* Perform translation */
+    /* Check cache first if enabled */
+    CacheEntry *cached = NULL;
+    if (server->cache) {
+        cached = trans_cache_lookup(server->cache, req->from_lang, req->to_lang, req->text);
+
+        if (cached && cached->count >= server->config->cache_threshold) {
+            /* Cache hit - use cached translation */
+            fprintf(stderr, "[%s] Cache hit (count: %d >= threshold: %d)\n",
+                    request_uuid, cached->count, server->config->cache_threshold);
+
+            /* Increment count */
+            trans_cache_update_count(server->cache, cached);
+
+            /* Create response with cached translation */
+            char *response_json = create_translation_response(req, cached->translated_text);
+
+            char truncated_result[TRUNCATE_BUFFER_SIZE];
+            truncate_text(cached->translated_text, truncated_result, TRUNCATE_DISPLAY_LENGTH, "...");
+            fprintf(stderr, "[%s] Translation from cache, result: %s\n", request_uuid, truncated_result);
+
+            free(request_uuid);
+            free_translation_request(req);
+
+            return send_json_response(connection, response_json, MHD_HTTP_OK, false);
+        }
+
+        if (cached) {
+            fprintf(stderr, "[%s] Cache found but count insufficient (%d < %d), requesting API\n",
+                    request_uuid, cached->count, server->config->cache_threshold);
+        }
+    }
+
+    /* Perform translation via OpenAI API */
     TranslationError trans_error = {0};
     char *translated_text = openai_translate(
         server->translator,
@@ -133,6 +221,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
         req->to_lang,
         req->text,
         request_uuid,
+        req->timestamp,
         &trans_error
     );
 
@@ -151,6 +240,30 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
         free_translation_request(req);
 
         return send_json_response(connection, error_json, status_code, trans_error.retryable);
+    }
+
+    /* Update cache with translation result */
+    if (server->cache) {
+        if (cached) {
+            /* Existing cache entry - check if translation matches */
+            if (strcmp(cached->translated_text, translated_text) == 0) {
+                /* Same translation - increment count */
+                trans_cache_update_count(server->cache, cached);
+                fprintf(stderr, "[%s] Cache updated (same translation, count: %d)\n",
+                        request_uuid, cached->count + 1);
+            } else {
+                /* Different translation - update translation and reset count */
+                trans_cache_update_translation(server->cache, cached, translated_text);
+                fprintf(stderr, "[%s] Cache updated (different translation, count reset to 1)\n",
+                        request_uuid);
+            }
+        } else {
+            /* New cache entry */
+            if (trans_cache_add(server->cache, req->from_lang, req->to_lang,
+                               req->text, translated_text) == 0) {
+                fprintf(stderr, "[%s] Added to cache (count: 1)\n", request_uuid);
+            }
+        }
     }
 
     /* Create success response */
@@ -237,6 +350,31 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
         return NULL;
     }
 
+    /* Initialize cache */
+    server->cache = NULL;
+    server->cache_bg_running = false;
+
+    if (config->cache_file) {
+        server->cache = trans_cache_init(config->cache_file);
+        if (!server->cache) {
+            fprintf(stderr, "Warning: Failed to initialize cache, continuing without cache\n");
+        } else {
+            fprintf(stderr, "Translation cache initialized: %s (threshold: %d)\n",
+                    config->cache_file, config->cache_threshold);
+
+            /* Always start background thread for periodic cache saving */
+            server->cache_bg_running = true;
+            if (pthread_create(&server->cache_bg_thread, NULL,
+                             cache_background_thread, server) != 0) {
+                fprintf(stderr, "Warning: Failed to start cache background thread\n");
+                server->cache_bg_running = false;
+            } else {
+                fprintf(stderr, "Cache background thread started (cleanup %s)\n",
+                        config->cache_cleanup_enabled ? "enabled" : "disabled");
+            }
+        }
+    }
+
     fprintf(stderr, "Translation server initialized with %d workers\n", server->max_workers);
 
     return server;
@@ -296,6 +434,22 @@ void translation_server_free(TranslationServer *server) {
     }
 
     translation_server_stop(server);
+
+    /* Stop cache background thread if running */
+    if (server->cache_bg_running) {
+        fprintf(stderr, "Stopping cache background thread...\n");
+        server->cache_bg_running = false;
+        pthread_join(server->cache_bg_thread, NULL);
+        fprintf(stderr, "Cache background thread stopped\n");
+    }
+
+    /* Save and free cache */
+    if (server->cache) {
+        fprintf(stderr, "Saving translation cache...\n");
+        trans_cache_save(server->cache);
+        trans_cache_free(server->cache);
+        fprintf(stderr, "Translation cache saved and freed\n");
+    }
 
     if (server->translator) {
         openai_translator_free(server->translator);

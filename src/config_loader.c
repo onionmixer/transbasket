@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <regex.h>
 #include <libgen.h>
@@ -78,11 +79,11 @@ static int parse_config_line(const char *line, char *key, char *value) {
     return 1;
 }
 
-/* Load prompt prefix from file */
-static char *load_prompt_prefix(const char *prompt_prefix_path) {
-    FILE *fp = fopen(prompt_prefix_path, "r");
+/* Load text file content */
+static char *load_text_file(const char *file_path, const char *file_description) {
+    FILE *fp = fopen(file_path, "r");
     if (!fp) {
-        fprintf(stderr, "Error: Prompt prefix file not found: %s\n", prompt_prefix_path);
+        fprintf(stderr, "Error: %s file not found: %s\n", file_description, file_path);
         return NULL;
     }
 
@@ -92,7 +93,7 @@ static char *load_prompt_prefix(const char *prompt_prefix_path) {
     fseek(fp, 0, SEEK_SET);
 
     if (file_size <= 0) {
-        fprintf(stderr, "Error: Prompt prefix file is empty\n");
+        fprintf(stderr, "Error: %s file is empty\n", file_description);
         fclose(fp);
         return NULL;
     }
@@ -116,12 +117,22 @@ static char *load_prompt_prefix(const char *prompt_prefix_path) {
     free(buffer);
 
     if (!result || strlen(result) == 0) {
-        fprintf(stderr, "Error: Prompt prefix is empty after trimming\n");
+        fprintf(stderr, "Error: %s is empty after trimming\n", file_description);
         free(result);
         return NULL;
     }
 
     return result;
+}
+
+/* Load prompt prefix from file */
+static char *load_prompt_prefix(const char *prompt_prefix_path) {
+    return load_text_file(prompt_prefix_path, "Prompt prefix");
+}
+
+/* Load system role from file */
+static char *load_system_role(const char *system_role_path) {
+    return load_text_file(system_role_path, "System role");
 }
 
 /* Resolve relative path from config file location */
@@ -199,13 +210,20 @@ int validate_config(const Config *config) {
         return -1;
     }
 
+    /* Validate SYSTEM_ROLE */
+    if (!config->system_role || strlen(config->system_role) == 0) {
+        fprintf(stderr, "Error: SYSTEM_ROLE is required\n");
+        return -1;
+    }
+
     return 0;
 }
 
 /* Load configuration from file */
-Config *load_config(const char *config_path, const char *prompt_prefix_path) {
+Config *load_config(const char *config_path, const char *prompt_prefix_path, const char *system_role_path) {
     const char *default_config_path = "transbasket.conf";
     const char *default_prompt_path = "PROMPT_PREFIX.txt";
+    const char *default_system_role_path = "ROLS.txt";
 
     if (!config_path) {
         config_path = default_config_path;
@@ -213,6 +231,10 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path) {
 
     if (!prompt_prefix_path) {
         prompt_prefix_path = default_prompt_path;
+    }
+
+    if (!system_role_path) {
+        system_role_path = default_system_role_path;
     }
 
     /* Resolve config path */
@@ -250,6 +272,17 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path) {
     /* Set defaults */
     config->listen = strdup("0.0.0.0");
     config->port = 8889;
+    config->debug = false;
+    config->temperature = 0.0;
+    config->top_p = 1.0;
+    config->seed = 42;
+    config->stream = false;
+
+    /* Cache defaults */
+    config->cache_file = strdup("./trans_dictionary.txt");
+    config->cache_threshold = 5;
+    config->cache_cleanup_enabled = true;
+    config->cache_cleanup_days = 30;
 
     /* Parse config file */
     char line[MAX_LINE_LENGTH];
@@ -282,6 +315,31 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path) {
             config->listen = strdup(value);
         } else if (strcmp(key, "PORT") == 0) {
             config->port = atoi(value);
+        } else if (strcmp(key, "DEBUG") == 0) {
+            config->debug = (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0);
+        } else if (strcmp(key, "TEMPERATURE") == 0) {
+            config->temperature = atof(value);
+        } else if (strcmp(key, "TOP_P") == 0) {
+            config->top_p = atof(value);
+        } else if (strcmp(key, "SEED") == 0) {
+            config->seed = atoi(value);
+        } else if (strcmp(key, "STREAM") == 0) {
+            config->stream = (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
+        } else if (strcmp(key, "TRANS_CACHE_FILE") == 0) {
+            free(config->cache_file);
+            config->cache_file = strdup(value);
+        } else if (strcmp(key, "TRANS_CACHE_THRESHOLD") == 0) {
+            config->cache_threshold = atoi(value);
+            if (config->cache_threshold < 1) {
+                config->cache_threshold = 5;  /* Minimum 1 */
+            }
+        } else if (strcmp(key, "TRANS_CACHE_CLEANUP_ENABLED") == 0) {
+            config->cache_cleanup_enabled = (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
+        } else if (strcmp(key, "TRANS_CACHE_CLEANUP_DAYS") == 0) {
+            config->cache_cleanup_days = atoi(value);
+            if (config->cache_cleanup_days <= 0) {
+                config->cache_cleanup_days = 30;  /* Default */
+            }
         }
     }
 
@@ -289,10 +347,10 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path) {
 
     /* Load prompt prefix */
     char *resolved_prompt_path = resolve_path(resolved_config_path, prompt_prefix_path);
-    free(resolved_config_path);
 
     if (!resolved_prompt_path) {
         fprintf(stderr, "Error: Could not resolve prompt prefix path: %s\n", prompt_prefix_path);
+        free(resolved_config_path);
         free_config(config);
         return NULL;
     }
@@ -301,6 +359,25 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path) {
     free(resolved_prompt_path);
 
     if (!config->prompt_prefix) {
+        free(resolved_config_path);
+        free_config(config);
+        return NULL;
+    }
+
+    /* Load system role */
+    char *resolved_system_role_path = resolve_path(resolved_config_path, system_role_path);
+    free(resolved_config_path);
+
+    if (!resolved_system_role_path) {
+        fprintf(stderr, "Error: Could not resolve system role path: %s\n", system_role_path);
+        free_config(config);
+        return NULL;
+    }
+
+    config->system_role = load_system_role(resolved_system_role_path);
+    free(resolved_system_role_path);
+
+    if (!config->system_role) {
         free_config(config);
         return NULL;
     }
@@ -325,5 +402,7 @@ void free_config(Config *config) {
     free(config->openai_api_key);
     free(config->listen);
     free(config->prompt_prefix);
+    free(config->system_role);
+    free(config->cache_file);
     free(config);
 }

@@ -197,7 +197,7 @@ sudo apt-get install libcurl4-openssl-dev libmicrohttpd-dev libcjson-dev uuid-de
 ## Environment Variables
 
 - `TRANSBASKET_CONFIG`: Config file path (default: ../transbasket.conf)
-- `MAX_WORKERS`: Thread pool size (default: 10)
+- `MAX_WORKERS`: Thread pool size (default: 30)
 
 Rule of thumb for `MAX_WORKERS`: `2 * CPU_CORES + 1`
 

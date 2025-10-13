@@ -10,6 +10,8 @@
 #include <math.h>
 #include <limits.h>
 #include <libgen.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 #include "http_client.h"
@@ -45,50 +47,54 @@ static size_t transbasket_curl_write_callback(void *contents, size_t size, size_
     return realsize;
 }
 
-/* Load prompt template from file */
-static char *load_prompt_template(void) {
-    const char *template_path = "sample_send.txt";
-
-    /* Resolve path relative to executable */
-    char exe_path[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len == -1) {
-        fprintf(stderr, "Warning: Could not determine executable path, using default template\n");
-        return strdup("{{PROMPT_PREFIX}} FROM {{LANGUAGE_BASE}} to {{LANGUAGE_TO}} :: {{TEXT}}");
+/* Save debug curl command to file */
+static void save_debug_curl(const char *timestamp, const char *uuid,
+                           const char *url, const char *api_key,
+                           const char *json_request) {
+    if (!timestamp || !uuid || !url || !api_key || !json_request) {
+        return;
     }
-    exe_path[len] = '\0';
 
-    /* Get directory of executable */
-    char *exe_dir = strdup(exe_path);
-    char *dir = dirname(exe_dir);
+    /* Create trace directory if it doesn't exist */
+    const char *trace_dir = "./trace";
+    struct stat st = {0};
+    if (stat(trace_dir, &st) == -1) {
+        if (mkdir(trace_dir, 0755) == -1) {
+            fprintf(stderr, "Warning: Failed to create trace directory: %s\n", trace_dir);
+            return;
+        }
+    }
+
+    /* Create filename from timestamp and uuid */
+    char filename[512];
+    snprintf(filename, sizeof(filename), "%s_%s.txt", timestamp, uuid);
+
+    /* Replace ':' with '-' in filename for filesystem compatibility */
+    for (char *p = filename; *p; p++) {
+        if (*p == ':') *p = '-';
+    }
 
     /* Build full path */
-    char full_path[PATH_MAX];
-    snprintf(full_path, sizeof(full_path), "%s/%s", dir, template_path);
-    free(exe_dir);
+    char filepath[768];
+    snprintf(filepath, sizeof(filepath), "%s/%s", trace_dir, filename);
 
-    FILE *fp = fopen(full_path, "r");
-
+    FILE *fp = fopen(filepath, "w");
     if (!fp) {
-        fprintf(stderr, "Warning: Failed to load template from %s, using default\n", full_path);
-        return strdup("{{PROMPT_PREFIX}} FROM {{LANGUAGE_BASE}} to {{LANGUAGE_TO}} :: {{TEXT}}");
+        fprintf(stderr, "Warning: Failed to create debug file: %s\n", filepath);
+        return;
     }
 
-    fseek(fp, 0, SEEK_END);
-    long file_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    /* Write curl command using heredoc for proper JSON formatting */
+    fprintf(fp, "curl -X POST '%s' \\\n", url);
+    fprintf(fp, "  -H 'Content-Type: application/json; charset=utf-8' \\\n");
+    fprintf(fp, "  -H 'Authorization: Bearer %s' \\\n", api_key);
+    fprintf(fp, "  --fail-with-body -sS \\\n");
+    fprintf(fp, "  --data-binary @- <<'JSON'\n");
+    fprintf(fp, "%s\n", json_request);
+    fprintf(fp, "JSON\n");
 
-    char *buffer = malloc(file_size + 1);
-    if (!buffer) {
-        fclose(fp);
-        return strdup("{{PROMPT_PREFIX}} FROM {{LANGUAGE_BASE}} to {{LANGUAGE_TO}} :: {{TEXT}}");
-    }
-
-    size_t read_size = fread(buffer, 1, file_size, fp);
-    buffer[read_size] = '\0';
     fclose(fp);
-
-    return buffer;
+    fprintf(stderr, "[%s] Debug curl saved to: %s\n", uuid, filepath);
 }
 
 /* Replace all occurrences of a substring */
@@ -131,63 +137,36 @@ static char *str_replace(const char *orig, const char *rep, const char *with) {
     return result;
 }
 
-/* Build translation prompt from template */
-static char *build_prompt(OpenAITranslator *translator, const char *from_lang,
-                         const char *to_lang, const char *text) {
-    if (!translator || !from_lang || !to_lang || !text) {
+/* Build translation instruction message from PROMPT_PREFIX */
+static char *build_instruction_message(OpenAITranslator *translator, const char *to_lang) {
+    if (!translator || !to_lang) {
         return NULL;
     }
 
-    const char *from_name = get_language_name(from_lang);
     const char *to_name = get_language_name(to_lang);
-
-    if (!from_name) from_name = from_lang;
     if (!to_name) to_name = to_lang;
 
-    char *prompt = strdup(translator->prompt_template);
-    if (!prompt) {
+    /* Use PROMPT_PREFIX as the instruction message */
+    char *instruction = strdup(translator->config->prompt_prefix);
+    if (!instruction) {
         return NULL;
     }
 
-    /* Replace template variables */
-    char *temp;
-
-    temp = str_replace(prompt, "{{PROMPT_PREFIX}}", translator->config->prompt_prefix);
-    free(prompt);
-    if (!temp) return NULL;
-    prompt = temp;
-
-    temp = str_replace(prompt, "{{LANGUAGE_BASE}}", from_name);
-    free(prompt);
-    if (!temp) return NULL;
-    prompt = temp;
-
-    temp = str_replace(prompt, "{{LANGUAGE_TO}}", to_name);
-    free(prompt);
-    if (!temp) return NULL;
-    prompt = temp;
-
-    /* Handle {{TEXT}} replacement or append after :: */
-    if (strstr(prompt, "{{TEXT}}")) {
-        temp = str_replace(prompt, "{{TEXT}}", text);
-        free(prompt);
-        if (!temp) return NULL;
-        prompt = temp;
-    } else {
-        /* Check for " :: " pattern */
-        char *separator = strstr(prompt, " :: ");
-        if (separator) {
-            *separator = '\0';
-            char *new_prompt = malloc(strlen(prompt) + strlen(text) + 7);  /* +7 for " :: " + quotes + null */
-            if (new_prompt) {
-                sprintf(new_prompt, "%s :: \"%s\"", prompt, text);
-                free(prompt);
-                prompt = new_prompt;
-            }
-        }
+    /* Replace [TARGET LANGUAGE] with actual target language name */
+    char *temp = str_replace(instruction, "[TARGET LANGUAGE]", to_name);
+    if (temp) {
+        free(instruction);
+        instruction = temp;
     }
 
-    return prompt;
+    /* Also try replacing {{LANGUAGE_TO}} for backward compatibility */
+    temp = str_replace(instruction, "{{LANGUAGE_TO}}", to_name);
+    if (temp) {
+        free(instruction);
+        instruction = temp;
+    }
+
+    return instruction;
 }
 
 /* Initialize OpenAI translator */
@@ -206,12 +185,6 @@ OpenAITranslator *openai_translator_init(Config *config, int max_retries, int ti
     translator->config = config;
     translator->max_retries = max_retries > 0 ? max_retries : DEFAULT_MAX_RETRIES;
     translator->timeout = timeout > 0 ? timeout : DEFAULT_TIMEOUT;
-    translator->prompt_template = load_prompt_template();
-
-    if (!translator->prompt_template) {
-        free(translator);
-        return NULL;
-    }
 
     /* Initialize curl */
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -228,7 +201,6 @@ void openai_translator_free(OpenAITranslator *translator) {
         return;
     }
 
-    free(translator->prompt_template);
     free(translator);
 
     curl_global_cleanup();
@@ -237,8 +209,9 @@ void openai_translator_free(OpenAITranslator *translator) {
 /* Translate text using OpenAI API */
 char *openai_translate(OpenAITranslator *translator, const char *from_lang,
                       const char *to_lang, const char *text,
-                      const char *request_uuid, TranslationError *error) {
-    if (!translator || !from_lang || !to_lang || !text || !request_uuid) {
+                      const char *request_uuid, const char *timestamp,
+                      TranslationError *error) {
+    if (!translator || !from_lang || !to_lang || !text || !request_uuid || !timestamp) {
         if (error) {
             error->message = strdup("Invalid parameters");
             error->retryable = false;
@@ -247,10 +220,10 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         return NULL;
     }
 
-    char *prompt = build_prompt(translator, from_lang, to_lang, text);
-    if (!prompt) {
+    char *instruction = build_instruction_message(translator, to_lang);
+    if (!instruction) {
         if (error) {
-            error->message = strdup("Failed to build prompt");
+            error->message = strdup("Failed to build instruction message");
             error->retryable = false;
             error->status_code = 0;
         }
@@ -276,22 +249,56 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         /* Build JSON request body */
         cJSON *root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "model", translator->config->openai_model);
-        cJSON_AddNumberToObject(root, "temperature", 0.3);
+        cJSON_AddNumberToObject(root, "temperature", translator->config->temperature);
+        cJSON_AddNumberToObject(root, "top_p", translator->config->top_p);
+        cJSON_AddNumberToObject(root, "seed", translator->config->seed);
+        cJSON_AddBoolToObject(root, "stream", translator->config->stream);
 
         cJSON *messages = cJSON_CreateArray();
-        cJSON *message = cJSON_CreateObject();
-        cJSON_AddStringToObject(message, "role", "user");
-        cJSON_AddStringToObject(message, "content", prompt);
-        cJSON_AddItemToArray(messages, message);
+
+        /* Message 1: System role */
+        cJSON *system_message = cJSON_CreateObject();
+        cJSON_AddStringToObject(system_message, "role", "system");
+        cJSON_AddStringToObject(system_message, "content", translator->config->system_role);
+        cJSON_AddItemToArray(messages, system_message);
+
+        /* Message 2: Translation instructions with PROMPT_PREFIX */
+        cJSON *instruction_message = cJSON_CreateObject();
+        cJSON_AddStringToObject(instruction_message, "role", "user");
+        cJSON_AddStringToObject(instruction_message, "content", instruction);
+        cJSON_AddItemToArray(messages, instruction_message);
+
+        /* Message 3: Language direction */
+        char language_info[256];
+        snprintf(language_info, sizeof(language_info), ":: LANGUAGE FROM %s TO %s ::",
+                 get_language_name(from_lang), get_language_name(to_lang));
+        cJSON *language_message = cJSON_CreateObject();
+        cJSON_AddStringToObject(language_message, "role", "user");
+        cJSON_AddStringToObject(language_message, "content", language_info);
+        cJSON_AddItemToArray(messages, language_message);
+
+        /* Message 4: Actual text to translate */
+        /* cJSON automatically escapes newlines (\n) and other special characters */
+        cJSON *text_message = cJSON_CreateObject();
+        cJSON_AddStringToObject(text_message, "role", "user");
+        cJSON_AddStringToObject(text_message, "content", text);
+        cJSON_AddItemToArray(messages, text_message);
+
         cJSON_AddItemToObject(root, "messages", messages);
 
         char *json_request = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
 
+        /* Save debug curl command on first attempt if DEBUG enabled */
+        if (attempt == 1 && translator->config->debug) {
+            save_debug_curl(timestamp, request_uuid, url,
+                          translator->config->openai_api_key, json_request);
+        }
+
         /* Setup curl */
         CurlResponse response = {0};
         struct curl_slist *headers = NULL;
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+        headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
 
         char auth_header[512];
         snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s",
@@ -385,46 +392,61 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         if (cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
             cJSON *first_choice = cJSON_GetArrayItem(choices, 0);
             cJSON *message_obj = cJSON_GetObjectItem(first_choice, "message");
+
+            /* Check if message object exists */
+            if (!message_obj) {
+                fprintf(stderr, "[%s] No message object in response\n", request_uuid);
+                result = strdup("nothing contents");
+                cJSON_Delete(response_json);
+                break;
+            }
+
             cJSON *content = cJSON_GetObjectItem(message_obj, "content");
 
-            if (cJSON_IsString(content) && content->valuestring) {
-                // Allocate buffers dynamically to handle large translations
-                char *unescaped_text = malloc(MAX_TRANSLATION_BUFFER);
-                char *cleaned_text = malloc(MAX_CLEANED_TEXT_BUFFER);
+            /* Check if content exists and is a string */
+            if (!cJSON_IsString(content) || !content->valuestring) {
+                fprintf(stderr, "[%s] No content in message object\n", request_uuid);
+                result = strdup("nothing contents");
+                cJSON_Delete(response_json);
+                break;
+            }
 
-                if (!unescaped_text || !cleaned_text) {
-                    fprintf(stderr, "[%s] Memory allocation failed for translation buffers\n", request_uuid);
-                    free(unescaped_text);
-                    free(cleaned_text);
-                    cJSON_Delete(response_json);
-                    break;
-                }
+            // Allocate buffers dynamically to handle large translations
+            char *unescaped_text = malloc(MAX_TRANSLATION_BUFFER);
+            char *cleaned_text = malloc(MAX_CLEANED_TEXT_BUFFER);
 
-                // First unescape \\n to \n, \\t to \t, etc.
-                if (unescape_string(content->valuestring, unescaped_text, MAX_TRANSLATION_BUFFER) != 0) {
-                    fprintf(stderr, "[%s] Failed to unescape translation text\n", request_uuid);
-                    free(unescaped_text);
-                    free(cleaned_text);
-                    cJSON_Delete(response_json);
-                    break;
-                }
-
-                // Then strip emoji and shortcodes
-                if (strip_emoji_and_shortcodes(unescaped_text, cleaned_text, MAX_CLEANED_TEXT_BUFFER) != 0) {
-                    fprintf(stderr, "[%s] Failed to clean translation text\n", request_uuid);
-                    free(unescaped_text);
-                    free(cleaned_text);
-                    cJSON_Delete(response_json);
-                    break;
-                }
-
-                result = strdup(cleaned_text);
+            if (!unescaped_text || !cleaned_text) {
+                fprintf(stderr, "[%s] Memory allocation failed for translation buffers\n", request_uuid);
                 free(unescaped_text);
                 free(cleaned_text);
-
-                fprintf(stderr, "[%s] Translation completed (attempt %d/%d)\n",
-                       request_uuid, attempt, translator->max_retries);
+                cJSON_Delete(response_json);
+                break;
             }
+
+            // First unescape \\n to \n, \\t to \t, etc.
+            if (unescape_string(content->valuestring, unescaped_text, MAX_TRANSLATION_BUFFER) != 0) {
+                fprintf(stderr, "[%s] Failed to unescape translation text\n", request_uuid);
+                free(unescaped_text);
+                free(cleaned_text);
+                cJSON_Delete(response_json);
+                break;
+            }
+
+            // Then strip emoji and shortcodes
+            if (strip_emoji_and_shortcodes(unescaped_text, cleaned_text, MAX_CLEANED_TEXT_BUFFER) != 0) {
+                fprintf(stderr, "[%s] Failed to clean translation text\n", request_uuid);
+                free(unescaped_text);
+                free(cleaned_text);
+                cJSON_Delete(response_json);
+                break;
+            }
+
+            result = strdup(cleaned_text);
+            free(unescaped_text);
+            free(cleaned_text);
+
+            fprintf(stderr, "[%s] Translation completed (attempt %d/%d)\n",
+                   request_uuid, attempt, translator->max_retries);
         }
 
         cJSON_Delete(response_json);
@@ -442,7 +464,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         break;
     }
 
-    free(prompt);
+    free(instruction);
 
     if (!result && error && !error->message) {
         error->message = strdup("Translation failed after all retries");

@@ -3,7 +3,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -O2 -D_POSIX_C_SOURCE=200809L
 LDFLAGS = -pthread
-LIBS = -lcurl -lmicrohttpd -lcjson -luuid -lm
+LIBS = -lcurl -lmicrohttpd -lcjson -luuid -lm -lssl -lcrypto
 
 # Directories
 SRC_DIR = src
@@ -68,5 +68,6 @@ check-deps:
 	@pkg-config --exists libmicrohttpd && echo "✓ libmicrohttpd found" || echo "✗ libmicrohttpd NOT found"
 	@pkg-config --exists libcjson && echo "✓ libcjson found" || echo "✗ libcjson NOT found"
 	@ldconfig -p | grep -q libuuid && echo "✓ libuuid found" || echo "✗ libuuid NOT found"
+	@pkg-config --exists openssl && echo "✓ openssl found" || echo "✗ openssl NOT found"
 
 .PHONY: all directories clean rebuild install uninstall debug check-deps

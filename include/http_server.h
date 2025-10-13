@@ -2,8 +2,11 @@
 #define HTTP_SERVER_H
 
 #include <microhttpd.h>
+#include <stdbool.h>
+#include <pthread.h>
 #include "config_loader.h"
 #include "http_client.h"
+#include "trans_cache.h"
 
 /* Translation server structure */
 typedef struct {
@@ -11,6 +14,11 @@ typedef struct {
     OpenAITranslator *translator;
     struct MHD_Daemon *daemon;
     int max_workers;
+
+    /* Cache components */
+    TransCache *cache;
+    pthread_t cache_bg_thread;
+    volatile bool cache_bg_running;
 } TranslationServer;
 
 /* Initialize translation server */

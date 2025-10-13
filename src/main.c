@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include "config_loader.h"
 #include "http_server.h"
+#include "trans_cache.h"
 #include "utils.h"
 
 /* Global server instance for signal handler */
@@ -33,6 +34,33 @@ static void signal_handler(int signum) {
             break;
     }
 
+    /* Handle SIGHUP specially - save cache without shutdown */
+    if (signum == SIGHUP) {
+        fprintf(stderr, "\nReceived signal %s (%d), saving translation cache...\n",
+                signame, signum);
+
+        if (g_server && g_server->cache) {
+            if (trans_cache_save(g_server->cache) == 0) {
+                fprintf(stderr, "Translation cache saved successfully\n");
+
+                /* Print cache statistics */
+                size_t total, active, expired;
+                trans_cache_stats(g_server->cache, &total, &active, &expired,
+                                g_server->config->cache_threshold,
+                                g_server->config->cache_cleanup_days);
+                fprintf(stderr, "Cache stats: total=%zu, active=%zu, expired=%zu\n",
+                        total, active, expired);
+            } else {
+                fprintf(stderr, "Warning: Failed to save translation cache\n");
+            }
+        } else {
+            fprintf(stderr, "Warning: Cache not available\n");
+        }
+
+        return;  /* Don't shutdown on SIGHUP */
+    }
+
+    /* For SIGINT/SIGTERM - shutdown gracefully */
     fprintf(stderr, "\nReceived signal %s (%d), shutting down gracefully...\n",
             signame, signum);
 
@@ -85,7 +113,8 @@ static void print_usage(const char *program_name) {
     printf("Options:\n");
     printf("  -c, --config PATH       Path to configuration file (default: transbasket.conf)\n");
     printf("  -p, --prompt PATH       Path to prompt prefix file (default: PROMPT_PREFIX.txt)\n");
-    printf("  -w, --workers NUM       Number of worker threads (default: 10)\n");
+    printf("  -r, --role PATH         Path to system role file (default: ROLS.txt)\n");
+    printf("  -w, --workers NUM       Number of worker threads (default: 30)\n");
     printf("  -d, --daemon            Run as daemon in background\n");
     printf("  -h, --help              Show this help message\n\n");
     printf("Environment Variables:\n");
@@ -102,6 +131,7 @@ static void print_usage(const char *program_name) {
 int main(int argc, char *argv[]) {
     const char *config_path = NULL;
     const char *prompt_prefix_path = NULL;
+    const char *system_role_path = NULL;
     int max_workers = 0;
     bool run_as_daemon = false;
 
@@ -114,6 +144,8 @@ int main(int argc, char *argv[]) {
             config_path = argv[++i];
         } else if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--prompt") == 0) && i + 1 < argc) {
             prompt_prefix_path = argv[++i];
+        } else if ((strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--role") == 0) && i + 1 < argc) {
+            system_role_path = argv[++i];
         } else if ((strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--workers") == 0) && i + 1 < argc) {
             max_workers = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--daemon") == 0) {
@@ -139,7 +171,7 @@ int main(int argc, char *argv[]) {
 
     /* Default max_workers */
     if (max_workers == 0) {
-        max_workers = 10;
+        max_workers = 30;
     }
 
     /* Print startup banner before daemonizing */
@@ -177,7 +209,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Loading configuration...\n");
     }
 
-    Config *config = load_config(config_path, prompt_prefix_path);
+    Config *config = load_config(config_path, prompt_prefix_path, system_role_path);
     if (!config) {
         if (!run_as_daemon) {
             fprintf(stderr, "Error: Failed to load configuration\n");

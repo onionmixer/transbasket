@@ -232,7 +232,10 @@ int get_current_timestamp(char *timestamp_buf, size_t buf_size) {
     return 0;
 }
 
-/* Truncate text with suffix */
+/* Forward declaration for UTF-8 decoding helper */
+static int utf8_decode(const unsigned char *s, unsigned int *cp);
+
+/* Truncate text with suffix (UTF-8 aware) */
 int truncate_text(const char *text, char *output, size_t max_length, const char *suffix) {
     if (!text || !output || max_length == 0) {
         return -1;
@@ -257,9 +260,29 @@ int truncate_text(const char *text, char *output, size_t max_length, const char 
         return 0;
     }
 
-    size_t copy_len = max_length - suffix_len;
-    strncpy(output, text, copy_len);
-    strcpy(output + copy_len, suffix);
+    /* Calculate max bytes for text (leaving room for suffix) */
+    size_t max_text_bytes = max_length - suffix_len;
+
+    /* Find the last complete UTF-8 character within max_text_bytes */
+    size_t byte_pos = 0;
+    size_t last_complete_pos = 0;
+
+    while (byte_pos < text_len && byte_pos < max_text_bytes) {
+        unsigned int codepoint;
+        int char_len = utf8_decode((unsigned char *)&text[byte_pos], &codepoint);
+
+        /* Check if this character would exceed the limit */
+        if (byte_pos + char_len > max_text_bytes) {
+            break;
+        }
+
+        byte_pos += char_len;
+        last_complete_pos = byte_pos;
+    }
+
+    /* Copy only complete UTF-8 characters */
+    memcpy(output, text, last_complete_pos);
+    strcpy(output + last_complete_pos, suffix);
 
     return 0;
 }

@@ -133,7 +133,7 @@ Usage: transbasket [OPTIONS]
 Options:
   -c, --config PATH       Path to configuration file (default: ../transbasket.conf)
   -p, --prompt PATH       Path to prompt prefix file (default: ../PROMPT_PREFIX.txt)
-  -w, --workers NUM       Number of worker threads (default: 10)
+  -w, --workers NUM       Number of worker threads (default: 30)
   -h, --help              Show help message
 
 Environment Variables:

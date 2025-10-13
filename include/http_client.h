@@ -7,7 +7,6 @@
 /* OpenAI translator structure */
 typedef struct {
     Config *config;
-    char *prompt_template;
     int max_retries;
     int timeout;
 } OpenAITranslator;
@@ -32,6 +31,7 @@ char *openai_translate(
     const char *to_lang,
     const char *text,
     const char *request_uuid,
+    const char *timestamp,
     TranslationError *error
 );
 
