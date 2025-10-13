@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <ctype.h>
 #include <time.h>
@@ -145,6 +146,43 @@ const char *get_language_name(const char *lang_code) {
     for (int i = 0; LANGUAGE_NAMES[i].code != NULL; i++) {
         if (strcmp(lower_code, LANGUAGE_NAMES[i].code) == 0) {
             return LANGUAGE_NAMES[i].name;
+        }
+    }
+
+    return NULL;
+}
+
+/* Normalize language code or name to ISO 639-2 code */
+const char *normalize_language_code(const char *lang_input) {
+    if (!lang_input) {
+        return NULL;
+    }
+
+    size_t len = strlen(lang_input);
+
+    /* If it's a 3-letter code, validate and return if valid */
+    if (len == 3) {
+        if (validate_language_code(lang_input)) {
+            /* Return the canonical lowercase version from our list */
+            char lower_code[4];
+            for (int i = 0; i < 3; i++) {
+                lower_code[i] = tolower(lang_input[i]);
+            }
+            lower_code[3] = '\0';
+
+            for (int i = 0; ISO_639_2_CODES[i] != NULL; i++) {
+                if (strcmp(lower_code, ISO_639_2_CODES[i]) == 0) {
+                    return ISO_639_2_CODES[i];
+                }
+            }
+        }
+        return NULL;
+    }
+
+    /* Try to match as language name (case-insensitive) */
+    for (int i = 0; LANGUAGE_NAMES[i].code != NULL; i++) {
+        if (strcasecmp(lang_input, LANGUAGE_NAMES[i].name) == 0) {
+            return LANGUAGE_NAMES[i].code;
         }
     }
 

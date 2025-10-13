@@ -16,6 +16,9 @@ bool validate_timestamp(const char *timestamp_str);
 /* Get human-readable language name from ISO 639-2 code */
 const char *get_language_name(const char *lang_code);
 
+/* Normalize language code or name to ISO 639-2 code (accepts both "kor" and "Korean") */
+const char *normalize_language_code(const char *lang_input);
+
 /* Generate UUID v4 */
 int generate_uuid(char *uuid_buf, size_t buf_size);
 

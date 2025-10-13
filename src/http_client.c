@@ -178,9 +178,9 @@ static char *build_prompt(OpenAITranslator *translator, const char *from_lang,
         char *separator = strstr(prompt, " :: ");
         if (separator) {
             *separator = '\0';
-            char *new_prompt = malloc(strlen(prompt) + strlen(text) + 5);
+            char *new_prompt = malloc(strlen(prompt) + strlen(text) + 7);  /* +7 for " :: " + quotes + null */
             if (new_prompt) {
-                sprintf(new_prompt, "%s :: %s", prompt, text);
+                sprintf(new_prompt, "%s :: \"%s\"", prompt, text);
                 free(prompt);
                 prompt = new_prompt;
             }

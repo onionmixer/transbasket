@@ -78,14 +78,16 @@ TranslationRequest *parse_translation_request(const char *json_str) {
         return NULL;
     }
 
-    if (!validate_language_code(from->valuestring)) {
-        fprintf(stderr, "Error: Invalid 'from' language code: %s\n", from->valuestring);
+    /* Normalize language code/name to ISO 639-2 code */
+    const char *from_code = normalize_language_code(from->valuestring);
+    if (!from_code) {
+        fprintf(stderr, "Error: Invalid 'from' language code or name: %s\n", from->valuestring);
         free(req);
         cJSON_Delete(root);
         return NULL;
     }
 
-    strncpy(req->from_lang, from->valuestring, sizeof(req->from_lang) - 1);
+    strncpy(req->from_lang, from_code, sizeof(req->from_lang) - 1);
 
     /* Parse to language */
     cJSON *to = cJSON_GetObjectItem(root, "to");
@@ -96,14 +98,16 @@ TranslationRequest *parse_translation_request(const char *json_str) {
         return NULL;
     }
 
-    if (!validate_language_code(to->valuestring)) {
-        fprintf(stderr, "Error: Invalid 'to' language code: %s\n", to->valuestring);
+    /* Normalize language code/name to ISO 639-2 code */
+    const char *to_code = normalize_language_code(to->valuestring);
+    if (!to_code) {
+        fprintf(stderr, "Error: Invalid 'to' language code or name: %s\n", to->valuestring);
         free(req);
         cJSON_Delete(root);
         return NULL;
     }
 
-    strncpy(req->to_lang, to->valuestring, sizeof(req->to_lang) - 1);
+    strncpy(req->to_lang, to_code, sizeof(req->to_lang) - 1);
 
     /* Parse text */
     cJSON *text = cJSON_GetObjectItem(root, "text");
