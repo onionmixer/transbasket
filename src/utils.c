@@ -455,6 +455,115 @@ int unescape_string(const char *input, char *output, size_t output_size) {
     return 0;
 }
 
+/* Strip ANSI escape codes and control characters from text */
+int strip_ansi_codes(const char *input, char *output, size_t output_size) {
+    if (!input || !output || output_size == 0) {
+        return -1;
+    }
+
+    size_t in_len = strlen(input);
+    size_t out_pos = 0;
+    size_t in_pos = 0;
+
+    while (in_pos < in_len && out_pos < output_size - 1) {
+        unsigned char ch = (unsigned char)input[in_pos];
+
+        /* Handle ANSI escape sequences starting with ESC (0x1B) */
+        if (ch == 0x1B && in_pos + 1 < in_len) {
+            /* Check for CSI sequence: ESC[ ... letter */
+            if (input[in_pos + 1] == '[') {
+                in_pos += 2;  /* Skip ESC[ */
+
+                /* Skip parameter bytes (0-9, ;, :, etc.) and intermediate bytes */
+                while (in_pos < in_len) {
+                    unsigned char seq_ch = (unsigned char)input[in_pos];
+
+                    /* CSI sequence ends with a letter (0x40-0x7E) */
+                    if (seq_ch >= 0x40 && seq_ch <= 0x7E) {
+                        in_pos++;  /* Skip the final letter */
+                        break;
+                    }
+
+                    /* Parameter bytes: 0x30-0x3F (0-9, ;, <, =, >, ?) */
+                    /* Intermediate bytes: 0x20-0x2F (space, !, ", #, etc.) */
+                    if ((seq_ch >= 0x20 && seq_ch <= 0x3F)) {
+                        in_pos++;
+                        continue;
+                    }
+
+                    /* Invalid sequence, stop */
+                    break;
+                }
+                continue;
+            }
+
+            /* Other ESC sequences (2-byte): ESC + letter */
+            if (input[in_pos + 1] >= 0x40 && input[in_pos + 1] <= 0x5F) {
+                in_pos += 2;  /* Skip ESC and the letter */
+                continue;
+            }
+
+            /* Unknown ESC sequence, skip ESC and continue */
+            in_pos++;
+            continue;
+        }
+
+        /* Strip other control characters except \n (0x0A) and \r (0x0D) */
+        if (ch < 0x20) {
+            if (ch == '\n' || ch == '\r') {
+                /* Preserve newlines and carriage returns */
+                output[out_pos++] = ch;
+            }
+            /* Skip other control characters (\t, \b, etc.) */
+            in_pos++;
+            continue;
+        }
+
+        /* Strip DEL character (0x7F) */
+        if (ch == 0x7F) {
+            in_pos++;
+            continue;
+        }
+
+        /* Copy normal character */
+        output[out_pos++] = ch;
+        in_pos++;
+    }
+
+    output[out_pos] = '\0';
+    return 0;
+}
+
+/* Strip control characters (0x00-0x1F) from text, except CR and LF */
+int strip_control_characters(const char *input, char *output, size_t output_size) {
+    if (!input || !output || output_size == 0) {
+        return -1;
+    }
+
+    size_t in_len = strlen(input);
+    size_t out_pos = 0;
+    size_t in_pos = 0;
+
+    while (in_pos < in_len && out_pos < output_size - 1) {
+        unsigned char ch = (unsigned char)input[in_pos];
+
+        /* Filter control characters (0x00-0x1F) EXCEPT CR(0x0D), LF(0x0A) */
+        /* These control characters can corrupt UTF-8 multibyte sequences */
+        if (ch < 0x20 && ch != 0x0D && ch != 0x0A) {
+            /* Skip this control character */
+            in_pos++;
+            continue;
+        }
+
+        /* Copy normal character */
+        output[out_pos++] = ch;
+        in_pos++;
+    }
+
+    output[out_pos] = '\0';
+    return 0;
+}
+
 /* Daemonize the process */
 int daemonize(void) {
     pid_t pid, sid;

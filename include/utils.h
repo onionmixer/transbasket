@@ -34,6 +34,12 @@ int strip_emoji_and_shortcodes(const char *input, char *output, size_t output_si
 /* Unescape string (convert \\n to \n, \\t to \t, etc.) */
 int unescape_string(const char *input, char *output, size_t output_size);
 
+/* Strip ANSI escape codes and control characters from text */
+int strip_ansi_codes(const char *input, char *output, size_t output_size);
+
+/* Strip control characters (0x00-0x1F) from text, except CR and LF */
+int strip_control_characters(const char *input, char *output, size_t output_size);
+
 /* Daemonize the process */
 int daemonize(void);
 

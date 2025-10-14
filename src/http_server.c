@@ -176,6 +176,60 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
 
     request_uuid = strdup(req->uuid);
 
+    /* Strip ANSI escape codes and control characters from text */
+    size_t text_len = strlen(req->text);
+    char *cleaned_text = malloc(text_len + 1);
+    if (!cleaned_text) {
+        fprintf(stderr, "[%s] Memory allocation failed for ANSI stripping\n", request_uuid);
+        free(request_uuid);
+        free_translation_request(req);
+        char *error_json = create_error_response("INTERNAL_ERROR",
+                                                 "Memory allocation failed",
+                                                 request_uuid);
+        return send_json_response(connection, error_json, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
+    }
+
+    if (strip_ansi_codes(req->text, cleaned_text, text_len + 1) != 0) {
+        fprintf(stderr, "[%s] Failed to strip ANSI codes\n", request_uuid);
+        free(cleaned_text);
+        free(request_uuid);
+        free_translation_request(req);
+        char *error_json = create_error_response("INTERNAL_ERROR",
+                                                 "Text processing failed",
+                                                 request_uuid);
+        return send_json_response(connection, error_json, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
+    }
+
+    /* Strip control characters from text */
+    char *control_filtered_text = malloc(strlen(cleaned_text) + 1);
+    if (!control_filtered_text) {
+        fprintf(stderr, "[%s] Memory allocation failed for control character stripping\n", request_uuid);
+        free(cleaned_text);
+        free(request_uuid);
+        free_translation_request(req);
+        char *error_json = create_error_response("INTERNAL_ERROR",
+                                                 "Memory allocation failed",
+                                                 request_uuid);
+        return send_json_response(connection, error_json, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
+    }
+
+    if (strip_control_characters(cleaned_text, control_filtered_text, strlen(cleaned_text) + 1) != 0) {
+        fprintf(stderr, "[%s] Failed to strip control characters\n", request_uuid);
+        free(control_filtered_text);
+        free(cleaned_text);
+        free(request_uuid);
+        free_translation_request(req);
+        char *error_json = create_error_response("INTERNAL_ERROR",
+                                                 "Text processing failed",
+                                                 request_uuid);
+        return send_json_response(connection, error_json, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
+    }
+
+    /* Replace original text with fully cleaned text */
+    free(req->text);
+    free(cleaned_text);
+    req->text = control_filtered_text;
+
     char truncated_text[TRUNCATE_BUFFER_SIZE];
     truncate_text(req->text, truncated_text, TRUNCATE_DISPLAY_LENGTH, "...");
     fprintf(stderr, "[%s] Translation request received: %s -> %s, text: %s\n",
