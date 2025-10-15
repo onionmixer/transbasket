@@ -253,6 +253,8 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         cJSON_AddNumberToObject(root, "top_p", translator->config->top_p);
         cJSON_AddNumberToObject(root, "seed", translator->config->seed);
         cJSON_AddBoolToObject(root, "stream", translator->config->stream);
+        cJSON_AddNumberToObject(root, "frequency_penalty", translator->config->frequency_penalty);
+        cJSON_AddNumberToObject(root, "presence_penalty", translator->config->presence_penalty);
 
         cJSON *messages = cJSON_CreateArray();
 
@@ -270,7 +272,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
 
         /* Message 3: Language direction */
         char language_info[256];
-        snprintf(language_info, sizeof(language_info), ":: LANGUAGE FROM %s TO %s ::",
+        snprintf(language_info, sizeof(language_info), "Translate FROM %s TO %s",
                  get_language_name(from_lang), get_language_name(to_lang));
         cJSON *language_message = cJSON_CreateObject();
         cJSON_AddStringToObject(language_message, "role", "user");
@@ -279,10 +281,28 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
 
         /* Message 4: Actual text to translate */
         /* cJSON automatically escapes newlines (\n) and other special characters */
+        /* Wrap text in <source> tags */
+        size_t wrapped_text_len = strlen(text) + strlen("<source></source>") + 1;
+        char *wrapped_text = malloc(wrapped_text_len);
+        if (!wrapped_text) {
+            fprintf(stderr, "[%s] Failed to allocate memory for wrapped text\n", request_uuid);
+            cJSON_Delete(root);
+            free(instruction);
+            if (error) {
+                error->message = strdup("Memory allocation failed");
+                error->retryable = false;
+                error->status_code = 0;
+            }
+            return NULL;
+        }
+        snprintf(wrapped_text, wrapped_text_len, "<source>%s</source>", text);
+
         cJSON *text_message = cJSON_CreateObject();
         cJSON_AddStringToObject(text_message, "role", "user");
-        cJSON_AddStringToObject(text_message, "content", text);
+        cJSON_AddStringToObject(text_message, "content", wrapped_text);
         cJSON_AddItemToArray(messages, text_message);
+
+        free(wrapped_text);
 
         cJSON_AddItemToObject(root, "messages", messages);
 

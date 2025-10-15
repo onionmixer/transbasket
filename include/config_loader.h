@@ -18,6 +18,8 @@ typedef struct {
     double top_p;            /* Default: 1.0 */
     int seed;                /* Default: 42 */
     bool stream;             /* Default: false */
+    double frequency_penalty; /* Default: 0.0, range: -2.0 to 2.0 */
+    double presence_penalty;  /* Default: 0.0, range: -2.0 to 2.0 */
 
     /* Translation cache settings */
     char *cache_file;        /* Path to trans_dictionary.txt (default: ./trans_dictionary.txt) */

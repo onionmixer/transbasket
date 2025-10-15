@@ -277,6 +277,8 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->top_p = 1.0;
     config->seed = 42;
     config->stream = false;
+    config->frequency_penalty = 0.0;
+    config->presence_penalty = 0.0;
 
     /* Cache defaults */
     config->cache_file = strdup("./trans_dictionary.txt");
@@ -325,6 +327,16 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             config->seed = atoi(value);
         } else if (strcmp(key, "STREAM") == 0) {
             config->stream = (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
+        } else if (strcmp(key, "FREQUENCY_PENALTY") == 0) {
+            config->frequency_penalty = atof(value);
+            /* Clamp to valid range: -2.0 to 2.0 */
+            if (config->frequency_penalty < -2.0) config->frequency_penalty = -2.0;
+            if (config->frequency_penalty > 2.0) config->frequency_penalty = 2.0;
+        } else if (strcmp(key, "PRESENCE_PENALTY") == 0) {
+            config->presence_penalty = atof(value);
+            /* Clamp to valid range: -2.0 to 2.0 */
+            if (config->presence_penalty < -2.0) config->presence_penalty = -2.0;
+            if (config->presence_penalty > 2.0) config->presence_penalty = 2.0;
         } else if (strcmp(key, "TRANS_CACHE_FILE") == 0) {
             free(config->cache_file);
             config->cache_file = strdup(value);
