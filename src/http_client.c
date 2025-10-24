@@ -89,7 +89,7 @@ static void save_debug_curl(const char *timestamp, const char *uuid,
     fprintf(fp, "  -H 'Content-Type: application/json; charset=utf-8' \\");
     fprintf(fp, "  -H 'Authorization: Bearer %s' \\\n", api_key);
     fprintf(fp, "  --fail-with-body -sS \\");
-    fprintf(fp, "  --data-binary @- <<'JSON'");
+    fprintf(fp, "  --data-binary @- <<'JSON'\n");
     fprintf(fp, "%s\n", json_request);
     fprintf(fp, "JSON");
 

@@ -10,12 +10,18 @@ SRC_DIR = src
 INC_DIR = include
 OBJ_DIR = obj
 
-# Target executable (output to root directory)
+# Target executables (output to root directory)
 TARGET = transbasket
+CACHE_TOOL = cache_tool
 
 # Source files
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+# Main server sources (exclude cache_tool.c)
+SERVER_SRCS = $(filter-out $(SRC_DIR)/cache_tool.c, $(wildcard $(SRC_DIR)/*.c))
+SERVER_OBJS = $(SERVER_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+
+# Cache tool sources (needs trans_cache.c and utils.c)
+CACHE_TOOL_SRCS = $(SRC_DIR)/cache_tool.c $(SRC_DIR)/trans_cache.c $(SRC_DIR)/utils.c
+CACHE_TOOL_OBJS = $(CACHE_TOOL_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Header files
 HEADERS = $(wildcard $(INC_DIR)/*.h)
@@ -30,18 +36,26 @@ all: directories $(TARGET)
 directories:
 	@mkdir -p $(OBJ_DIR)
 
-# Link object files to create executable
-$(TARGET): $(OBJS)
+# Link object files to create main executable
+$(TARGET): $(SERVER_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 	@echo "Build complete: $(TARGET)"
+
+# Link object files to create cache tool
+$(CACHE_TOOL): $(CACHE_TOOL_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^ -lcjson -lssl -lcrypto -luuid
+	@echo "Build complete: $(CACHE_TOOL)"
 
 # Compile source files to object files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(HEADERS)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+# Build cache tool only
+cache-tool: directories $(CACHE_TOOL)
+
 # Clean build artifacts
 clean:
-	rm -rf $(OBJ_DIR) $(TARGET) core core.*
+	rm -rf $(OBJ_DIR) $(TARGET) $(CACHE_TOOL) core core.*
 	@echo "Clean complete"
 
 # Rebuild everything
@@ -73,4 +87,4 @@ check-deps:
 	@ldconfig -p | grep -q libuuid && echo "✓ libuuid found" || echo "✗ libuuid NOT found"
 	@pkg-config --exists openssl && echo "✓ openssl found" || echo "✗ openssl NOT found"
 
-.PHONY: all directories clean rebuild install uninstall debug check-deps
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps
