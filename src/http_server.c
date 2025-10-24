@@ -72,10 +72,10 @@ static void *cache_background_thread(void *arg) {
         if (cleanup_check_interval < 3600) {
             cleanup_check_interval = 3600;  /* Minimum 1 hour */
         }
-        fprintf(stderr, "Cache background thread started (save every %d seconds, cleanup check every %d seconds, cleanup after %d days)\n",
+        LOG_DEBUG("Cache background thread started (save every %d seconds, cleanup check every %d seconds, cleanup after %d days)",
                 save_interval, cleanup_check_interval, cleanup_days);
     } else {
-        fprintf(stderr, "Cache background thread started (save every %d seconds, cleanup disabled)\n",
+        LOG_DEBUG("Cache background thread started (save every %d seconds, cleanup disabled)",
                 save_interval);
     }
 
@@ -89,7 +89,7 @@ static void *cache_background_thread(void *arg) {
 
         /* Periodic save */
         if (trans_cache_save(server->cache) == 0) {
-            // fprintf(stderr, "Cache periodically saved to disk (%d entries)\n", (int)server->cache->size);
+            LOG_DEBUG("Cache periodically saved to disk (%d entries)", (int)server->cache->size);
         }
 
         /* Cleanup check (if enabled) */
@@ -99,12 +99,12 @@ static void *cache_background_thread(void *arg) {
             int removed = trans_cache_cleanup(server->cache, cleanup_days);
 
             if (removed > 0) {
-                fprintf(stderr, "Cache cleanup: removed %d expired entries\n", removed);
+                LOG_INFO("Cache cleanup: removed %d expired entries", removed);
             }
         }
     }
 
-    fprintf(stderr, "Cache background thread stopped\n");
+    LOG_DEBUG("Cache background thread stopped");
     return NULL;
 }
 
@@ -180,7 +180,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     size_t text_len = strlen(req->text);
     char *cleaned_text = malloc(text_len + 1);
     if (!cleaned_text) {
-        fprintf(stderr, "[%s] Memory allocation failed for ANSI stripping\n", request_uuid);
+        LOG_INFO("[%s] Memory allocation failed for ANSI stripping", request_uuid);
         free(request_uuid);
         free_translation_request(req);
         char *error_json = create_error_response("INTERNAL_ERROR",
@@ -190,7 +190,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     }
 
     if (strip_ansi_codes(req->text, cleaned_text, text_len + 1) != 0) {
-        fprintf(stderr, "[%s] Failed to strip ANSI codes\n", request_uuid);
+        LOG_INFO("[%s] Failed to strip ANSI codes", request_uuid);
         free(cleaned_text);
         free(request_uuid);
         free_translation_request(req);
@@ -203,7 +203,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     /* Strip control characters from text */
     char *control_filtered_text = malloc(strlen(cleaned_text) + 1);
     if (!control_filtered_text) {
-        fprintf(stderr, "[%s] Memory allocation failed for control character stripping\n", request_uuid);
+        LOG_INFO("[%s] Memory allocation failed for control character stripping", request_uuid);
         free(cleaned_text);
         free(request_uuid);
         free_translation_request(req);
@@ -214,7 +214,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     }
 
     if (strip_control_characters(cleaned_text, control_filtered_text, strlen(cleaned_text) + 1) != 0) {
-        fprintf(stderr, "[%s] Failed to strip control characters\n", request_uuid);
+        LOG_INFO("[%s] Failed to strip control characters", request_uuid);
         free(control_filtered_text);
         free(cleaned_text);
         free(request_uuid);
@@ -232,7 +232,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
 
     char truncated_text[TRUNCATE_BUFFER_SIZE];
     truncate_text(req->text, truncated_text, TRUNCATE_DISPLAY_LENGTH, "...");
-    fprintf(stderr, "[%s] Translation request received: %s -> %s, text: %s\n",
+    LOG_INFO("[%s] Translation request received: %s -> %s, text: %s",
             request_uuid, req->from_lang, req->to_lang, truncated_text);
 
     /* Check cache first if enabled */
@@ -242,7 +242,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
 
         if (cached && cached->count >= server->config->cache_threshold) {
             /* Cache hit - use cached translation */
-            fprintf(stderr, "[%s] Cache hit (count: %d >= threshold: %d)\n",
+            LOG_DEBUG("[%s] Cache hit (count: %d >= threshold: %d)",
                     request_uuid, cached->count, server->config->cache_threshold);
 
             /* Increment count */
@@ -253,7 +253,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
 
             char truncated_result[TRUNCATE_BUFFER_SIZE];
             truncate_text(cached->translated_text, truncated_result, TRUNCATE_DISPLAY_LENGTH, "...");
-            fprintf(stderr, "[%s] Translation from cache, result: %s\n", request_uuid, truncated_result);
+            LOG_INFO("[%s] Translation from cache, result: %s", request_uuid, truncated_result);
 
             free(request_uuid);
             free_translation_request(req);
@@ -262,7 +262,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
         }
 
         if (cached) {
-            fprintf(stderr, "[%s] Cache found but count insufficient (%d < %d), requesting API\n",
+            LOG_DEBUG("[%s] Cache found but count insufficient (%d < %d), requesting API",
                     request_uuid, cached->count, server->config->cache_threshold);
         }
     }
@@ -280,7 +280,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     );
 
     if (!translated_text) {
-        fprintf(stderr, "[%s] Translation error: %s\n", request_uuid,
+        LOG_INFO("[%s] Translation error: %s", request_uuid,
                 trans_error.message ? trans_error.message : "Unknown error");
 
         int status_code = trans_error.retryable ? MHD_HTTP_SERVICE_UNAVAILABLE : MHD_HTTP_BAD_GATEWAY;
@@ -303,19 +303,19 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
             if (strcmp(cached->translated_text, translated_text) == 0) {
                 /* Same translation - increment count */
                 trans_cache_update_count(server->cache, cached);
-                fprintf(stderr, "[%s] Cache updated (same translation, count: %d)\n",
+                LOG_DEBUG("[%s] Cache updated (same translation, count: %d)",
                         request_uuid, cached->count + 1);
             } else {
                 /* Different translation - update translation and reset count */
                 trans_cache_update_translation(server->cache, cached, translated_text);
-                fprintf(stderr, "[%s] Cache updated (different translation, count reset to 1)\n",
+                LOG_DEBUG("[%s] Cache updated (different translation, count reset to 1)",
                         request_uuid);
             }
         } else {
             /* New cache entry */
             if (trans_cache_add(server->cache, req->from_lang, req->to_lang,
                                req->text, translated_text) == 0) {
-                fprintf(stderr, "[%s] Added to cache (count: 1)\n", request_uuid);
+                LOG_DEBUG("[%s] Added to cache (count: 1)", request_uuid);
             }
         }
     }
@@ -325,7 +325,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
 
     char truncated_result[TRUNCATE_BUFFER_SIZE];
     truncate_text(translated_text, truncated_result, TRUNCATE_DISPLAY_LENGTH, "...");
-    fprintf(stderr, "[%s] Translation completed, result: %s\n", request_uuid, truncated_result);
+    LOG_INFO("[%s] Translation completed, result: %s", request_uuid, truncated_result);
 
     free_translated_text(translated_text);
     free(request_uuid);
@@ -383,13 +383,13 @@ static void request_completed(void *cls, struct MHD_Connection *connection,
 /* Initialize translation server */
 TranslationServer *translation_server_init(Config *config, int max_workers) {
     if (!config) {
-        fprintf(stderr, "Error: NULL config\n");
+        LOG_INFO("Error: NULL config");
         return NULL;
     }
 
     TranslationServer *server = calloc(1, sizeof(TranslationServer));
     if (!server) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_INFO("Error: Memory allocation failed");
         return NULL;
     }
 
@@ -399,7 +399,7 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
     /* Initialize translator */
     server->translator = openai_translator_init(config, 3, 60);
     if (!server->translator) {
-        fprintf(stderr, "Error: Failed to initialize translator\n");
+        LOG_INFO("Error: Failed to initialize translator");
         free(server);
         return NULL;
     }
@@ -411,25 +411,25 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
     if (config->cache_file) {
         server->cache = trans_cache_init(config->cache_file);
         if (!server->cache) {
-            fprintf(stderr, "Warning: Failed to initialize cache, continuing without cache\n");
+            LOG_INFO("Warning: Failed to initialize cache, continuing without cache");
         } else {
-            fprintf(stderr, "Translation cache initialized: %s (threshold: %d)\n",
+            LOG_INFO("Translation cache initialized: %s (threshold: %d)",
                     config->cache_file, config->cache_threshold);
 
             /* Always start background thread for periodic cache saving */
             server->cache_bg_running = true;
             if (pthread_create(&server->cache_bg_thread, NULL,
                              cache_background_thread, server) != 0) {
-                fprintf(stderr, "Warning: Failed to start cache background thread\n");
+                LOG_INFO("Warning: Failed to start cache background thread");
                 server->cache_bg_running = false;
             } else {
-                fprintf(stderr, "Cache background thread started (cleanup %s)\n",
+                LOG_DEBUG("Cache background thread started (cleanup %s)",
                         config->cache_cleanup_enabled ? "enabled" : "disabled");
             }
         }
     }
 
-    fprintf(stderr, "Translation server initialized with %d workers\n", server->max_workers);
+    LOG_INFO("Translation server initialized with %d workers", server->max_workers);
 
     return server;
 }
@@ -437,11 +437,11 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
 /* Start translation server */
 int translation_server_start(TranslationServer *server) {
     if (!server) {
-        fprintf(stderr, "Error: NULL server\n");
+        LOG_INFO("Error: NULL server");
         return -1;
     }
 
-    fprintf(stderr, "Starting HTTP server on %s:%d...\n",
+    LOG_INFO("Starting HTTP server on %s:%d...",
             server->config->listen, server->config->port);
 
     server->daemon = MHD_start_daemon(
@@ -455,11 +455,11 @@ int translation_server_start(TranslationServer *server) {
     );
 
     if (!server->daemon) {
-        fprintf(stderr, "Error: Failed to start HTTP server\n");
+        LOG_INFO("Error: Failed to start HTTP server");
         return -1;
     }
 
-    fprintf(stderr, "HTTP server started successfully on %s:%d\n",
+    LOG_INFO("HTTP server started successfully on %s:%d",
             server->config->listen, server->config->port);
 
     return 0;
@@ -471,14 +471,14 @@ void translation_server_stop(TranslationServer *server) {
         return;
     }
 
-    fprintf(stderr, "Stopping HTTP server...\n");
+    LOG_INFO("Stopping HTTP server...");
 
     if (server->daemon) {
         MHD_stop_daemon(server->daemon);
         server->daemon = NULL;
     }
 
-    fprintf(stderr, "HTTP server stopped\n");
+    LOG_INFO("HTTP server stopped");
 }
 
 /* Free translation server */
@@ -491,18 +491,18 @@ void translation_server_free(TranslationServer *server) {
 
     /* Stop cache background thread if running */
     if (server->cache_bg_running) {
-        fprintf(stderr, "Stopping cache background thread...\n");
+        LOG_DEBUG("Stopping cache background thread...");
         server->cache_bg_running = false;
         pthread_join(server->cache_bg_thread, NULL);
-        fprintf(stderr, "Cache background thread stopped\n");
+        LOG_DEBUG("Cache background thread stopped");
     }
 
     /* Save and free cache */
     if (server->cache) {
-        fprintf(stderr, "Saving translation cache...\n");
+        LOG_INFO("Saving translation cache...");
         trans_cache_save(server->cache);
         trans_cache_free(server->cache);
-        fprintf(stderr, "Translation cache saved and freed\n");
+        LOG_INFO("Translation cache saved and freed");
     }
 
     if (server->translator) {

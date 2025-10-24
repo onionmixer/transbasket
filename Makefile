@@ -41,7 +41,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(HEADERS)
 
 # Clean build artifacts
 clean:
-	rm -rf $(OBJ_DIR) $(TARGET)
+	rm -rf $(OBJ_DIR) $(TARGET) core core.*
 	@echo "Clean complete"
 
 # Rebuild everything
@@ -57,9 +57,12 @@ uninstall:
 	rm -f /usr/local/bin/transbasket
 	@echo "Uninstalled"
 
-# Debug build
-debug: CFLAGS += -g -DDEBUG -O0
-debug: clean all
+# Debug build with DEBUG macro and core dump support
+debug: CFLAGS = -Wall -Wextra -std=c11 -g3 -O0 -DDEBUG -D_POSIX_C_SOURCE=200809L
+debug: LDFLAGS += -rdynamic
+debug: clean directories $(TARGET)
+	@echo "Debug build complete: $(TARGET) (with -g3 -O0 -DDEBUG -rdynamic)"
+	@echo "Core dumps enabled. To enable system-wide: ulimit -c unlimited"
 
 # Check library dependencies
 check-deps:

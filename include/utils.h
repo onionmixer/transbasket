@@ -4,6 +4,21 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Logging macros */
+#ifdef DEBUG
+    #define LOG_DEBUG(...) log_message("DEBUG", __VA_ARGS__)
+#else
+    #define LOG_DEBUG(...) do {} while(0)
+#endif
+
+#define LOG_INFO(...) log_message("INFO", __VA_ARGS__)
+
+/* Log message with timestamp and level */
+void log_message(const char *level, const char *format, ...);
+
+/* Get current timestamp for logging */
+void get_log_timestamp(char *buffer, size_t size);
+
 /* ISO 639-2 language code validation */
 bool validate_language_code(const char *lang_code);
 

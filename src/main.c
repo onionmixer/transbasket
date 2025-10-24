@@ -36,32 +36,32 @@ static void signal_handler(int signum) {
 
     /* Handle SIGHUP specially - save cache without shutdown */
     if (signum == SIGHUP) {
-        fprintf(stderr, "\nReceived signal %s (%d), saving translation cache...\n",
+        LOG_INFO("Received signal %s (%d), saving translation cache...",
                 signame, signum);
 
         if (g_server && g_server->cache) {
             if (trans_cache_save(g_server->cache) == 0) {
-                fprintf(stderr, "Translation cache saved successfully\n");
+                LOG_INFO("Translation cache saved successfully");
 
                 /* Print cache statistics */
                 size_t total, active, expired;
                 trans_cache_stats(g_server->cache, &total, &active, &expired,
                                 g_server->config->cache_threshold,
                                 g_server->config->cache_cleanup_days);
-                fprintf(stderr, "Cache stats: total=%zu, active=%zu, expired=%zu\n",
+                LOG_INFO("Cache stats: total=%zu, active=%zu, expired=%zu",
                         total, active, expired);
             } else {
-                fprintf(stderr, "Warning: Failed to save translation cache\n");
+                LOG_INFO("Warning: Failed to save translation cache");
             }
         } else {
-            fprintf(stderr, "Warning: Cache not available\n");
+            LOG_INFO("Warning: Cache not available");
         }
 
         return;  /* Don't shutdown on SIGHUP */
     }
 
     /* For SIGINT/SIGTERM - shutdown gracefully */
-    fprintf(stderr, "\nReceived signal %s (%d), shutting down gracefully...\n",
+    LOG_INFO("Received signal %s (%d), shutting down gracefully...",
             signame, signum);
 
     g_shutdown = true;
@@ -80,17 +80,17 @@ static int setup_signal_handlers(void) {
     sa.sa_flags = 0;
 
     if (sigaction(SIGINT, &sa, NULL) != 0) {
-        fprintf(stderr, "Error: Failed to setup SIGINT handler\n");
+        LOG_INFO("Error: Failed to setup SIGINT handler");
         return -1;
     }
 
     if (sigaction(SIGTERM, &sa, NULL) != 0) {
-        fprintf(stderr, "Error: Failed to setup SIGTERM handler\n");
+        LOG_INFO("Error: Failed to setup SIGTERM handler");
         return -1;
     }
 
     if (sigaction(SIGHUP, &sa, NULL) != 0) {
-        fprintf(stderr, "Error: Failed to setup SIGHUP handler\n");
+        LOG_INFO("Error: Failed to setup SIGHUP handler");
         return -1;
     }
 
@@ -151,7 +151,8 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--daemon") == 0) {
             run_as_daemon = true;
         } else {
-            fprintf(stderr, "Error: Unknown option: %s\n\n", argv[i]);
+            LOG_INFO("Error: Unknown option: %s", argv[i]);
+            printf("\n");
             print_usage(argv[0]);
             return 1;
         }
@@ -176,17 +177,17 @@ int main(int argc, char *argv[]) {
 
     /* Print startup banner before daemonizing */
     if (!run_as_daemon) {
-        fprintf(stderr, "===========================================\n");
-        fprintf(stderr, "  Transbasket Translation Server (C)\n");
-        fprintf(stderr, "  Version: 1.0.0\n");
-        fprintf(stderr, "===========================================\n\n");
+        printf("===========================================\n");
+        printf("  Transbasket Translation Server (C)\n");
+        printf("  Version: 1.0.0\n");
+        printf("===========================================\n\n");
     }
 
     /* Daemonize if requested */
     if (run_as_daemon) {
-        fprintf(stderr, "Starting transbasket in daemon mode...\n");
+        LOG_INFO("Starting transbasket in daemon mode...");
         if (daemonize() != 0) {
-            fprintf(stderr, "Error: Failed to daemonize process\n");
+            LOG_INFO("Error: Failed to daemonize process");
             return 1;
         }
         /* After daemonizing, we can't use stderr anymore */
@@ -195,45 +196,46 @@ int main(int argc, char *argv[]) {
     /* Setup signal handlers */
     if (setup_signal_handlers() != 0) {
         if (!run_as_daemon) {
-            fprintf(stderr, "Error: Failed to setup signal handlers\n");
+            LOG_INFO("Error: Failed to setup signal handlers");
         }
         return 1;
     }
 
     if (!run_as_daemon) {
-        fprintf(stderr, "Signal handlers initialized\n");
+        LOG_INFO("Signal handlers initialized");
     }
 
     /* Load configuration */
     if (!run_as_daemon) {
-        fprintf(stderr, "Loading configuration...\n");
+        LOG_INFO("Loading configuration...");
     }
 
     Config *config = load_config(config_path, prompt_prefix_path, system_role_path);
     if (!config) {
         if (!run_as_daemon) {
-            fprintf(stderr, "Error: Failed to load configuration\n");
+            LOG_INFO("Error: Failed to load configuration");
         }
         return 1;
     }
 
     if (!run_as_daemon) {
-        fprintf(stderr, "Configuration loaded successfully:\n");
-        fprintf(stderr, "  Base URL: %s\n", config->openai_base_url);
-        fprintf(stderr, "  Model: %s\n", config->openai_model);
-        fprintf(stderr, "  Listen: %s:%d\n", config->listen, config->port);
-        fprintf(stderr, "  Workers: %d\n\n", max_workers);
+        LOG_INFO("Configuration loaded successfully:");
+        LOG_INFO("  Base URL: %s", config->openai_base_url);
+        LOG_INFO("  Model: %s", config->openai_model);
+        LOG_INFO("  Listen: %s:%d", config->listen, config->port);
+        LOG_INFO("  Workers: %d", max_workers);
+        printf("\n");
     }
 
     /* Initialize server */
     if (!run_as_daemon) {
-        fprintf(stderr, "Initializing translation server...\n");
+        LOG_INFO("Initializing translation server...");
     }
 
     g_server = translation_server_init(config, max_workers);
     if (!g_server) {
         if (!run_as_daemon) {
-            fprintf(stderr, "Error: Failed to initialize server\n");
+            LOG_INFO("Error: Failed to initialize server");
         }
         free_config(config);
         return 1;
@@ -242,7 +244,7 @@ int main(int argc, char *argv[]) {
     /* Start server */
     if (translation_server_start(g_server) != 0) {
         if (!run_as_daemon) {
-            fprintf(stderr, "Error: Failed to start server\n");
+            LOG_INFO("Error: Failed to start server");
         }
         translation_server_free(g_server);
         free_config(config);
@@ -250,10 +252,10 @@ int main(int argc, char *argv[]) {
     }
 
     if (!run_as_daemon) {
-        fprintf(stderr, "\n===========================================\n");
-        fprintf(stderr, "  Server is running\n");
-        fprintf(stderr, "  Press Ctrl+C to stop\n");
-        fprintf(stderr, "===========================================\n\n");
+        printf("\n===========================================\n");
+        printf("  Server is running\n");
+        printf("  Press Ctrl+C to stop\n");
+        printf("===========================================\n\n");
     }
 
     /* Main loop - wait for shutdown signal */
@@ -263,7 +265,7 @@ int main(int argc, char *argv[]) {
 
     /* Cleanup */
     if (!run_as_daemon) {
-        fprintf(stderr, "\nShutting down server...\n");
+        LOG_INFO("Shutting down server...");
     }
 
     translation_server_free(g_server);
@@ -272,7 +274,7 @@ int main(int argc, char *argv[]) {
     free_config(config);
 
     if (!run_as_daemon) {
-        fprintf(stderr, "Server shutdown complete\n");
+        LOG_INFO("Server shutdown complete");
     }
 
     return 0;

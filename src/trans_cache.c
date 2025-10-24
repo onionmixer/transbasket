@@ -10,6 +10,7 @@
 #include <openssl/sha.h>
 #include <cjson/cJSON.h>
 #include "trans_cache.h"
+#include "utils.h"
 
 #define INITIAL_CAPACITY 100
 #define GROWTH_FACTOR 2
@@ -42,7 +43,7 @@ static int load_cache_from_file(TransCache *cache, const char *file_path) {
     FILE *fp = fopen(file_path, "r");
     if (!fp) {
         /* File doesn't exist yet - this is OK */
-        fprintf(stderr, "Cache file not found, will create new: %s\n", file_path);
+        LOG_DEBUG( "Cache file not found, will create new: %s\n", file_path);
         return 0;
     }
 
@@ -55,7 +56,7 @@ static int load_cache_from_file(TransCache *cache, const char *file_path) {
         /* Parse JSON line */
         cJSON *json = cJSON_Parse(line);
         if (!json) {
-            fprintf(stderr, "Warning: Failed to parse cache line, skipping\n");
+            LOG_DEBUG( "Warning: Failed to parse cache line, skipping");
             continue;
         }
 
@@ -76,7 +77,7 @@ static int load_cache_from_file(TransCache *cache, const char *file_path) {
             !cJSON_IsString(source_json) || !cJSON_IsString(target_json) ||
             !cJSON_IsNumber(count_json) || !cJSON_IsNumber(last_used_json) ||
             !cJSON_IsNumber(created_at_json)) {
-            fprintf(stderr, "Warning: Invalid cache entry format, skipping\n");
+            LOG_DEBUG( "Warning: Invalid cache entry format, skipping");
             cJSON_Delete(json);
             continue;
         }
@@ -84,7 +85,7 @@ static int load_cache_from_file(TransCache *cache, const char *file_path) {
         /* Allocate cache entry */
         CacheEntry *entry = calloc(1, sizeof(CacheEntry));
         if (!entry) {
-            fprintf(stderr, "Error: Memory allocation failed\n");
+            LOG_DEBUG( "Error: Memory allocation failed");
             cJSON_Delete(json);
             break;
         }
@@ -101,7 +102,7 @@ static int load_cache_from_file(TransCache *cache, const char *file_path) {
         entry->created_at = (time_t)created_at_json->valuedouble;
 
         if (!entry->source_text || !entry->translated_text) {
-            fprintf(stderr, "Error: Memory allocation failed\n");
+            LOG_DEBUG( "Error: Memory allocation failed");
             free(entry->source_text);
             free(entry->translated_text);
             free(entry);
@@ -115,7 +116,7 @@ static int load_cache_from_file(TransCache *cache, const char *file_path) {
             CacheEntry **new_entries = realloc(cache->entries,
                                               new_capacity * sizeof(CacheEntry *));
             if (!new_entries) {
-                fprintf(stderr, "Error: Memory reallocation failed\n");
+                LOG_DEBUG( "Error: Memory reallocation failed");
                 free(entry->source_text);
                 free(entry->translated_text);
                 free(entry);
@@ -141,27 +142,27 @@ static int load_cache_from_file(TransCache *cache, const char *file_path) {
     free(line);
     fclose(fp);
 
-    fprintf(stderr, "Loaded %d cache entries from %s\n", loaded_count, file_path);
+    LOG_INFO( "Loaded %d cache entries from %s\n", loaded_count, file_path);
     return loaded_count;
 }
 
 /* Initialize translation cache */
 TransCache *trans_cache_init(const char *file_path) {
     if (!file_path) {
-        fprintf(stderr, "Error: NULL file path\n");
+        LOG_DEBUG( "Error: NULL file path");
         return NULL;
     }
 
     TransCache *cache = calloc(1, sizeof(TransCache));
     if (!cache) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_DEBUG( "Error: Memory allocation failed");
         return NULL;
     }
 
     /* Allocate initial capacity */
     cache->entries = malloc(INITIAL_CAPACITY * sizeof(CacheEntry *));
     if (!cache->entries) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_DEBUG( "Error: Memory allocation failed");
         free(cache);
         return NULL;
     }
@@ -172,7 +173,7 @@ TransCache *trans_cache_init(const char *file_path) {
     cache->next_id = 1;
 
     if (!cache->file_path) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_DEBUG( "Error: Memory allocation failed");
         free(cache->entries);
         free(cache);
         return NULL;
@@ -180,7 +181,7 @@ TransCache *trans_cache_init(const char *file_path) {
 
     /* Initialize read-write lock */
     if (pthread_rwlock_init(&cache->lock, NULL) != 0) {
-        fprintf(stderr, "Error: Failed to initialize rwlock\n");
+        LOG_DEBUG( "Error: Failed to initialize rwlock");
         free(cache->file_path);
         free(cache->entries);
         free(cache);
@@ -242,7 +243,7 @@ int trans_cache_add(TransCache *cache,
     /* Allocate new entry */
     CacheEntry *entry = calloc(1, sizeof(CacheEntry));
     if (!entry) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_DEBUG( "Error: Memory allocation failed");
         return -1;
     }
 
@@ -260,7 +261,7 @@ int trans_cache_add(TransCache *cache,
     entry->last_used = time(NULL);
 
     if (!entry->source_text || !entry->translated_text) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_DEBUG( "Error: Memory allocation failed");
         free(entry->source_text);
         free(entry->translated_text);
         free(entry);
@@ -275,7 +276,7 @@ int trans_cache_add(TransCache *cache,
         CacheEntry **new_entries = realloc(cache->entries,
                                           new_capacity * sizeof(CacheEntry *));
         if (!new_entries) {
-            fprintf(stderr, "Error: Memory reallocation failed\n");
+            LOG_DEBUG( "Error: Memory reallocation failed");
             pthread_rwlock_unlock(&cache->lock);
             free(entry->source_text);
             free(entry->translated_text);
@@ -324,7 +325,7 @@ int trans_cache_update_translation(TransCache *cache,
     /* Set new translation */
     entry->translated_text = strdup(new_translation);
     if (!entry->translated_text) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_DEBUG( "Error: Memory allocation failed");
         pthread_rwlock_unlock(&cache->lock);
         return -1;
     }
@@ -346,7 +347,7 @@ int trans_cache_save(TransCache *cache) {
 
     FILE *fp = fopen(cache->file_path, "w");
     if (!fp) {
-        fprintf(stderr, "Error: Failed to open cache file for writing: %s\n",
+        LOG_DEBUG( "Error: Failed to open cache file for writing: %s\n",
                 cache->file_path);
         return -1;
     }
@@ -359,7 +360,7 @@ int trans_cache_save(TransCache *cache) {
         /* Create JSON object */
         cJSON *json = cJSON_CreateObject();
         if (!json) {
-            fprintf(stderr, "Error: Failed to create JSON object\n");
+            LOG_DEBUG( "Error: Failed to create JSON object");
             continue;
         }
 

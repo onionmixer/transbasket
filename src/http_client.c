@@ -35,7 +35,7 @@ static size_t transbasket_curl_write_callback(void *contents, size_t size, size_
 
     char *ptr = realloc(response->data, response->size + realsize + 1);
     if (!ptr) {
-        fprintf(stderr, "Error: Memory allocation failed in curl callback\n");
+        LOG_DEBUG( "Error: Memory allocation failed in curl callback");
         return 0;
     }
 
@@ -60,7 +60,7 @@ static void save_debug_curl(const char *timestamp, const char *uuid,
     struct stat st = {0};
     if (stat(trace_dir, &st) == -1) {
         if (mkdir(trace_dir, 0755) == -1) {
-            fprintf(stderr, "Warning: Failed to create trace directory: %s\n", trace_dir);
+            LOG_DEBUG( "Warning: Failed to create trace directory: %s\n", trace_dir);
             return;
         }
     }
@@ -80,21 +80,21 @@ static void save_debug_curl(const char *timestamp, const char *uuid,
 
     FILE *fp = fopen(filepath, "w");
     if (!fp) {
-        fprintf(stderr, "Warning: Failed to create debug file: %s\n", filepath);
+        LOG_DEBUG( "Warning: Failed to create debug file: %s\n", filepath);
         return;
     }
 
     /* Write curl command using heredoc for proper JSON formatting */
     fprintf(fp, "curl -X POST '%s' \\\n", url);
-    fprintf(fp, "  -H 'Content-Type: application/json; charset=utf-8' \\\n");
+    fprintf(fp, "  -H 'Content-Type: application/json; charset=utf-8' \\");
     fprintf(fp, "  -H 'Authorization: Bearer %s' \\\n", api_key);
-    fprintf(fp, "  --fail-with-body -sS \\\n");
-    fprintf(fp, "  --data-binary @- <<'JSON'\n");
+    fprintf(fp, "  --fail-with-body -sS \\");
+    fprintf(fp, "  --data-binary @- <<'JSON'");
     fprintf(fp, "%s\n", json_request);
-    fprintf(fp, "JSON\n");
+    fprintf(fp, "JSON");
 
     fclose(fp);
-    fprintf(stderr, "[%s] Debug curl saved to: %s\n", uuid, filepath);
+    LOG_INFO( "[%s] Debug curl saved to: %s\n", uuid, filepath);
 }
 
 /* Replace all occurrences of a substring */
@@ -172,13 +172,13 @@ static char *build_instruction_message(OpenAITranslator *translator, const char 
 /* Initialize OpenAI translator */
 OpenAITranslator *openai_translator_init(Config *config, int max_retries, int timeout) {
     if (!config) {
-        fprintf(stderr, "Error: NULL config\n");
+        LOG_DEBUG( "Error: NULL config");
         return NULL;
     }
 
     OpenAITranslator *translator = calloc(1, sizeof(OpenAITranslator));
     if (!translator) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_DEBUG( "Error: Memory allocation failed");
         return NULL;
     }
 
@@ -189,7 +189,7 @@ OpenAITranslator *openai_translator_init(Config *config, int max_retries, int ti
     /* Initialize curl */
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    fprintf(stderr, "OpenAI translator initialized: base_url=%s, model=%s\n",
+    LOG_INFO( "OpenAI translator initialized: base_url=%s, model=%s\n",
             config->openai_base_url, config->openai_model);
 
     return translator;
@@ -230,7 +230,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         return NULL;
     }
 
-    fprintf(stderr, "[%s] Starting translation: %s -> %s\n", request_uuid, from_lang, to_lang);
+    LOG_INFO( "[%s] Starting translation: %s -> %s\n", request_uuid, from_lang, to_lang);
 
     char *result = NULL;
     int attempt;
@@ -238,7 +238,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
     for (attempt = 1; attempt <= translator->max_retries; attempt++) {
         CURL *curl = curl_easy_init();
         if (!curl) {
-            fprintf(stderr, "[%s] Failed to initialize curl\n", request_uuid);
+            LOG_DEBUG( "[%s] Failed to initialize curl\n", request_uuid);
             continue;
         }
 
@@ -285,7 +285,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         size_t wrapped_text_len = strlen(text) + strlen("<source></source>") + 1;
         char *wrapped_text = malloc(wrapped_text_len);
         if (!wrapped_text) {
-            fprintf(stderr, "[%s] Failed to allocate memory for wrapped text\n", request_uuid);
+            LOG_DEBUG( "[%s] Failed to allocate memory for wrapped text\n", request_uuid);
             cJSON_Delete(root);
             free(instruction);
             if (error) {
@@ -342,13 +342,13 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         curl_easy_cleanup(curl);
 
         if (res != CURLE_OK) {
-            fprintf(stderr, "[%s] Curl error (attempt %d/%d): %s\n",
+            LOG_DEBUG( "[%s] Curl error (attempt %d/%d): %s\n",
                    request_uuid, attempt, translator->max_retries, curl_easy_strerror(res));
             free(response.data);
 
             if (attempt < translator->max_retries) {
                 int backoff = (int)pow(2, attempt);
-                fprintf(stderr, "[%s] Retrying in %d seconds...\n", request_uuid, backoff);
+                LOG_DEBUG( "[%s] Retrying in %d seconds...\n", request_uuid, backoff);
                 sleep(backoff);
                 continue;
             }
@@ -363,13 +363,13 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
 
         /* Check HTTP status */
         if (http_code >= 500) {
-            fprintf(stderr, "[%s] Server error %ld (attempt %d/%d)\n",
+            LOG_DEBUG( "[%s] Server error %ld (attempt %d/%d)\n",
                    request_uuid, http_code, attempt, translator->max_retries);
             free(response.data);
 
             if (attempt < translator->max_retries) {
                 int backoff = (int)pow(2, attempt);
-                fprintf(stderr, "[%s] Retrying in %d seconds...\n", request_uuid, backoff);
+                LOG_DEBUG( "[%s] Retrying in %d seconds...\n", request_uuid, backoff);
                 sleep(backoff);
                 continue;
             }
@@ -383,7 +383,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         }
 
         if (http_code >= 400) {
-            fprintf(stderr, "[%s] Client error %ld\n", request_uuid, http_code);
+            LOG_DEBUG( "[%s] Client error %ld\n", request_uuid, http_code);
             free(response.data);
 
             if (error) {
@@ -399,7 +399,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         free(response.data);
 
         if (!response_json) {
-            fprintf(stderr, "[%s] Failed to parse response JSON\n", request_uuid);
+            LOG_DEBUG( "[%s] Failed to parse response JSON\n", request_uuid);
             if (error) {
                 error->message = strdup("Invalid response JSON");
                 error->retryable = false;
@@ -415,7 +415,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
 
             /* Check if message object exists */
             if (!message_obj) {
-                fprintf(stderr, "[%s] No message object in response\n", request_uuid);
+                LOG_DEBUG( "[%s] No message object in response\n", request_uuid);
                 result = strdup("nothing contents");
                 cJSON_Delete(response_json);
                 break;
@@ -425,7 +425,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
 
             /* Check if content exists and is a string */
             if (!cJSON_IsString(content) || !content->valuestring) {
-                fprintf(stderr, "[%s] No content in message object\n", request_uuid);
+                LOG_DEBUG( "[%s] No content in message object\n", request_uuid);
                 result = strdup("nothing contents");
                 cJSON_Delete(response_json);
                 break;
@@ -436,7 +436,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
             char *cleaned_text = malloc(MAX_CLEANED_TEXT_BUFFER);
 
             if (!unescaped_text || !cleaned_text) {
-                fprintf(stderr, "[%s] Memory allocation failed for translation buffers\n", request_uuid);
+                LOG_DEBUG( "[%s] Memory allocation failed for translation buffers\n", request_uuid);
                 free(unescaped_text);
                 free(cleaned_text);
                 cJSON_Delete(response_json);
@@ -445,7 +445,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
 
             // First unescape \\n to \n, \\t to \t, etc.
             if (unescape_string(content->valuestring, unescaped_text, MAX_TRANSLATION_BUFFER) != 0) {
-                fprintf(stderr, "[%s] Failed to unescape translation text\n", request_uuid);
+                LOG_DEBUG( "[%s] Failed to unescape translation text\n", request_uuid);
                 free(unescaped_text);
                 free(cleaned_text);
                 cJSON_Delete(response_json);
@@ -454,7 +454,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
 
             // Then strip emoji and shortcodes
             if (strip_emoji_and_shortcodes(unescaped_text, cleaned_text, MAX_CLEANED_TEXT_BUFFER) != 0) {
-                fprintf(stderr, "[%s] Failed to clean translation text\n", request_uuid);
+                LOG_DEBUG( "[%s] Failed to clean translation text\n", request_uuid);
                 free(unescaped_text);
                 free(cleaned_text);
                 cJSON_Delete(response_json);
@@ -465,7 +465,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
             free(unescaped_text);
             free(cleaned_text);
 
-            fprintf(stderr, "[%s] Translation completed (attempt %d/%d)\n",
+            LOG_DEBUG( "[%s] Translation completed (attempt %d/%d)\n",
                    request_uuid, attempt, translator->max_retries);
         }
 
@@ -475,7 +475,7 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
             break;
         }
 
-        fprintf(stderr, "[%s] No translation in response\n", request_uuid);
+        LOG_DEBUG( "[%s] No translation in response\n", request_uuid);
         if (error) {
             error->message = strdup("No translation in response");
             error->retryable = false;

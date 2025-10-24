@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include "config_loader.h"
+#include "utils.h"
 
 #define MAX_LINE_LENGTH 1024
 #define MAX_VALUE_LENGTH 512
@@ -83,7 +84,7 @@ static int parse_config_line(const char *line, char *key, char *value) {
 static char *load_text_file(const char *file_path, const char *file_description) {
     FILE *fp = fopen(file_path, "r");
     if (!fp) {
-        fprintf(stderr, "Error: %s file not found: %s\n", file_description, file_path);
+        LOG_INFO("Error: %s file not found: %s", file_description, file_path);
         return NULL;
     }
 
@@ -93,7 +94,7 @@ static char *load_text_file(const char *file_path, const char *file_description)
     fseek(fp, 0, SEEK_SET);
 
     if (file_size <= 0) {
-        fprintf(stderr, "Error: %s file is empty\n", file_description);
+        LOG_INFO("Error: %s file is empty", file_description);
         fclose(fp);
         return NULL;
     }
@@ -101,7 +102,7 @@ static char *load_text_file(const char *file_path, const char *file_description)
     /* Allocate buffer */
     char *buffer = malloc(file_size + 1);
     if (!buffer) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_INFO("Error: Memory allocation failed");
         fclose(fp);
         return NULL;
     }
@@ -117,7 +118,7 @@ static char *load_text_file(const char *file_path, const char *file_description)
     free(buffer);
 
     if (!result || strlen(result) == 0) {
-        fprintf(stderr, "Error: %s is empty after trimming\n", file_description);
+        LOG_INFO("Error: %s is empty after trimming", file_description);
         free(result);
         return NULL;
     }
@@ -169,50 +170,50 @@ int validate_config(const Config *config) {
 
     /* Validate OPENAI_BASE_URL */
     if (!config->openai_base_url || strlen(config->openai_base_url) == 0) {
-        fprintf(stderr, "Error: OPENAI_BASE_URL is required\n");
+        LOG_INFO( "Error: OPENAI_BASE_URL is required");
         return -1;
     }
 
     /* Simple URL validation */
     if (strncmp(config->openai_base_url, "http://", 7) != 0 &&
         strncmp(config->openai_base_url, "https://", 8) != 0) {
-        fprintf(stderr, "Error: Invalid OPENAI_BASE_URL (must start with http:// or https://)\n");
+        LOG_INFO( "Error: Invalid OPENAI_BASE_URL (must start with http:// or https://)");
         return -1;
     }
 
     /* Validate OPENAI_MODEL */
     if (!config->openai_model || strlen(config->openai_model) == 0) {
-        fprintf(stderr, "Error: OPENAI_MODEL is required\n");
+        LOG_INFO( "Error: OPENAI_MODEL is required");
         return -1;
     }
 
     /* Validate OPENAI_API_KEY */
     if (!config->openai_api_key || strlen(config->openai_api_key) == 0) {
-        fprintf(stderr, "Error: OPENAI_API_KEY is required\n");
+        LOG_INFO( "Error: OPENAI_API_KEY is required");
         return -1;
     }
 
     /* Validate PORT */
     if (config->port < 1 || config->port > 65535) {
-        fprintf(stderr, "Error: PORT must be between 1 and 65535\n");
+        LOG_INFO( "Error: PORT must be between 1 and 65535");
         return -1;
     }
 
     /* Validate LISTEN */
     if (!config->listen || strlen(config->listen) == 0) {
-        fprintf(stderr, "Error: LISTEN address is required\n");
+        LOG_INFO( "Error: LISTEN address is required");
         return -1;
     }
 
     /* Validate PROMPT_PREFIX */
     if (!config->prompt_prefix || strlen(config->prompt_prefix) == 0) {
-        fprintf(stderr, "Error: PROMPT_PREFIX is required\n");
+        LOG_INFO( "Error: PROMPT_PREFIX is required");
         return -1;
     }
 
     /* Validate SYSTEM_ROLE */
     if (!config->system_role || strlen(config->system_role) == 0) {
-        fprintf(stderr, "Error: SYSTEM_ROLE is required\n");
+        LOG_INFO( "Error: SYSTEM_ROLE is required");
         return -1;
     }
 
@@ -241,21 +242,21 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     char exe_path[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len == -1) {
-        fprintf(stderr, "Error: Could not determine executable path\n");
+        LOG_INFO( "Error: Could not determine executable path");
         return NULL;
     }
     exe_path[len] = '\0';
 
     char *resolved_config_path = resolve_path(exe_path, config_path);
     if (!resolved_config_path) {
-        fprintf(stderr, "Error: Could not resolve config path: %s\n", config_path);
+        LOG_INFO( "Error: Could not resolve config path: %s\n", config_path);
         return NULL;
     }
 
     /* Open config file */
     FILE *fp = fopen(resolved_config_path, "r");
     if (!fp) {
-        fprintf(stderr, "Error: Configuration file not found: %s\n", resolved_config_path);
+        LOG_INFO( "Error: Configuration file not found: %s\n", resolved_config_path);
         free(resolved_config_path);
         return NULL;
     }
@@ -263,7 +264,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     /* Allocate config structure */
     Config *config = calloc(1, sizeof(Config));
     if (!config) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        LOG_INFO("Error: Memory allocation failed");
         fclose(fp);
         free(resolved_config_path);
         return NULL;
@@ -297,7 +298,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         int parse_result = parse_config_line(line, key, value);
 
         if (parse_result < 0) {
-            fprintf(stderr, "Warning: Failed to parse line %d: %s\n", line_num, line);
+            LOG_INFO( "Warning: Failed to parse line %d: %s\n", line_num, line);
             continue;
         }
 
@@ -361,7 +362,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     char *resolved_prompt_path = resolve_path(resolved_config_path, prompt_prefix_path);
 
     if (!resolved_prompt_path) {
-        fprintf(stderr, "Error: Could not resolve prompt prefix path: %s\n", prompt_prefix_path);
+        LOG_INFO( "Error: Could not resolve prompt prefix path: %s\n", prompt_prefix_path);
         free(resolved_config_path);
         free_config(config);
         return NULL;
@@ -381,7 +382,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     free(resolved_config_path);
 
     if (!resolved_system_role_path) {
-        fprintf(stderr, "Error: Could not resolve system role path: %s\n", system_role_path);
+        LOG_INFO( "Error: Could not resolve system role path: %s\n", system_role_path);
         free_config(config);
         return NULL;
     }

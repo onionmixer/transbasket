@@ -16,7 +16,47 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include "utils.h"
+
+/* Get current timestamp for logging in [YYYY-MM-DD HH:MM:SS] format */
+void get_log_timestamp(char *buffer, size_t size) {
+    if (!buffer || size < 21) {
+        return;
+    }
+
+    time_t now = time(NULL);
+    struct tm *tm_local = localtime(&now);
+
+    if (!tm_local) {
+        snprintf(buffer, size, "[INVALID TIMESTAMP]");
+        return;
+    }
+
+    snprintf(buffer, size, "[%04d-%02d-%02d %02d:%02d:%02d]",
+             tm_local->tm_year + 1900,
+             tm_local->tm_mon + 1,
+             tm_local->tm_mday,
+             tm_local->tm_hour,
+             tm_local->tm_min,
+             tm_local->tm_sec);
+}
+
+/* Log message with timestamp and level */
+void log_message(const char *level, const char *format, ...) {
+    char timestamp[32];
+    get_log_timestamp(timestamp, sizeof(timestamp));
+
+    fprintf(stdout, "%s[%s] ", timestamp, level);
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(stdout, format, args);
+    va_end(args);
+
+    fprintf(stdout, "\n");
+    fflush(stdout);
+}
 
 /* ISO 639-2 language codes */
 static const char *ISO_639_2_CODES[] = {
