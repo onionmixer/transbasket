@@ -3,7 +3,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -O2 -D_POSIX_C_SOURCE=200809L
 LDFLAGS = -pthread
-LIBS = -lcurl -lmicrohttpd -lcjson -luuid -lm -lssl -lcrypto
+LIBS = -lcurl -lmicrohttpd -lcjson -luuid -lm -lssl -lcrypto -lsqlite3
 
 # Directories
 SRC_DIR = src
@@ -19,8 +19,8 @@ CACHE_TOOL = cache_tool
 SERVER_SRCS = $(filter-out $(SRC_DIR)/cache_tool.c, $(wildcard $(SRC_DIR)/*.c))
 SERVER_OBJS = $(SERVER_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
-# Cache tool sources (needs trans_cache.c and utils.c)
-CACHE_TOOL_SRCS = $(SRC_DIR)/cache_tool.c $(SRC_DIR)/trans_cache.c $(SRC_DIR)/utils.c
+# Cache tool sources (needs trans_cache.c, cache backends and utils.c)
+CACHE_TOOL_SRCS = $(SRC_DIR)/cache_tool.c $(SRC_DIR)/trans_cache.c $(SRC_DIR)/cache_backend_text.c $(SRC_DIR)/cache_backend_sqlite.c $(SRC_DIR)/utils.c
 CACHE_TOOL_OBJS = $(CACHE_TOOL_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Header files
@@ -30,7 +30,7 @@ HEADERS = $(wildcard $(INC_DIR)/*.h)
 INCLUDES = -I$(INC_DIR)
 
 # Default target
-all: directories $(TARGET)
+all: directories $(TARGET) $(CACHE_TOOL)
 
 # Create necessary directories
 directories:
@@ -43,7 +43,7 @@ $(TARGET): $(SERVER_OBJS)
 
 # Link object files to create cache tool
 $(CACHE_TOOL): $(CACHE_TOOL_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $^ -lcjson -lssl -lcrypto -luuid
+	$(CC) $(LDFLAGS) -o $@ $^ -lcjson -lssl -lcrypto -luuid -lsqlite3
 	@echo "Build complete: $(CACHE_TOOL)"
 
 # Compile source files to object files
@@ -74,8 +74,8 @@ uninstall:
 # Debug build with DEBUG macro and core dump support
 debug: CFLAGS = -Wall -Wextra -std=c11 -g3 -O0 -DDEBUG -D_POSIX_C_SOURCE=200809L
 debug: LDFLAGS += -rdynamic
-debug: clean directories $(TARGET)
-	@echo "Debug build complete: $(TARGET) (with -g3 -O0 -DDEBUG -rdynamic)"
+debug: clean directories $(TARGET) $(CACHE_TOOL)
+	@echo "Debug build complete: $(TARGET) and $(CACHE_TOOL) (with -g3 -O0 -DDEBUG -rdynamic)"
 	@echo "Core dumps enabled. To enable system-wide: ulimit -c unlimited"
 
 # Check library dependencies
@@ -86,5 +86,6 @@ check-deps:
 	@pkg-config --exists libcjson && echo "✓ libcjson found" || echo "✗ libcjson NOT found"
 	@ldconfig -p | grep -q libuuid && echo "✓ libuuid found" || echo "✗ libuuid NOT found"
 	@pkg-config --exists openssl && echo "✓ openssl found" || echo "✗ openssl NOT found"
+	@pkg-config --exists sqlite3 && echo "✓ sqlite3 found" || echo "✗ sqlite3 NOT found"
 
 .PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps

@@ -4,6 +4,14 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+/* Cache backend type enumeration */
+typedef enum {
+    CACHE_BACKEND_TEXT = 0,    /* JSONL file-based cache (default) */
+    CACHE_BACKEND_SQLITE,      /* SQLite database cache */
+    CACHE_BACKEND_MONGODB,     /* MongoDB cache (future) */
+    CACHE_BACKEND_REDIS        /* Redis cache (future) */
+} CacheBackendType;
+
 /* Configuration structure */
 typedef struct {
     char *openai_base_url;
@@ -20,12 +28,24 @@ typedef struct {
     bool stream;             /* Default: false */
     double frequency_penalty; /* Default: 0.0, range: -2.0 to 2.0 */
     double presence_penalty;  /* Default: 0.0, range: -2.0 to 2.0 */
+    char *reasoning_effort;  /* Default: "none", options: "none", "low", "medium", "high" */
 
     /* Translation cache settings */
+    CacheBackendType cache_type;  /* Cache backend type (default: CACHE_BACKEND_TEXT) */
+    char *cache_type_str;         /* Cache type as string for logging */
+
+    /* Text backend settings */
     char *cache_file;        /* Path to trans_dictionary.txt (default: ./trans_dictionary.txt) */
+
+    /* SQLite backend settings */
+    char *cache_sqlite_path;        /* Path to SQLite database (default: ./trans_cache.db) */
+    char *cache_sqlite_journal_mode; /* Journal mode: WAL, DELETE, etc. (default: WAL) */
+    char *cache_sqlite_sync;        /* Synchronous mode: FULL, NORMAL, OFF (default: NORMAL) */
+
+    /* Common cache settings (applies to all backends) */
     int cache_threshold;     /* Minimum count to use cache (default: 5) */
     bool cache_cleanup_enabled;  /* Enable automatic cleanup (default: true) */
-    int cache_cleanup_days;  /* Cleanup entries older than N days (default: 30) */
+    int cache_cleanup_days;  /* Cleanup entries older than N days (default: 60) */
 } Config;
 
 /* Load configuration from file */

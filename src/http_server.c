@@ -408,13 +408,25 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
     server->cache = NULL;
     server->cache_bg_running = false;
 
-    if (config->cache_file) {
-        server->cache = trans_cache_init(config->cache_file);
+    /* Determine cache path based on backend type */
+    const char *cache_path = NULL;
+    switch (config->cache_type) {
+        case CACHE_BACKEND_SQLITE:
+            cache_path = config->cache_sqlite_path;
+            break;
+        case CACHE_BACKEND_TEXT:
+        default:
+            cache_path = config->cache_file;
+            break;
+    }
+
+    if (cache_path) {
+        server->cache = trans_cache_init_with_backend(config->cache_type, cache_path, NULL);
         if (!server->cache) {
             LOG_INFO("Warning: Failed to initialize cache, continuing without cache");
         } else {
-            LOG_INFO("Translation cache initialized: %s (threshold: %d)",
-                    config->cache_file, config->cache_threshold);
+            LOG_INFO("Translation cache initialized: %s backend at %s (threshold: %d)",
+                    config->cache_type_str, cache_path, config->cache_threshold);
 
             /* Always start background thread for periodic cache saving */
             server->cache_bg_running = true;

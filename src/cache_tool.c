@@ -8,11 +8,17 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <getopt.h>
 #include "trans_cache.h"
+#include "cache_backend_text.h"
+#include "cache_backend_sqlite.h"
 #include "utils.h"
 
 #define VERSION "1.0.0"
 #define DEFAULT_CACHE_FILE "trans_dictionary.txt"
+
+/* Helper macro to get text backend context */
+#define GET_TEXT_CTX(cache) ((TextBackendContext*)(cache)->backend_ctx)
 
 /* Print usage information */
 static void print_usage(const char *prog_name) {
@@ -30,6 +36,10 @@ static void print_usage(const char *prog_name) {
     printf("  delete <id>                      Delete entry by ID\n");
     printf("  export [from_lang] [to_lang]     Export cache entries to stdout\n");
     printf("                                    Optional: filter by language pair\n");
+    printf("  migrate --from <backend> --from-config <path>\n");
+    printf("          --to <backend> --to-config <path>\n");
+    printf("                                   Migrate cache between backends\n");
+    printf("                                   Backends: text, sqlite, mongodb, redis\n");
     printf("\n");
     printf("Options:\n");
     printf("  -f <file>                        Specify cache file (default: %s)\n", DEFAULT_CACHE_FILE);
@@ -43,6 +53,12 @@ static void print_usage(const char *prog_name) {
     printf("  %s cleanup 30                    Remove entries older than 30 days\n", prog_name);
     printf("  %s stats                         Show cache statistics\n", prog_name);
     printf("  %s -f custom.txt list            Use custom cache file\n", prog_name);
+    printf("\n");
+    printf("Migration Examples:\n");
+    printf("  %s migrate --from text --from-config ./dict.txt \\\n", prog_name);
+    printf("                     --to sqlite --to-config ./cache.db\n");
+    printf("  %s migrate --from sqlite --from-config ./cache.db \\\n", prog_name);
+    printf("                     --to text --to-config ./dict_new.txt\n");
     printf("\n");
 }
 
@@ -73,6 +89,8 @@ static int cmd_list(TransCache *cache, const char *from_lang, const char *to_lan
         return -1;
     }
 
+    TextBackendContext *ctx = GET_TEXT_CTX(cache);
+
     printf("\n");
     printf("%-5s %-4s %-4s %-8s %-30s %-30s %-19s\n",
            "ID", "From", "To", "Count", "Source", "Translation", "Last Used");
@@ -80,8 +98,8 @@ static int cmd_list(TransCache *cache, const char *from_lang, const char *to_lan
 
     int displayed_count = 0;
 
-    for (size_t i = 0; i < cache->size; i++) {
-        CacheEntry *entry = cache->entries[i];
+    for (size_t i = 0; i < ctx->size; i++) {
+        CacheEntry *entry = ctx->entries[i];
 
         /* Filter by language pair if specified */
         if (from_lang && strcmp(entry->from_lang, from_lang) != 0) {
@@ -123,11 +141,13 @@ static int cmd_clear(TransCache *cache, const char *from_lang, const char *to_la
         return -1;
     }
 
+    TextBackendContext *ctx = GET_TEXT_CTX(cache);
+
     int removed_count = 0;
     size_t write_idx = 0;
 
-    for (size_t i = 0; i < cache->size; i++) {
-        CacheEntry *entry = cache->entries[i];
+    for (size_t i = 0; i < ctx->size; i++) {
+        CacheEntry *entry = ctx->entries[i];
 
         if (strcmp(entry->from_lang, from_lang) == 0 &&
             strcmp(entry->to_lang, to_lang) == 0) {
@@ -138,11 +158,11 @@ static int cmd_clear(TransCache *cache, const char *from_lang, const char *to_la
             removed_count++;
         } else {
             /* Keep this entry */
-            cache->entries[write_idx++] = entry;
+            ctx->entries[write_idx++] = entry;
         }
     }
 
-    cache->size = write_idx;
+    ctx->size = write_idx;
 
     printf("Removed %d entries (%s -> %s)\n", removed_count, from_lang, to_lang);
 
@@ -162,6 +182,8 @@ static int cmd_clear_all(TransCache *cache) {
         return -1;
     }
 
+    TextBackendContext *ctx = GET_TEXT_CTX(cache);
+
     printf("WARNING: This will delete ALL cache entries!\n");
     printf("Are you sure? (yes/no): ");
 
@@ -179,17 +201,17 @@ static int cmd_clear_all(TransCache *cache) {
         return 0;
     }
 
-    int total_count = cache->size;
+    int total_count = ctx->size;
 
     /* Free all entries */
-    for (size_t i = 0; i < cache->size; i++) {
-        CacheEntry *entry = cache->entries[i];
+    for (size_t i = 0; i < ctx->size; i++) {
+        CacheEntry *entry = ctx->entries[i];
         free(entry->source_text);
         free(entry->translated_text);
         free(entry);
     }
 
-    cache->size = 0;
+    ctx->size = 0;
 
     printf("Removed %d entries\n", total_count);
 
@@ -208,6 +230,8 @@ static int cmd_stats(TransCache *cache) {
     if (!cache) {
         return -1;
     }
+
+    TextBackendContext *ctx = GET_TEXT_CTX(cache);
 
     /* Count entries by language pair */
     typedef struct {
@@ -231,11 +255,11 @@ static int cmd_stats(TransCache *cache) {
     time_t now = time(NULL);
     time_t oldest_time = now;
     time_t newest_time = 0;
-    int total_count = cache->size;
+    int total_count = ctx->size;
     long total_usage_count = 0;
 
-    for (size_t i = 0; i < cache->size; i++) {
-        CacheEntry *entry = cache->entries[i];
+    for (size_t i = 0; i < ctx->size; i++) {
+        CacheEntry *entry = ctx->entries[i];
 
         total_usage_count += entry->count;
 
@@ -383,11 +407,13 @@ static int cmd_delete(TransCache *cache, int id) {
         return -1;
     }
 
+    TextBackendContext *ctx = GET_TEXT_CTX(cache);
+
     int found = 0;
     size_t write_idx = 0;
 
-    for (size_t i = 0; i < cache->size; i++) {
-        CacheEntry *entry = cache->entries[i];
+    for (size_t i = 0; i < ctx->size; i++) {
+        CacheEntry *entry = ctx->entries[i];
 
         if (entry->id == id) {
             /* Delete this entry */
@@ -397,7 +423,7 @@ static int cmd_delete(TransCache *cache, int id) {
             found = 1;
         } else {
             /* Keep this entry */
-            cache->entries[write_idx++] = entry;
+            ctx->entries[write_idx++] = entry;
         }
     }
 
@@ -406,7 +432,7 @@ static int cmd_delete(TransCache *cache, int id) {
         return -1;
     }
 
-    cache->size = write_idx;
+    ctx->size = write_idx;
 
     printf("Deleted entry ID %d\n", id);
 
@@ -426,8 +452,10 @@ static int cmd_export(TransCache *cache, const char *from_lang, const char *to_l
         return -1;
     }
 
-    for (size_t i = 0; i < cache->size; i++) {
-        CacheEntry *entry = cache->entries[i];
+    TextBackendContext *ctx = GET_TEXT_CTX(cache);
+
+    for (size_t i = 0; i < ctx->size; i++) {
+        CacheEntry *entry = ctx->entries[i];
 
         /* Filter by language pair if specified */
         if (from_lang && strcmp(entry->from_lang, from_lang) != 0) {
@@ -449,6 +477,289 @@ static int cmd_export(TransCache *cache, const char *from_lang, const char *to_l
     }
 
     return 0;
+}
+
+/* Parse backend type from string */
+static CacheBackendType parse_backend_type(const char *backend_str) {
+    if (!backend_str) {
+        return CACHE_BACKEND_TEXT;
+    }
+
+    if (strcasecmp(backend_str, "text") == 0) {
+        return CACHE_BACKEND_TEXT;
+    } else if (strcasecmp(backend_str, "sqlite") == 0) {
+        return CACHE_BACKEND_SQLITE;
+    } else if (strcasecmp(backend_str, "mongodb") == 0) {
+        return CACHE_BACKEND_MONGODB;
+    } else if (strcasecmp(backend_str, "redis") == 0) {
+        return CACHE_BACKEND_REDIS;
+    }
+
+    /* Default to text */
+    return CACHE_BACKEND_TEXT;
+}
+
+/* Get backend type name */
+static const char *get_backend_name(CacheBackendType type) {
+    switch (type) {
+        case CACHE_BACKEND_TEXT: return "text";
+        case CACHE_BACKEND_SQLITE: return "sqlite";
+        case CACHE_BACKEND_MONGODB: return "mongodb";
+        case CACHE_BACKEND_REDIS: return "redis";
+        default: return "unknown";
+    }
+}
+
+/* Helper function to iterate all entries from a cache backend */
+typedef int (*entry_iterator_fn)(void *ctx, CacheEntry *entry, void *user_data);
+
+static int iterate_text_backend(TextBackendContext *ctx, entry_iterator_fn callback, void *user_data) {
+    for (size_t i = 0; i < ctx->size; i++) {
+        if (callback(ctx, ctx->entries[i], user_data) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* For SQLite backend, we need to query all entries */
+static int iterate_sqlite_backend(SqliteBackendContext *ctx, entry_iterator_fn callback, void *user_data) {
+    /* Prepare SELECT ALL query */
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT id, hash, from_lang, to_lang, source_text, translated_text, "
+                      "count, last_used, created_at FROM trans_cache ORDER BY id;";
+
+    int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Error preparing SELECT: %s\n", sqlite3_errmsg(ctx->db));
+        return -1;
+    }
+
+    int entry_count = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        CacheEntry entry;
+        memset(&entry, 0, sizeof(entry));
+
+        entry.id = sqlite3_column_int(stmt, 0);
+        strncpy(entry.hash, (const char*)sqlite3_column_text(stmt, 1), sizeof(entry.hash) - 1);
+        strncpy(entry.from_lang, (const char*)sqlite3_column_text(stmt, 2), sizeof(entry.from_lang) - 1);
+        strncpy(entry.to_lang, (const char*)sqlite3_column_text(stmt, 3), sizeof(entry.to_lang) - 1);
+        entry.source_text = strdup((const char*)sqlite3_column_text(stmt, 4));
+        entry.translated_text = strdup((const char*)sqlite3_column_text(stmt, 5));
+        entry.count = sqlite3_column_int(stmt, 6);
+        entry.last_used = (time_t)sqlite3_column_int64(stmt, 7);
+        entry.created_at = (time_t)sqlite3_column_int64(stmt, 8);
+
+        if (!entry.source_text || !entry.translated_text) {
+            free(entry.source_text);
+            free(entry.translated_text);
+            sqlite3_finalize(stmt);
+            return -1;
+        }
+
+        if (callback(ctx, &entry, user_data) != 0) {
+            free(entry.source_text);
+            free(entry.translated_text);
+            sqlite3_finalize(stmt);
+            return -1;
+        }
+
+        free(entry.source_text);
+        free(entry.translated_text);
+        entry_count++;
+    }
+
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Error reading entries: %s\n", sqlite3_errmsg(ctx->db));
+        return -1;
+    }
+
+    return entry_count;
+}
+
+/* Migration callback context */
+typedef struct {
+    TransCache *dest_cache;
+    int migrated_count;
+    int failed_count;
+    int show_progress;
+} MigrateContext;
+
+/* Callback function for migration */
+static int migrate_entry_callback(void *ctx, CacheEntry *entry, void *user_data) {
+    (void)ctx;
+    MigrateContext *mctx = (MigrateContext*)user_data;
+
+    /* Add to destination cache */
+    if (trans_cache_add(mctx->dest_cache,
+                        entry->from_lang,
+                        entry->to_lang,
+                        entry->source_text,
+                        entry->translated_text) != 0) {
+        mctx->failed_count++;
+        fprintf(stderr, "Warning: Failed to migrate entry ID %d\n", entry->id);
+        return 0;  /* Continue with next entry */
+    }
+
+    mctx->migrated_count++;
+
+    /* Show progress every 100 entries */
+    if (mctx->show_progress && (mctx->migrated_count % 100 == 0)) {
+        printf("  Migrated %d entries...\n", mctx->migrated_count);
+    }
+
+    return 0;
+}
+
+/* Migrate cache between backends */
+static int cmd_migrate(int argc, char *argv[]) {
+    /* Parse arguments */
+    const char *from_backend = NULL;
+    const char *from_config = NULL;
+    const char *to_backend = NULL;
+    const char *to_config = NULL;
+    int show_progress = 1;
+
+    /* Use getopt_long for parsing */
+    static struct option long_options[] = {
+        {"from", required_argument, 0, 'f'},
+        {"from-config", required_argument, 0, 'F'},
+        {"to", required_argument, 0, 't'},
+        {"to-config", required_argument, 0, 'T'},
+        {"no-progress", no_argument, 0, 'p'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    int option_index = 0;
+
+    /* Reset getopt (argv[0] is now "migrate", so start from 1) */
+    optind = 0;  /* Reset to 0 to make getopt_long reprocess argv */
+
+    while ((opt = getopt_long(argc, argv, "f:F:t:T:ph", long_options, &option_index)) != -1) {
+        switch (opt) {
+            case 'f':
+                from_backend = optarg;
+                break;
+            case 'F':
+                from_config = optarg;
+                break;
+            case 't':
+                to_backend = optarg;
+                break;
+            case 'T':
+                to_config = optarg;
+                break;
+            case 'p':
+                show_progress = 0;
+                break;
+            case 'h':
+                printf("Usage: cache_tool migrate --from <backend> --from-config <path> \\\n");
+                printf("                           --to <backend> --to-config <path>\n\n");
+                printf("Backends: text, sqlite, mongodb (not yet), redis (not yet)\n\n");
+                printf("Example:\n");
+                printf("  cache_tool migrate --from text --from-config ./dict.txt \\\n");
+                printf("                     --to sqlite --to-config ./cache.db\n");
+                return 0;
+            default:
+                fprintf(stderr, "Error: Invalid option\n");
+                return -1;
+        }
+    }
+
+    /* Validate arguments */
+    if (!from_backend || !from_config || !to_backend || !to_config) {
+        fprintf(stderr, "Error: Missing required arguments\n");
+        fprintf(stderr, "Usage: cache_tool migrate --from <backend> --from-config <path> \\\n");
+        fprintf(stderr, "                           --to <backend> --to-config <path>\n");
+        return -1;
+    }
+
+    /* Parse backend types */
+    CacheBackendType from_type = parse_backend_type(from_backend);
+    CacheBackendType to_type = parse_backend_type(to_backend);
+
+    /* Check for unsupported backends */
+    if (from_type == CACHE_BACKEND_MONGODB || from_type == CACHE_BACKEND_REDIS) {
+        fprintf(stderr, "Error: %s backend not yet implemented\n", from_backend);
+        return -1;
+    }
+    if (to_type == CACHE_BACKEND_MONGODB || to_type == CACHE_BACKEND_REDIS) {
+        fprintf(stderr, "Error: %s backend not yet implemented\n", to_backend);
+        return -1;
+    }
+
+    printf("=== Cache Migration ===\n");
+    printf("Source: %s (%s)\n", get_backend_name(from_type), from_config);
+    printf("Destination: %s (%s)\n", get_backend_name(to_type), to_config);
+    printf("\n");
+
+    /* Initialize source cache */
+    printf("Initializing source cache...\n");
+    TransCache *source_cache = trans_cache_init_with_backend(from_type, from_config, NULL);
+    if (!source_cache) {
+        fprintf(stderr, "Error: Failed to initialize source cache\n");
+        return -1;
+    }
+
+    /* Initialize destination cache */
+    printf("Initializing destination cache...\n");
+    TransCache *dest_cache = trans_cache_init_with_backend(to_type, to_config, NULL);
+    if (!dest_cache) {
+        fprintf(stderr, "Error: Failed to initialize destination cache\n");
+        trans_cache_free(source_cache);
+        return -1;
+    }
+
+    /* Prepare migration context */
+    MigrateContext mctx = {
+        .dest_cache = dest_cache,
+        .migrated_count = 0,
+        .failed_count = 0,
+        .show_progress = show_progress
+    };
+
+    printf("Starting migration...\n");
+
+    /* Iterate source entries and migrate */
+    int result = 0;
+    if (from_type == CACHE_BACKEND_TEXT) {
+        TextBackendContext *ctx = (TextBackendContext*)source_cache->backend_ctx;
+        result = iterate_text_backend(ctx, migrate_entry_callback, &mctx);
+    } else if (from_type == CACHE_BACKEND_SQLITE) {
+        SqliteBackendContext *ctx = (SqliteBackendContext*)source_cache->backend_ctx;
+        result = iterate_sqlite_backend(ctx, migrate_entry_callback, &mctx);
+    }
+
+    if (result < 0) {
+        fprintf(stderr, "Error: Migration failed\n");
+        trans_cache_free(source_cache);
+        trans_cache_free(dest_cache);
+        return -1;
+    }
+
+    /* Save destination cache */
+    printf("Saving destination cache...\n");
+    if (trans_cache_save(dest_cache) != 0) {
+        fprintf(stderr, "Warning: Failed to save destination cache\n");
+    }
+
+    printf("\n");
+    printf("=== Migration Complete ===\n");
+    printf("Total migrated: %d entries\n", mctx.migrated_count);
+    if (mctx.failed_count > 0) {
+        printf("Failed: %d entries\n", mctx.failed_count);
+    }
+    printf("\n");
+
+    /* Cleanup */
+    trans_cache_free(source_cache);
+    trans_cache_free(dest_cache);
+
+    return (mctx.failed_count > 0) ? 1 : 0;
 }
 
 /* Main function */
@@ -481,16 +792,22 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Load cache */
+    /* Parse command */
+    const char *command = argv[optind];
+    int result = 0;
+
+    /* Handle migrate command specially (doesn't use -f flag) */
+    if (strcmp(command, "migrate") == 0) {
+        /* Pass only migrate arguments (skip program name and commands before "migrate") */
+        return cmd_migrate(argc - optind, &argv[optind]);
+    }
+
+    /* Load cache for other commands */
     TransCache *cache = trans_cache_init(cache_file);
     if (!cache) {
         fprintf(stderr, "Error: Failed to initialize cache from %s\n", cache_file);
         return 1;
     }
-
-    /* Parse command */
-    const char *command = argv[optind];
-    int result = 0;
 
     if (strcmp(command, "list") == 0) {
         const char *from_lang = (optind + 1 < argc) ? argv[optind + 1] : NULL;

@@ -280,12 +280,18 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->stream = false;
     config->frequency_penalty = 0.0;
     config->presence_penalty = 0.0;
+    config->reasoning_effort = strdup("none");
 
     /* Cache defaults */
+    config->cache_type = CACHE_BACKEND_TEXT;  /* Default to text (JSONL) backend */
+    config->cache_type_str = strdup("text");
     config->cache_file = strdup("./trans_dictionary.txt");
+    config->cache_sqlite_path = strdup("./trans_cache.db");
+    config->cache_sqlite_journal_mode = strdup("WAL");
+    config->cache_sqlite_sync = strdup("NORMAL");
     config->cache_threshold = 5;
     config->cache_cleanup_enabled = true;
-    config->cache_cleanup_days = 30;
+    config->cache_cleanup_days = 60;
 
     /* Parse config file */
     char line[MAX_LINE_LENGTH];
@@ -338,9 +344,55 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             /* Clamp to valid range: -2.0 to 2.0 */
             if (config->presence_penalty < -2.0) config->presence_penalty = -2.0;
             if (config->presence_penalty > 2.0) config->presence_penalty = 2.0;
+        } else if (strcmp(key, "TRANS_CACHE_TYPE") == 0) {
+            free(config->cache_type_str);
+            config->cache_type_str = strdup(value);
+            /* Parse cache type */
+            if (strcasecmp(value, "text") == 0) {
+                config->cache_type = CACHE_BACKEND_TEXT;
+            } else if (strcasecmp(value, "sqlite") == 0) {
+                config->cache_type = CACHE_BACKEND_SQLITE;
+            } else if (strcasecmp(value, "mongodb") == 0) {
+                config->cache_type = CACHE_BACKEND_MONGODB;
+                LOG_INFO("Warning: MongoDB backend not yet implemented, using text backend\n");
+                config->cache_type = CACHE_BACKEND_TEXT;
+            } else if (strcasecmp(value, "redis") == 0) {
+                config->cache_type = CACHE_BACKEND_REDIS;
+                LOG_INFO("Warning: Redis backend not yet implemented, using text backend\n");
+                config->cache_type = CACHE_BACKEND_TEXT;
+            } else {
+                LOG_INFO("Warning: Invalid TRANS_CACHE_TYPE '%s', using 'text'\n", value);
+                config->cache_type = CACHE_BACKEND_TEXT;
+                free(config->cache_type_str);
+                config->cache_type_str = strdup("text");
+            }
         } else if (strcmp(key, "TRANS_CACHE_FILE") == 0) {
             free(config->cache_file);
             config->cache_file = strdup(value);
+        } else if (strcmp(key, "TRANS_CACHE_SQLITE_PATH") == 0) {
+            free(config->cache_sqlite_path);
+            config->cache_sqlite_path = strdup(value);
+        } else if (strcmp(key, "TRANS_CACHE_SQLITE_JOURNAL_MODE") == 0) {
+            free(config->cache_sqlite_journal_mode);
+            /* Validate journal mode */
+            if (strcasecmp(value, "DELETE") == 0 || strcasecmp(value, "TRUNCATE") == 0 ||
+                strcasecmp(value, "PERSIST") == 0 || strcasecmp(value, "MEMORY") == 0 ||
+                strcasecmp(value, "WAL") == 0 || strcasecmp(value, "OFF") == 0) {
+                config->cache_sqlite_journal_mode = strdup(value);
+            } else {
+                LOG_INFO("Warning: Invalid TRANS_CACHE_SQLITE_JOURNAL_MODE '%s', using 'WAL'\n", value);
+                config->cache_sqlite_journal_mode = strdup("WAL");
+            }
+        } else if (strcmp(key, "TRANS_CACHE_SQLITE_SYNC") == 0) {
+            free(config->cache_sqlite_sync);
+            /* Validate synchronous mode */
+            if (strcasecmp(value, "OFF") == 0 || strcasecmp(value, "NORMAL") == 0 ||
+                strcasecmp(value, "FULL") == 0 || strcasecmp(value, "EXTRA") == 0) {
+                config->cache_sqlite_sync = strdup(value);
+            } else {
+                LOG_INFO("Warning: Invalid TRANS_CACHE_SQLITE_SYNC '%s', using 'NORMAL'\n", value);
+                config->cache_sqlite_sync = strdup("NORMAL");
+            }
         } else if (strcmp(key, "TRANS_CACHE_THRESHOLD") == 0) {
             config->cache_threshold = atoi(value);
             if (config->cache_threshold < 1) {
@@ -351,7 +403,17 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         } else if (strcmp(key, "TRANS_CACHE_CLEANUP_DAYS") == 0) {
             config->cache_cleanup_days = atoi(value);
             if (config->cache_cleanup_days <= 0) {
-                config->cache_cleanup_days = 30;  /* Default */
+                config->cache_cleanup_days = 60;  /* Default */
+            }
+        } else if (strcmp(key, "REASONING_EFFORT") == 0) {
+            free(config->reasoning_effort);
+            /* Validate reasoning effort value */
+            if (strcasecmp(value, "none") == 0 || strcasecmp(value, "low") == 0 ||
+                strcasecmp(value, "medium") == 0 || strcasecmp(value, "high") == 0) {
+                config->reasoning_effort = strdup(value);
+            } else {
+                LOG_INFO("Warning: Invalid REASONING_EFFORT value '%s', using 'none'\n", value);
+                config->reasoning_effort = strdup("none");
             }
         }
     }
@@ -416,6 +478,11 @@ void free_config(Config *config) {
     free(config->listen);
     free(config->prompt_prefix);
     free(config->system_role);
+    free(config->cache_type_str);
     free(config->cache_file);
+    free(config->cache_sqlite_path);
+    free(config->cache_sqlite_journal_mode);
+    free(config->cache_sqlite_sync);
+    free(config->reasoning_effort);
     free(config);
 }

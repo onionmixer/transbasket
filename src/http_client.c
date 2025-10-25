@@ -21,6 +21,7 @@
 #define DEFAULT_MAX_RETRIES 3
 #define MAX_TRANSLATION_BUFFER 16384  /* 16KB for unescaped text */
 #define MAX_CLEANED_TEXT_BUFFER 8192  /* 8KB for cleaned text */
+#define MAX_STREAM_BUFFER 65536       /* 64KB for streaming response accumulation */
 
 /* Structure for curl response data */
 typedef struct {
@@ -137,6 +138,210 @@ static char *str_replace(const char *orig, const char *rep, const char *with) {
     return result;
 }
 
+/* Parse SSE (Server-Sent Events) chunk and extract content from delta */
+static char *parse_sse_chunk(const char *chunk, const char *request_uuid) {
+    if (!chunk) {
+        return NULL;
+    }
+
+    /* SSE format: "data: {json}\n\n" */
+    const char *data_prefix = "data: ";
+    const char *line_start = strstr(chunk, data_prefix);
+
+    if (!line_start) {
+        return NULL;
+    }
+
+    line_start += strlen(data_prefix);
+
+    /* Check for [DONE] marker */
+    if (strncmp(line_start, "[DONE]", 6) == 0) {
+        return NULL;
+    }
+
+    /* Find end of JSON (newline or end of string) */
+    const char *line_end = strchr(line_start, '\n');
+    size_t json_len;
+
+    if (line_end) {
+        json_len = line_end - line_start;
+    } else {
+        json_len = strlen(line_start);
+    }
+
+    if (json_len == 0) {
+        return NULL;
+    }
+
+    /* Extract JSON string */
+    char *json_str = malloc(json_len + 1);
+    if (!json_str) {
+        LOG_DEBUG("[%s] Failed to allocate memory for SSE JSON\n", request_uuid);
+        return NULL;
+    }
+
+    strncpy(json_str, line_start, json_len);
+    json_str[json_len] = '\0';
+
+    /* Parse JSON */
+    cJSON *json = cJSON_Parse(json_str);
+    free(json_str);
+
+    if (!json) {
+        LOG_DEBUG("[%s] Failed to parse SSE JSON chunk\n", request_uuid);
+        return NULL;
+    }
+
+    /* Extract content from choices[0].delta.content */
+    char *content = NULL;
+    cJSON *choices = cJSON_GetObjectItem(json, "choices");
+
+    if (cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
+        cJSON *first_choice = cJSON_GetArrayItem(choices, 0);
+        cJSON *delta = cJSON_GetObjectItem(first_choice, "delta");
+
+        if (delta) {
+            cJSON *content_obj = cJSON_GetObjectItem(delta, "content");
+
+            if (cJSON_IsString(content_obj) && content_obj->valuestring) {
+                content = strdup(content_obj->valuestring);
+            }
+        }
+    }
+
+    cJSON_Delete(json);
+    return content;
+}
+
+/* Handle streaming response - accumulate delta content */
+static char *handle_streaming_response(const char *response_data, const char *request_uuid) {
+    if (!response_data || !request_uuid) {
+        return NULL;
+    }
+
+    char *accumulated_text = calloc(MAX_STREAM_BUFFER, 1);
+    if (!accumulated_text) {
+        LOG_DEBUG("[%s] Failed to allocate buffer for streaming response\n", request_uuid);
+        return NULL;
+    }
+
+    size_t accumulated_len = 0;
+    const char *chunk_start = response_data;
+
+    /* Process each SSE chunk */
+    while (*chunk_start) {
+        /* Find the next "data: " prefix */
+        const char *next_chunk = strstr(chunk_start, "data: ");
+
+        if (!next_chunk) {
+            break;
+        }
+
+        /* Find the end of this chunk (double newline or end of string) */
+        const char *chunk_end = strstr(next_chunk, "\n\n");
+        size_t chunk_len;
+
+        if (chunk_end) {
+            chunk_len = chunk_end - next_chunk + 2;
+        } else {
+            chunk_len = strlen(next_chunk);
+        }
+
+        /* Create null-terminated chunk string */
+        char *chunk_str = malloc(chunk_len + 1);
+        if (!chunk_str) {
+            LOG_DEBUG("[%s] Failed to allocate memory for chunk\n", request_uuid);
+            continue;
+        }
+
+        strncpy(chunk_str, next_chunk, chunk_len);
+        chunk_str[chunk_len] = '\0';
+
+        /* Parse this chunk */
+        char *content = parse_sse_chunk(chunk_str, request_uuid);
+        free(chunk_str);
+
+        if (content) {
+            size_t content_len = strlen(content);
+
+            /* Check buffer overflow */
+            if (accumulated_len + content_len >= MAX_STREAM_BUFFER - 1) {
+                LOG_DEBUG("[%s] Stream buffer overflow, truncating\n", request_uuid);
+                free(content);
+                break;
+            }
+
+            /* Append content */
+            memcpy(accumulated_text + accumulated_len, content, content_len);
+            accumulated_len += content_len;
+            accumulated_text[accumulated_len] = '\0';
+
+            free(content);
+        }
+
+        /* Move to next chunk */
+        if (chunk_end) {
+            chunk_start = chunk_end + 2;
+        } else {
+            break;
+        }
+    }
+
+    if (accumulated_len == 0) {
+        free(accumulated_text);
+        return NULL;
+    }
+
+    return accumulated_text;
+}
+
+/* Handle non-streaming response - extract from message.content */
+static char *handle_non_streaming_response(const char *response_data, const char *request_uuid) {
+    if (!response_data || !request_uuid) {
+        return NULL;
+    }
+
+    cJSON *response_json = cJSON_Parse(response_data);
+    if (!response_json) {
+        LOG_DEBUG("[%s] Failed to parse response JSON\n", request_uuid);
+        return NULL;
+    }
+
+    char *result = NULL;
+    cJSON *choices = cJSON_GetObjectItem(response_json, "choices");
+
+    if (cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
+        cJSON *first_choice = cJSON_GetArrayItem(choices, 0);
+        cJSON *message_obj = cJSON_GetObjectItem(first_choice, "message");
+
+        /* Check if message object exists */
+        if (!message_obj) {
+            LOG_DEBUG("[%s] No message object in response\n", request_uuid);
+            result = strdup("nothing contents");
+            cJSON_Delete(response_json);
+            return result;
+        }
+
+        cJSON *content = cJSON_GetObjectItem(message_obj, "content");
+
+        /* Check if content exists and is a string */
+        if (!cJSON_IsString(content) || !content->valuestring) {
+            LOG_DEBUG("[%s] No content in message object\n", request_uuid);
+            result = strdup("nothing contents");
+            cJSON_Delete(response_json);
+            return result;
+        }
+
+        result = strdup(content->valuestring);
+    } else {
+        LOG_DEBUG("[%s] No choices in response\n", request_uuid);
+        result = strdup("nothing contents");
+    }
+
+    cJSON_Delete(response_json);
+    return result;
+}
+
 /* Build translation instruction message from PROMPT_PREFIX */
 static char *build_instruction_message(OpenAITranslator *translator, const char *to_lang) {
     if (!translator || !to_lang) {
@@ -249,6 +454,12 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         /* Build JSON request body */
         cJSON *root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "model", translator->config->openai_model);
+
+        /* Add reasoning object (always included) */
+        cJSON *reasoning = cJSON_CreateObject();
+        cJSON_AddStringToObject(reasoning, "effort", translator->config->reasoning_effort);
+        cJSON_AddItemToObject(root, "reasoning", reasoning);
+
         cJSON_AddNumberToObject(root, "temperature", translator->config->temperature);
         cJSON_AddNumberToObject(root, "top_p", translator->config->top_p);
         cJSON_AddNumberToObject(root, "seed", translator->config->seed);
@@ -394,93 +605,83 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
             break;
         }
 
-        /* Parse response */
-        cJSON *response_json = cJSON_Parse(response.data);
+        /* Parse response based on streaming mode */
+        char *raw_translation = NULL;
+
+        if (translator->config->stream) {
+            /* Handle streaming response */
+            raw_translation = handle_streaming_response(response.data, request_uuid);
+        } else {
+            /* Handle non-streaming response */
+            raw_translation = handle_non_streaming_response(response.data, request_uuid);
+        }
+
         free(response.data);
 
-        if (!response_json) {
-            LOG_DEBUG( "[%s] Failed to parse response JSON\n", request_uuid);
+        if (!raw_translation) {
+            LOG_DEBUG("[%s] Failed to extract translation from response\n", request_uuid);
             if (error) {
-                error->message = strdup("Invalid response JSON");
+                error->message = strdup("No translation in response");
                 error->retryable = false;
                 error->status_code = http_code;
             }
             break;
         }
 
-        cJSON *choices = cJSON_GetObjectItem(response_json, "choices");
-        if (cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
-            cJSON *first_choice = cJSON_GetArrayItem(choices, 0);
-            cJSON *message_obj = cJSON_GetObjectItem(first_choice, "message");
+        /* Process the raw translation: unescape and clean */
+        char *unescaped_text = malloc(MAX_TRANSLATION_BUFFER);
+        char *cleaned_text = malloc(MAX_CLEANED_TEXT_BUFFER);
 
-            /* Check if message object exists */
-            if (!message_obj) {
-                LOG_DEBUG( "[%s] No message object in response\n", request_uuid);
-                result = strdup("nothing contents");
-                cJSON_Delete(response_json);
-                break;
-            }
-
-            cJSON *content = cJSON_GetObjectItem(message_obj, "content");
-
-            /* Check if content exists and is a string */
-            if (!cJSON_IsString(content) || !content->valuestring) {
-                LOG_DEBUG( "[%s] No content in message object\n", request_uuid);
-                result = strdup("nothing contents");
-                cJSON_Delete(response_json);
-                break;
-            }
-
-            // Allocate buffers dynamically to handle large translations
-            char *unescaped_text = malloc(MAX_TRANSLATION_BUFFER);
-            char *cleaned_text = malloc(MAX_CLEANED_TEXT_BUFFER);
-
-            if (!unescaped_text || !cleaned_text) {
-                LOG_DEBUG( "[%s] Memory allocation failed for translation buffers\n", request_uuid);
-                free(unescaped_text);
-                free(cleaned_text);
-                cJSON_Delete(response_json);
-                break;
-            }
-
-            // First unescape \\n to \n, \\t to \t, etc.
-            if (unescape_string(content->valuestring, unescaped_text, MAX_TRANSLATION_BUFFER) != 0) {
-                LOG_DEBUG( "[%s] Failed to unescape translation text\n", request_uuid);
-                free(unescaped_text);
-                free(cleaned_text);
-                cJSON_Delete(response_json);
-                break;
-            }
-
-            // Then strip emoji and shortcodes
-            if (strip_emoji_and_shortcodes(unescaped_text, cleaned_text, MAX_CLEANED_TEXT_BUFFER) != 0) {
-                LOG_DEBUG( "[%s] Failed to clean translation text\n", request_uuid);
-                free(unescaped_text);
-                free(cleaned_text);
-                cJSON_Delete(response_json);
-                break;
-            }
-
-            result = strdup(cleaned_text);
+        if (!unescaped_text || !cleaned_text) {
+            LOG_DEBUG("[%s] Memory allocation failed for translation buffers\n", request_uuid);
             free(unescaped_text);
             free(cleaned_text);
-
-            LOG_DEBUG( "[%s] Translation completed (attempt %d/%d)\n",
-                   request_uuid, attempt, translator->max_retries);
-        }
-
-        cJSON_Delete(response_json);
-
-        if (result) {
+            free(raw_translation);
+            if (error) {
+                error->message = strdup("Memory allocation failed");
+                error->retryable = false;
+                error->status_code = 0;
+            }
             break;
         }
 
-        LOG_DEBUG( "[%s] No translation in response\n", request_uuid);
-        if (error) {
-            error->message = strdup("No translation in response");
-            error->retryable = false;
-            error->status_code = http_code;
+        /* First unescape \\n to \n, \\t to \t, etc. */
+        if (unescape_string(raw_translation, unescaped_text, MAX_TRANSLATION_BUFFER) != 0) {
+            LOG_DEBUG("[%s] Failed to unescape translation text\n", request_uuid);
+            free(unescaped_text);
+            free(cleaned_text);
+            free(raw_translation);
+            if (error) {
+                error->message = strdup("Failed to process translation text");
+                error->retryable = false;
+                error->status_code = 0;
+            }
+            break;
         }
+
+        /* Then strip emoji and shortcodes */
+        if (strip_emoji_and_shortcodes(unescaped_text, cleaned_text, MAX_CLEANED_TEXT_BUFFER) != 0) {
+            LOG_DEBUG("[%s] Failed to clean translation text\n", request_uuid);
+            free(unescaped_text);
+            free(cleaned_text);
+            free(raw_translation);
+            if (error) {
+                error->message = strdup("Failed to clean translation text");
+                error->retryable = false;
+                error->status_code = 0;
+            }
+            break;
+        }
+
+        result = strdup(cleaned_text);
+        free(unescaped_text);
+        free(cleaned_text);
+        free(raw_translation);
+
+        LOG_INFO("[%s] Translation completed (attempt %d/%d, mode: %s)\n",
+               request_uuid, attempt, translator->max_retries,
+               translator->config->stream ? "streaming" : "non-streaming");
+
         break;
     }
 
