@@ -10,6 +10,7 @@
 #include <microhttpd.h>
 #include "http_server.h"
 #include "json_handler.h"
+#include "language_table.h"
 #include "utils.h"
 #include "trans_cache.h"
 
@@ -396,10 +397,27 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
     server->config = config;
     server->max_workers = max_workers > 0 ? max_workers : DEFAULT_MAX_WORKERS;
 
-    /* Initialize translator */
-    server->translator = openai_translator_init(config, 3, 60);
+    /* Load language table */
+    server->lang_table = NULL;
+    if (config->language_table_file) {
+        server->lang_table = language_table_load(config->language_table_file);
+        if (server->lang_table) {
+            LOG_INFO("Language table loaded: %zu entries, %zu code mappings from %s",
+                    server->lang_table->count, server->lang_table->mapping_count,
+                    config->language_table_file);
+        } else {
+            LOG_INFO("Warning: Failed to load language table from %s, continuing without it",
+                    config->language_table_file);
+        }
+    }
+
+    /* Initialize translator with language table */
+    server->translator = openai_translator_init(config, server->lang_table, 3, 60);
     if (!server->translator) {
         LOG_INFO("Error: Failed to initialize translator");
+        if (server->lang_table) {
+            language_table_free(server->lang_table);
+        }
         free(server);
         return NULL;
     }
@@ -519,6 +537,10 @@ void translation_server_free(TranslationServer *server) {
 
     if (server->translator) {
         openai_translator_free(server->translator);
+    }
+
+    if (server->lang_table) {
+        language_table_free(server->lang_table);
     }
 
     free(server);

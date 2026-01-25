@@ -6,11 +6,13 @@
 #include <pthread.h>
 #include "config_loader.h"
 #include "http_client.h"
+#include "language_table.h"
 #include "trans_cache.h"
 
 /* Translation server structure */
 typedef struct {
     Config *config;
+    LanguageTable *lang_table;
     OpenAITranslator *translator;
     struct MHD_Daemon *daemon;
     int max_workers;

@@ -223,16 +223,16 @@ int validate_config(const Config *config) {
 /* Load configuration from file */
 Config *load_config(const char *config_path, const char *prompt_prefix_path, const char *system_role_path) {
     const char *default_config_path = "transbasket.conf";
-    const char *default_prompt_path = "PROMPT_PREFIX.txt";
     const char *default_system_role_path = "ROLS.txt";
+
+    /* Track if command-line arguments were explicitly provided */
+    bool prompt_prefix_from_cmdline = (prompt_prefix_path != NULL);
 
     if (!config_path) {
         config_path = default_config_path;
     }
 
-    if (!prompt_prefix_path) {
-        prompt_prefix_path = default_prompt_path;
-    }
+    /* Don't set default for prompt_prefix_path here - let config file value take precedence */
 
     if (!system_role_path) {
         system_role_path = default_system_role_path;
@@ -292,6 +292,10 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->cache_threshold = 5;
     config->cache_cleanup_enabled = true;
     config->cache_cleanup_days = 60;
+
+    /* Prompt and language configuration defaults */
+    config->prompt_prefix_file = strdup("PROMPT_PREFIX.txt");
+    config->language_table_file = strdup("language_tables.conf");
 
     /* Parse config file */
     char line[MAX_LINE_LENGTH];
@@ -415,13 +419,20 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
                 LOG_INFO("Warning: Invalid REASONING_EFFORT value '%s', using 'none'\n", value);
                 config->reasoning_effort = strdup("none");
             }
+        } else if (strcmp(key, "PROMPT_PREFIX_FILE") == 0) {
+            free(config->prompt_prefix_file);
+            config->prompt_prefix_file = strdup(value);
+        } else if (strcmp(key, "LANGUAGE_TABLE_FILE") == 0) {
+            free(config->language_table_file);
+            config->language_table_file = strdup(value);
         }
     }
 
     fclose(fp);
 
-    /* Load prompt prefix */
-    char *resolved_prompt_path = resolve_path(resolved_config_path, prompt_prefix_path);
+    /* Load prompt prefix - use command line arg if provided, otherwise use config file setting */
+    const char *actual_prompt_path = prompt_prefix_from_cmdline ? prompt_prefix_path : config->prompt_prefix_file;
+    char *resolved_prompt_path = resolve_path(resolved_config_path, actual_prompt_path);
 
     if (!resolved_prompt_path) {
         LOG_INFO( "Error: Could not resolve prompt prefix path: %s\n", prompt_prefix_path);
@@ -484,5 +495,7 @@ void free_config(Config *config) {
     free(config->cache_sqlite_journal_mode);
     free(config->cache_sqlite_sync);
     free(config->reasoning_effort);
+    free(config->prompt_prefix_file);
+    free(config->language_table_file);
     free(config);
 }

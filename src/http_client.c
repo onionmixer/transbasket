@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <math.h>
 #include <limits.h>
@@ -15,6 +16,7 @@
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 #include "http_client.h"
+#include "language_table.h"
 #include "utils.h"
 
 #define DEFAULT_TIMEOUT 60
@@ -342,14 +344,37 @@ static char *handle_non_streaming_response(const char *response_data, const char
     return result;
 }
 
-/* Build translation instruction message from PROMPT_PREFIX */
-static char *build_instruction_message(OpenAITranslator *translator, const char *to_lang) {
-    if (!translator || !to_lang) {
+/* Check if prompt uses TranslateGemma format (contains {TEXT} placeholder) */
+static bool is_translategemma_format(const char *prompt_prefix) {
+    return prompt_prefix && strstr(prompt_prefix, "{TEXT}") != NULL;
+}
+
+/* Build translation instruction message from PROMPT_PREFIX
+ * Supports both legacy format and TranslateGemma format with placeholders:
+ * - {SOURCE_LANG}: Source language name (e.g., "Korean")
+ * - {SOURCE_CODE}: Source ISO 639-1 code (e.g., "ko")
+ * - {TARGET_LANG}: Target language name (e.g., "English")
+ * - {TARGET_CODE}: Target ISO 639-1 code (e.g., "en")
+ * - {TEXT}: The actual text to translate
+ *
+ * Parameters:
+ * - translator: The translator instance
+ * - from_lang: Source language code (ISO 639-2 or ISO 639-1)
+ * - to_lang: Target language code (ISO 639-2 or ISO 639-1)
+ * - text: Text to translate (only used if {TEXT} placeholder exists)
+ * - is_single_message: Output flag indicating if single message format should be used
+ */
+static char *build_instruction_message(OpenAITranslator *translator,
+                                       const char *from_lang, const char *to_lang,
+                                       const char *text, bool *is_single_message) {
+    if (!translator || !from_lang || !to_lang) {
         return NULL;
     }
 
-    const char *to_name = get_language_name(to_lang);
-    if (!to_name) to_name = to_lang;
+    /* Initialize output flag */
+    if (is_single_message) {
+        *is_single_message = false;
+    }
 
     /* Use PROMPT_PREFIX as the instruction message */
     char *instruction = strdup(translator->config->prompt_prefix);
@@ -357,25 +382,109 @@ static char *build_instruction_message(OpenAITranslator *translator, const char 
         return NULL;
     }
 
-    /* Replace [TARGET LANGUAGE] with actual target language name */
-    char *temp = str_replace(instruction, "[TARGET LANGUAGE]", to_name);
-    if (temp) {
-        free(instruction);
-        instruction = temp;
-    }
+    /* Check if using TranslateGemma format */
+    bool translategemma_format = is_translategemma_format(instruction);
 
-    /* Also try replacing {{LANGUAGE_TO}} for backward compatibility */
-    temp = str_replace(instruction, "{{LANGUAGE_TO}}", to_name);
-    if (temp) {
-        free(instruction);
-        instruction = temp;
+    if (translategemma_format && translator->lang_table) {
+        /* TranslateGemma format: replace all placeholders */
+        const char *source_name = NULL;
+        const char *source_iso639_1 = NULL;
+        const char *source_iso639_2 = NULL;
+        const char *target_name = NULL;
+        const char *target_iso639_1 = NULL;
+        const char *target_iso639_2 = NULL;
+
+        /* Resolve source language */
+        if (language_table_resolve(translator->lang_table, from_lang,
+                                   &source_name, &source_iso639_1, &source_iso639_2) != 0) {
+            /* Fallback to get_language_name if not found in table */
+            source_name = get_language_name(from_lang);
+            source_iso639_1 = from_lang;
+        }
+
+        /* Resolve target language */
+        if (language_table_resolve(translator->lang_table, to_lang,
+                                   &target_name, &target_iso639_1, &target_iso639_2) != 0) {
+            /* Fallback to get_language_name if not found in table */
+            target_name = get_language_name(to_lang);
+            target_iso639_1 = to_lang;
+        }
+
+        /* Use default values if still NULL */
+        if (!source_name) source_name = from_lang;
+        if (!source_iso639_1) source_iso639_1 = from_lang;
+        if (!target_name) target_name = to_lang;
+        if (!target_iso639_1) target_iso639_1 = to_lang;
+
+        char *temp;
+
+        /* Replace {SOURCE_LANG} */
+        temp = str_replace(instruction, "{SOURCE_LANG}", source_name);
+        if (temp) {
+            free(instruction);
+            instruction = temp;
+        }
+
+        /* Replace {SOURCE_CODE} */
+        temp = str_replace(instruction, "{SOURCE_CODE}", source_iso639_1);
+        if (temp) {
+            free(instruction);
+            instruction = temp;
+        }
+
+        /* Replace {TARGET_LANG} */
+        temp = str_replace(instruction, "{TARGET_LANG}", target_name);
+        if (temp) {
+            free(instruction);
+            instruction = temp;
+        }
+
+        /* Replace {TARGET_CODE} */
+        temp = str_replace(instruction, "{TARGET_CODE}", target_iso639_1);
+        if (temp) {
+            free(instruction);
+            instruction = temp;
+        }
+
+        /* Replace {TEXT} with actual text if provided */
+        if (text) {
+            temp = str_replace(instruction, "{TEXT}", text);
+            if (temp) {
+                free(instruction);
+                instruction = temp;
+            }
+            /* Signal that single message format should be used */
+            if (is_single_message) {
+                *is_single_message = true;
+            }
+        }
+    } else {
+        /* Legacy format: only replace target language placeholders */
+        const char *to_name = get_language_name(to_lang);
+        if (!to_name) to_name = to_lang;
+
+        char *temp;
+
+        /* Replace [TARGET LANGUAGE] with actual target language name */
+        temp = str_replace(instruction, "[TARGET LANGUAGE]", to_name);
+        if (temp) {
+            free(instruction);
+            instruction = temp;
+        }
+
+        /* Also try replacing {{LANGUAGE_TO}} for backward compatibility */
+        temp = str_replace(instruction, "{{LANGUAGE_TO}}", to_name);
+        if (temp) {
+            free(instruction);
+            instruction = temp;
+        }
     }
 
     return instruction;
 }
 
 /* Initialize OpenAI translator */
-OpenAITranslator *openai_translator_init(Config *config, int max_retries, int timeout) {
+OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_table, int max_retries, int timeout) {
     if (!config) {
         LOG_DEBUG( "Error: NULL config");
         return NULL;
@@ -388,6 +497,7 @@ OpenAITranslator *openai_translator_init(Config *config, int max_retries, int ti
     }
 
     translator->config = config;
+    translator->lang_table = lang_table;
     translator->max_retries = max_retries > 0 ? max_retries : DEFAULT_MAX_RETRIES;
     translator->timeout = timeout > 0 ? timeout : DEFAULT_TIMEOUT;
 
@@ -425,7 +535,9 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         return NULL;
     }
 
-    char *instruction = build_instruction_message(translator, to_lang);
+    /* Build instruction message with all placeholders replaced */
+    bool use_single_message = false;
+    char *instruction = build_instruction_message(translator, from_lang, to_lang, text, &use_single_message);
     if (!instruction) {
         if (error) {
             error->message = strdup("Failed to build instruction message");
@@ -435,7 +547,9 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         return NULL;
     }
 
-    LOG_INFO( "[%s] Starting translation: %s -> %s\n", request_uuid, from_lang, to_lang);
+    LOG_INFO( "[%s] Starting translation: %s -> %s (format: %s)\n",
+            request_uuid, from_lang, to_lang,
+            use_single_message ? "TranslateGemma" : "legacy");
 
     char *result = NULL;
     int attempt;
@@ -475,45 +589,55 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         cJSON_AddStringToObject(system_message, "content", translator->config->system_role);
         cJSON_AddItemToArray(messages, system_message);
 
-        /* Message 2: Translation instructions with PROMPT_PREFIX */
-        cJSON *instruction_message = cJSON_CreateObject();
-        cJSON_AddStringToObject(instruction_message, "role", "user");
-        cJSON_AddStringToObject(instruction_message, "content", instruction);
-        cJSON_AddItemToArray(messages, instruction_message);
+        if (use_single_message) {
+            /* TranslateGemma format: Single user message with all content */
+            /* The instruction already contains the text via {TEXT} placeholder */
+            cJSON *instruction_message = cJSON_CreateObject();
+            cJSON_AddStringToObject(instruction_message, "role", "user");
+            cJSON_AddStringToObject(instruction_message, "content", instruction);
+            cJSON_AddItemToArray(messages, instruction_message);
+        } else {
+            /* Legacy format: Multiple messages */
+            /* Message 2: Translation instructions with PROMPT_PREFIX */
+            cJSON *instruction_message = cJSON_CreateObject();
+            cJSON_AddStringToObject(instruction_message, "role", "user");
+            cJSON_AddStringToObject(instruction_message, "content", instruction);
+            cJSON_AddItemToArray(messages, instruction_message);
 
-        /* Message 3: Language direction */
-        char language_info[256];
-        snprintf(language_info, sizeof(language_info), "Translate FROM %s TO %s",
-                 get_language_name(from_lang), get_language_name(to_lang));
-        cJSON *language_message = cJSON_CreateObject();
-        cJSON_AddStringToObject(language_message, "role", "user");
-        cJSON_AddStringToObject(language_message, "content", language_info);
-        cJSON_AddItemToArray(messages, language_message);
+            /* Message 3: Language direction */
+            char language_info[256];
+            snprintf(language_info, sizeof(language_info), "Translate FROM %s TO %s",
+                     get_language_name(from_lang), get_language_name(to_lang));
+            cJSON *language_message = cJSON_CreateObject();
+            cJSON_AddStringToObject(language_message, "role", "user");
+            cJSON_AddStringToObject(language_message, "content", language_info);
+            cJSON_AddItemToArray(messages, language_message);
 
-        /* Message 4: Actual text to translate */
-        /* cJSON automatically escapes newlines (\n) and other special characters */
-        /* Wrap text in <source> tags */
-        size_t wrapped_text_len = strlen(text) + strlen("<source></source>") + 1;
-        char *wrapped_text = malloc(wrapped_text_len);
-        if (!wrapped_text) {
-            LOG_DEBUG( "[%s] Failed to allocate memory for wrapped text\n", request_uuid);
-            cJSON_Delete(root);
-            free(instruction);
-            if (error) {
-                error->message = strdup("Memory allocation failed");
-                error->retryable = false;
-                error->status_code = 0;
+            /* Message 4: Actual text to translate */
+            /* cJSON automatically escapes newlines (\n) and other special characters */
+            /* Wrap text in <source> tags */
+            size_t wrapped_text_len = strlen(text) + strlen("<source></source>") + 1;
+            char *wrapped_text = malloc(wrapped_text_len);
+            if (!wrapped_text) {
+                LOG_DEBUG( "[%s] Failed to allocate memory for wrapped text\n", request_uuid);
+                cJSON_Delete(root);
+                free(instruction);
+                if (error) {
+                    error->message = strdup("Memory allocation failed");
+                    error->retryable = false;
+                    error->status_code = 0;
+                }
+                return NULL;
             }
-            return NULL;
+            snprintf(wrapped_text, wrapped_text_len, "<source>%s</source>", text);
+
+            cJSON *text_message = cJSON_CreateObject();
+            cJSON_AddStringToObject(text_message, "role", "user");
+            cJSON_AddStringToObject(text_message, "content", wrapped_text);
+            cJSON_AddItemToArray(messages, text_message);
+
+            free(wrapped_text);
         }
-        snprintf(wrapped_text, wrapped_text_len, "<source>%s</source>", text);
-
-        cJSON *text_message = cJSON_CreateObject();
-        cJSON_AddStringToObject(text_message, "role", "user");
-        cJSON_AddStringToObject(text_message, "content", wrapped_text);
-        cJSON_AddItemToArray(messages, text_message);
-
-        free(wrapped_text);
 
         cJSON_AddItemToObject(root, "messages", messages);
 

@@ -3,10 +3,12 @@
 
 #include <stdbool.h>
 #include "config_loader.h"
+#include "language_table.h"
 
 /* OpenAI translator structure */
 typedef struct {
     Config *config;
+    LanguageTable *lang_table;  /* Language code/name mappings */
     int max_retries;
     int timeout;
 } OpenAITranslator;
@@ -19,7 +21,7 @@ typedef struct {
 } TranslationError;
 
 /* Initialize OpenAI translator */
-OpenAITranslator *openai_translator_init(Config *config, int max_retries, int timeout);
+OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_table, int max_retries, int timeout);
 
 /* Free OpenAI translator */
 void openai_translator_free(OpenAITranslator *translator);

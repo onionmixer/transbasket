@@ -46,6 +46,10 @@ typedef struct {
     int cache_threshold;     /* Minimum count to use cache (default: 5) */
     bool cache_cleanup_enabled;  /* Enable automatic cleanup (default: true) */
     int cache_cleanup_days;  /* Cleanup entries older than N days (default: 60) */
+
+    /* Prompt and language configuration */
+    char *prompt_prefix_file;    /* Path to prompt prefix file (default: PROMPT_PREFIX.txt) */
+    char *language_table_file;   /* Path to language table file (default: language_tables.conf) */
 } Config;
 
 /* Load configuration from file */
