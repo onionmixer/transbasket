@@ -193,16 +193,8 @@ curl -X POST http://localhost:8889/translate \
 - `text` (string, required): 번역할 텍스트
 
 **Supported Language Codes:**
-- `kor`: Korean (한국어)
-- `eng`: English (영어)
-- `jpn`: Japanese (일본어)
-- `chi`: Chinese (중국어)
-- `spa`: Spanish (스페인어)
-- `fra`: French (프랑스어)
-- `ger`: German (독일어)
-- `rus`: Russian (러시아어)
-- `ara`: Arabic (아랍어)
-- `por`: Portuguese (포르투갈어)
+
+번역 지원 언어는 Model에 따라 다르며, 언어의 형식은 `language_tables.conf`를 참고하세요.
 
 **Response:**
 ```json
