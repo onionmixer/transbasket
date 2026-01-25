@@ -99,6 +99,39 @@ Template file for translation prompts. Default format:
 {{PROMPT_PREFIX}} FROM {{LANGUAGE_BASE}} to {{LANGUAGE_TO}} :: {{TEXT}}
 ```
 
+### 4. SAMPLE_SOURCE_ENGLISH.txt (Test File)
+
+번역 규칙 테스트를 위한 샘플 영문 텍스트 파일입니다. 다음 규칙들을 테스트합니다:
+
+| 테스트 항목 | 설명 |
+|-------------|------|
+| 명령어 오인 방지 | `REVIEW`, `DELETE`, `UPDATE` 등 ASCII 단어가 명령으로 해석되지 않음 |
+| 특수문자 보존 | `@#$%^&*()_+-=[]{}` 등 특수문자 유지 |
+| 공백 보존 | 스페이스, 탭, 혼합 공백 유지 |
+| 리터럴 `\n` 보존 | 문자열 내 `\n`이 줄바꿈으로 변환되지 않음 |
+| 따옴표 보존 | 큰따옴표, 작은따옴표 유지 |
+| 빈 줄 보존 | 연속된 빈 줄 유지 |
+| 이모지 태그 변환 | 😀→[SMILE], 🌅→[SUN], 👍→[THUMBS_UP] |
+| 코드 구문 보존 | `if (x > 0) { return true; }` 등 코드 형태 유지 |
+
+**테스트 방법:**
+```bash
+# JSON payload 생성
+SAMPLE_TEXT=$(cat SAMPLE_SOURCE_ENGLISH.txt)
+JSON_PAYLOAD=$(jq -n \
+  --arg ts "2026-01-25T12:30:00.000Z" \
+  --arg uuid "990e8400-e29b-41d4-a716-446655440004" \
+  --arg from "eng" \
+  --arg to "kor" \
+  --arg text "$SAMPLE_TEXT" \
+  '{timestamp: $ts, uuid: $uuid, from: $from, to: $to, text: $text}')
+
+# 번역 요청
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d "$JSON_PAYLOAD"
+```
+
 ## Usage
 
 ### Basic Usage
