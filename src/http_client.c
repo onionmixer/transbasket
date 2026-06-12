@@ -1091,6 +1091,24 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
     return result;
 }
 
+/* Translation backend dispatch table.
+ * To add a backend: implement a `translate_via_X()` with this exact signature,
+ * add a ModelType enum value, and add one row here. No other dispatch edits. */
+typedef char *(*TranslateFn)(OpenAITranslator *, const char *, const char *,
+                             const char *, const char *, const char *,
+                             TranslationError *);
+
+typedef struct {
+    ModelType   type;
+    const char *name;
+    TranslateFn translate;
+} TranslationBackend;
+
+static const TranslationBackend TRANSLATION_BACKENDS[] = {
+    { MODEL_TYPE_NORMAL, "normal", translate_via_openai },
+    { MODEL_TYPE_CODEX,  "codex",  translate_via_codex  },
+};
+
 /* Translate text using the configured backend (dispatch on MODEL_TYPE). */
 char *openai_translate(OpenAITranslator *translator, const char *from_lang,
                        const char *to_lang, const char *text,
@@ -1101,9 +1119,16 @@ char *openai_translate(OpenAITranslator *translator, const char *from_lang,
         return NULL;
     }
 
-    if (translator->config->model_type == MODEL_TYPE_CODEX) {
-        return translate_via_codex(translator, from_lang, to_lang, text, request_uuid, timestamp, error);
+    ModelType mt = translator->config->model_type;
+    for (size_t i = 0; i < sizeof(TRANSLATION_BACKENDS) / sizeof(TRANSLATION_BACKENDS[0]); i++) {
+        if (TRANSLATION_BACKENDS[i].type == mt) {
+            return TRANSLATION_BACKENDS[i].translate(translator, from_lang, to_lang,
+                                                     text, request_uuid, timestamp, error);
+        }
     }
+
+    /* Unknown backend (config validation should prevent this): fall back to normal. */
+    LOG_INFO("[%s] Unknown MODEL_TYPE (%d), falling back to normal backend\n", request_uuid, (int)mt);
     return translate_via_openai(translator, from_lang, to_lang, text, request_uuid, timestamp, error);
 }
 

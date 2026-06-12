@@ -4,6 +4,7 @@
 #include <sys/types.h>   /* pid_t */
 #include <stddef.h>      /* size_t */
 #include <stdbool.h>     /* bool */
+#include <cjson/cJSON.h> /* cJSON (mcp_call_tool arguments) */
 
 /*
  * Minimal MCP (Model Context Protocol) stdio JSON-RPC 2.0 client.
@@ -41,8 +42,25 @@ MCPClient *mcp_client_start(const char *bin);
  * Returns 0 on success, -1 on failure/timeout. */
 int mcp_initialize(MCPClient *c, int timeout_sec);
 
-/* Call tools/call name="codex". Returns the agent's final message text
- * (caller frees), or NULL on failure.
+/* Generic MCP tools/call. Builds the JSON-RPC envelope for `tool_name` with the
+ * given `arguments` object and returns the tool's text result (caller frees),
+ * or NULL on failure.
+ *
+ * OWNERSHIP: this function TAKES OWNERSHIP of `arguments` and frees it (even on
+ * error / NULL input). The caller must NOT delete `arguments` afterwards. Pass
+ * NULL for an empty argument object.
+ *
+ * On failure, *err_out (caller frees) gets a message and *timed_out is set.
+ * Reusable by any MCP-backed translation backend. */
+char *mcp_call_tool(MCPClient *c,
+                    const char *tool_name,
+                    cJSON *arguments,
+                    int timeout_sec,
+                    char **err_out,
+                    bool *timed_out);
+
+/* Call tools/call name="codex" (thin wrapper over mcp_call_tool). Returns the
+ * agent's final message text (caller frees), or NULL on failure.
  *   - reasoning_effort: if non-NULL/non-empty, injected as
  *     arguments.config.model_reasoning_effort
  *   - on failure, *err_out (caller frees) gets a message and *timed_out is set.

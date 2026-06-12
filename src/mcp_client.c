@@ -399,6 +399,88 @@ int mcp_initialize(MCPClient *c, int timeout_sec) {
     return rc;
 }
 
+/* Generic tools/call. Takes ownership of `arguments` (frees it on every path). */
+char *mcp_call_tool(MCPClient *c,
+                    const char *tool_name,
+                    cJSON *arguments,
+                    int timeout_sec,
+                    char **err_out,
+                    bool *timed_out) {
+    if (err_out) *err_out = NULL;
+    if (timed_out) *timed_out = false;
+    if (!c || !tool_name) {
+        if (arguments) cJSON_Delete(arguments);  /* honor ownership contract */
+        if (err_out) *err_out = strdup("invalid arguments");
+        return NULL;
+    }
+    if (!arguments) arguments = cJSON_CreateObject();
+
+    int id = c->next_id++;
+    cJSON *req = cJSON_CreateObject();
+    cJSON_AddStringToObject(req, "jsonrpc", "2.0");
+    cJSON_AddNumberToObject(req, "id", id);
+    cJSON_AddStringToObject(req, "method", "tools/call");
+
+    cJSON *params = cJSON_CreateObject();
+    cJSON_AddStringToObject(params, "name", tool_name);
+    cJSON_AddItemToObject(params, "arguments", arguments);  /* transfer ownership */
+    cJSON_AddItemToObject(req, "params", params);
+
+    int rc = send_json(c, req);
+    cJSON_Delete(req);  /* frees req -> params -> arguments (single owner) */
+    if (rc != 0) {
+        if (err_out) *err_out = strdup("failed to send tools/call");
+        return NULL;
+    }
+
+    char *werr = NULL;
+    cJSON *resp = wait_for_id(c, id, timeout_sec, timed_out, &werr);
+    if (!resp) {
+        if (err_out) *err_out = werr ? werr : strdup("MCP tool call failed");
+        else free(werr);
+        return NULL;
+    }
+    free(werr);
+
+    /* top-level error? */
+    cJSON *jerr = cJSON_GetObjectItem(resp, "error");
+    if (jerr) {
+        cJSON *msg = cJSON_GetObjectItem(jerr, "message");
+        if (err_out) {
+            *err_out = strdup((cJSON_IsString(msg) && msg->valuestring)
+                                  ? msg->valuestring : "MCP tool returned an error");
+        }
+        cJSON_Delete(resp);
+        return NULL;
+    }
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    cJSON *is_error = result ? cJSON_GetObjectItem(result, "isError") : NULL;
+    if (cJSON_IsBool(is_error) && cJSON_IsTrue(is_error)) {
+        char *txt = extract_translation(result);
+        if (err_out) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "MCP tool error%s%s",
+                     txt ? ": " : "", txt ? txt : "");
+            *err_out = strdup(buf);
+        }
+        free(txt);
+        cJSON_Delete(resp);
+        return NULL;
+    }
+
+    char *text = extract_translation(result);
+    cJSON_Delete(resp);
+
+    if (!text) {
+        if (err_out) *err_out = strdup("no content in MCP tool response");
+        return NULL;
+    }
+    return text;
+}
+
+/* codex-specific wrapper: builds the codex tool arguments, then delegates to
+ * mcp_call_tool. The JSON sent is identical to the previous direct builder. */
 char *mcp_call_codex(MCPClient *c,
                      const char *prompt,
                      const char *model,
@@ -416,15 +498,11 @@ char *mcp_call_codex(MCPClient *c,
         return NULL;
     }
 
-    int id = c->next_id++;
-    cJSON *req = cJSON_CreateObject();
-    cJSON_AddStringToObject(req, "jsonrpc", "2.0");
-    cJSON_AddNumberToObject(req, "id", id);
-    cJSON_AddStringToObject(req, "method", "tools/call");
-
-    cJSON *params = cJSON_CreateObject();
-    cJSON_AddStringToObject(params, "name", "codex");
     cJSON *args = cJSON_CreateObject();
+    if (!args) {
+        if (err_out) *err_out = strdup("out of memory");
+        return NULL;
+    }
     cJSON_AddStringToObject(args, "prompt", prompt);
     if (model && *model)             cJSON_AddStringToObject(args, "model", model);
     if (sandbox && *sandbox)         cJSON_AddStringToObject(args, "sandbox", sandbox);
@@ -436,60 +514,9 @@ char *mcp_call_codex(MCPClient *c,
         cJSON_AddStringToObject(cfg, "model_reasoning_effort", reasoning_effort);
         cJSON_AddItemToObject(args, "config", cfg);
     }
-    cJSON_AddItemToObject(params, "arguments", args);
-    cJSON_AddItemToObject(req, "params", params);
 
-    int rc = send_json(c, req);
-    cJSON_Delete(req);
-    if (rc != 0) {
-        if (err_out) *err_out = strdup("failed to send tools/call");
-        return NULL;
-    }
-
-    char *werr = NULL;
-    cJSON *resp = wait_for_id(c, id, timeout_sec, timed_out, &werr);
-    if (!resp) {
-        if (err_out) *err_out = werr ? werr : strdup("codex call failed");
-        else free(werr);
-        return NULL;
-    }
-    free(werr);
-
-    /* top-level error? */
-    cJSON *jerr = cJSON_GetObjectItem(resp, "error");
-    if (jerr) {
-        cJSON *msg = cJSON_GetObjectItem(jerr, "message");
-        if (err_out) {
-            *err_out = strdup((cJSON_IsString(msg) && msg->valuestring)
-                                  ? msg->valuestring : "codex returned an error");
-        }
-        cJSON_Delete(resp);
-        return NULL;
-    }
-
-    cJSON *result = cJSON_GetObjectItem(resp, "result");
-    cJSON *is_error = result ? cJSON_GetObjectItem(result, "isError") : NULL;
-    if (cJSON_IsBool(is_error) && cJSON_IsTrue(is_error)) {
-        char *txt = extract_translation(result);
-        if (err_out) {
-            char buf[512];
-            snprintf(buf, sizeof(buf), "codex tool error%s%s",
-                     txt ? ": " : "", txt ? txt : "");
-            *err_out = strdup(buf);
-        }
-        free(txt);
-        cJSON_Delete(resp);
-        return NULL;
-    }
-
-    char *translation = extract_translation(result);
-    cJSON_Delete(resp);
-
-    if (!translation) {
-        if (err_out) *err_out = strdup("no translation content in codex response");
-        return NULL;
-    }
-    return translation;
+    /* mcp_call_tool takes ownership of args. */
+    return mcp_call_tool(c, "codex", args, timeout_sec, err_out, timed_out);
 }
 
 /* Terminate and reap the child, then free everything. */
