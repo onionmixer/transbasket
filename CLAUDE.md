@@ -64,14 +64,17 @@ curl -X POST http://localhost:8889/translate \
 
 ### Module Organization
 
-The C implementation follows a clear separation of concerns across 6 modules:
+The C implementation follows a clear separation of concerns across these core modules:
 
 1. **main.c**: Entry point with signal handling (SIGINT, SIGTERM, SIGHUP)
 2. **config_loader.c**: Parses `transbasket.conf` (KEY="value" format) and `PROMPT_PREFIX.txt`
 3. **utils.c**: Validation utilities (RFC 3339 timestamps, UUID v4, ISO 639-2 language codes, emoji stripping)
 4. **json_handler.c**: JSON request/response handling using cJSON
-5. **http_client.c**: OpenAI API client using libcurl with retry logic and exponential backoff
+5. **http_client.c**: Translation dispatch — `normal` (OpenAI API via libcurl, retry/backoff) and `codex` (MCP) backends
 6. **http_server.c**: HTTP server using libmicrohttpd with thread-per-connection model
+7. **mcp_client.c**: Minimal MCP stdio JSON-RPC 2.0 client that drives `codex mcp-server` (used by the `codex` backend)
+
+(Cache and language-table concerns live in `trans_cache.c`, `cache_backend_*.c`, and `language_table.c`.)
 
 ### Threading Model
 
@@ -91,16 +94,19 @@ Implementation in `http_server.c`:
 - `MHD_USE_THREAD_PER_CONNECTION` flag creates dedicated threads
 - `openai_translate()` called directly (no executor needed)
 
+For the `codex` backend the same blocking thread spawns a `codex mcp-server` child per request, so the model still maps cleanly: one blocked thread = one outstanding codex process (capped by a semaphore).
+
 ### Request Flow
 
 1. Client → libmicrohttpd creates new thread
-2. Thread → Validates JSON with cJSON
-3. Thread → Loads prompt template from `sample_send.txt`
-4. Thread → Builds prompt replacing `{{PROMPT_PREFIX}}`, `{{LANGUAGE_BASE}}`, `{{LANGUAGE_TO}}`
-5. Thread → Calls OpenAI API via libcurl (with retry logic: max 3 attempts, exponential backoff)
-6. Thread → Strips emoji/shortcodes from response
-7. Thread → Sends JSON response preserving original UUID/timestamp
-8. Connection closes, thread terminates
+2. Thread → Validates JSON with cJSON (invalid → 422)
+3. Thread → Cache lookup; on hit above threshold, returns cached translation
+4. Thread → `openai_translate()` dispatches on `MODEL_TYPE`:
+   - **normal**: builds prompt, calls OpenAI API via libcurl (retry: max 3, exponential backoff), unescapes + strips emoji/shortcodes
+   - **codex**: builds a delimiter-isolated prompt, acquires a concurrency slot, spawns `codex mcp-server`, runs initialize + `tools/call`, takes `structuredContent.content` (trim + whole-fence unwrap only)
+5. Thread → Updates cache
+6. Thread → Sends JSON response preserving original UUID/timestamp
+7. Connection closes, thread terminates
 
 ### Configuration System
 
@@ -115,6 +121,21 @@ Two configuration files:
    - Loaded at startup
    - Supports complex instructions
    - UTF-8 encoded
+
+### Translation Backend (MODEL_TYPE)
+
+`MODEL_TYPE` selects how translations are produced (see `config_loader.c`, `http_client.c:openai_translate()` dispatch):
+
+- **`normal`** (default): existing OpenAI-compatible HTTP API path (`/v1/chat/completions` via libcurl). Uses `OPENAI_BASE_URL/MODEL/API_KEY`. Behavior unchanged.
+- **`codex`**: drives the installed `codex` CLI as an MCP server (`codex mcp-server`, stdio JSON-RPC 2.0) via the `mcp_client.c` module. `OPENAI_*` are unused; `CODEX_*` settings apply.
+
+codex backend specifics:
+- One `codex mcp-server` child is spawned per request (`posix_spawnp`, in its own process group so the node wrapper **and** the real codex grandchild are reaped on stop).
+- Concurrency is capped by a semaphore in `OpenAITranslator` (`CODEX_MAX_CONCURRENCY`, default = `MAX_WORKERS`); exhaustion → 503, call timeout → 504.
+- Untrusted text is isolated with a per-request random delimiter (uuid-based); `sandbox=read-only`/`approval-policy=never` are force-validated unless `CODEX_ALLOW_UNSAFE=true`.
+- Each request runs in a fresh `mkdtemp` cwd under `CODEX_RUN_DIR` (default `/var/lib/transbasket/run`), removed afterward.
+- The translation is taken from `result.structuredContent.content`; codex output is **not** re-unescaped or emoji-stripped (would corrupt it), only trimmed + whole-output code-fence unwrapped.
+- Requires the host (service user) to have `codex login` done and a writable `CODEX_HOME`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` §7.1 for the systemd/operator checklist.
 
 ### Validation Standards
 

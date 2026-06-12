@@ -2,6 +2,7 @@
 #define HTTP_CLIENT_H
 
 #include <stdbool.h>
+#include <semaphore.h>
 #include "config_loader.h"
 #include "language_table.h"
 
@@ -11,6 +12,10 @@ typedef struct {
     LanguageTable *lang_table;  /* Language code/name mappings */
     int max_retries;
     int timeout;
+
+    /* codex backend: limit concurrent codex processes (codex mode only) */
+    sem_t codex_sem;
+    bool  codex_sem_inited;
 } OpenAITranslator;
 
 /* Translation error structure */
@@ -20,8 +25,10 @@ typedef struct {
     int status_code;
 } TranslationError;
 
-/* Initialize OpenAI translator */
-OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_table, int max_retries, int timeout);
+/* Initialize OpenAI translator.
+ * max_concurrency limits concurrent codex processes (codex mode only). */
+OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_table,
+                                         int max_retries, int timeout, int max_concurrency);
 
 /* Free OpenAI translator */
 void openai_translator_free(OpenAITranslator *translator);

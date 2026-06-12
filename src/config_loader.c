@@ -168,29 +168,40 @@ int validate_config(const Config *config) {
         return -1;
     }
 
-    /* Validate OPENAI_BASE_URL */
-    if (!config->openai_base_url || strlen(config->openai_base_url) == 0) {
-        LOG_INFO( "Error: OPENAI_BASE_URL is required");
-        return -1;
-    }
+    /* OPENAI_* validation is only relevant for the normal (HTTP API) backend.
+     * In codex mode these settings are unused, so skip them entirely - including
+     * URL syntax - so a stale OPENAI_BASE_URL does not block codex startup. */
+    if (config->model_type == MODEL_TYPE_NORMAL) {
+        /* Validate OPENAI_BASE_URL */
+        if (!config->openai_base_url || strlen(config->openai_base_url) == 0) {
+            LOG_INFO( "Error: OPENAI_BASE_URL is required");
+            return -1;
+        }
 
-    /* Simple URL validation */
-    if (strncmp(config->openai_base_url, "http://", 7) != 0 &&
-        strncmp(config->openai_base_url, "https://", 8) != 0) {
-        LOG_INFO( "Error: Invalid OPENAI_BASE_URL (must start with http:// or https://)");
-        return -1;
-    }
+        /* Simple URL validation */
+        if (strncmp(config->openai_base_url, "http://", 7) != 0 &&
+            strncmp(config->openai_base_url, "https://", 8) != 0) {
+            LOG_INFO( "Error: Invalid OPENAI_BASE_URL (must start with http:// or https://)");
+            return -1;
+        }
 
-    /* Validate OPENAI_MODEL */
-    if (!config->openai_model || strlen(config->openai_model) == 0) {
-        LOG_INFO( "Error: OPENAI_MODEL is required");
-        return -1;
-    }
+        /* Validate OPENAI_MODEL */
+        if (!config->openai_model || strlen(config->openai_model) == 0) {
+            LOG_INFO( "Error: OPENAI_MODEL is required");
+            return -1;
+        }
 
-    /* Validate OPENAI_API_KEY */
-    if (!config->openai_api_key || strlen(config->openai_api_key) == 0) {
-        LOG_INFO( "Error: OPENAI_API_KEY is required");
-        return -1;
+        /* Validate OPENAI_API_KEY */
+        if (!config->openai_api_key || strlen(config->openai_api_key) == 0) {
+            LOG_INFO( "Error: OPENAI_API_KEY is required");
+            return -1;
+        }
+    } else {
+        /* codex mode: codex_bin must be present */
+        if (!config->codex_bin || strlen(config->codex_bin) == 0) {
+            LOG_INFO( "Error: CODEX_BIN is required in codex mode");
+            return -1;
+        }
     }
 
     /* Validate PORT */
@@ -296,6 +307,21 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     /* Prompt and language configuration defaults */
     config->prompt_prefix_file = strdup("PROMPT_PREFIX.txt");
     config->language_table_file = strdup("language_tables.conf");
+
+    /* Translation backend defaults */
+    config->model_type = MODEL_TYPE_NORMAL;
+    config->model_type_str = strdup("normal");
+
+    /* codex backend defaults */
+    config->codex_bin = strdup("codex");
+    config->codex_model = NULL;             /* NULL = codex default model */
+    config->codex_sandbox = strdup("read-only");
+    config->codex_approval_policy = strdup("never");
+    config->codex_reasoning_effort = NULL;  /* NULL = not injected */
+    config->codex_run_dir = strdup("/var/lib/transbasket/run");
+    config->codex_timeout = 100;
+    config->codex_max_concurrency = 0;      /* 0 = use MAX_WORKERS */
+    config->codex_allow_unsafe = false;
 
     /* Parse config file */
     char line[MAX_LINE_LENGTH];
@@ -425,6 +451,58 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         } else if (strcmp(key, "LANGUAGE_TABLE_FILE") == 0) {
             free(config->language_table_file);
             config->language_table_file = strdup(value);
+        } else if (strcmp(key, "MODEL_TYPE") == 0) {
+            free(config->model_type_str);
+            if (strcasecmp(value, "normal") == 0) {
+                config->model_type = MODEL_TYPE_NORMAL;
+                config->model_type_str = strdup("normal");
+            } else if (strcasecmp(value, "codex") == 0) {
+                config->model_type = MODEL_TYPE_CODEX;
+                config->model_type_str = strdup("codex");
+            } else {
+                LOG_INFO("Warning: Invalid MODEL_TYPE '%s', using 'normal'\n", value);
+                config->model_type = MODEL_TYPE_NORMAL;
+                config->model_type_str = strdup("normal");
+            }
+        } else if (strcmp(key, "CODEX_BIN") == 0) {
+            free(config->codex_bin);
+            config->codex_bin = strdup(value);
+        } else if (strcmp(key, "CODEX_MODEL") == 0) {
+            free(config->codex_model);
+            config->codex_model = strdup(value);
+        } else if (strcmp(key, "CODEX_SANDBOX") == 0) {
+            free(config->codex_sandbox);
+            config->codex_sandbox = strdup(value);
+        } else if (strcmp(key, "CODEX_APPROVAL_POLICY") == 0) {
+            free(config->codex_approval_policy);
+            config->codex_approval_policy = strdup(value);
+        } else if (strcmp(key, "CODEX_REASONING_EFFORT") == 0) {
+            free(config->codex_reasoning_effort);
+            config->codex_reasoning_effort = strdup(value);
+        } else if (strcmp(key, "CODEX_RUN_DIR") == 0) {
+            free(config->codex_run_dir);
+            config->codex_run_dir = strdup(value);
+        } else if (strcmp(key, "CODEX_TIMEOUT") == 0) {
+            char *endptr = NULL;
+            long t = strtol(value, &endptr, 10);
+            if (endptr == value || *endptr != '\0' || t <= 0) {
+                LOG_INFO("Warning: Invalid CODEX_TIMEOUT '%s', using 100\n", value);
+                config->codex_timeout = 100;
+            } else {
+                config->codex_timeout = (int)t;
+            }
+        } else if (strcmp(key, "CODEX_MAX_CONCURRENCY") == 0) {
+            char *endptr = NULL;
+            long c = strtol(value, &endptr, 10);
+            if (endptr == value || *endptr != '\0' || c < 1) {
+                config->codex_max_concurrency = 0;  /* 0 = use MAX_WORKERS */
+            } else {
+                config->codex_max_concurrency = (int)c;
+            }
+        } else if (strcmp(key, "CODEX_ALLOW_UNSAFE") == 0) {
+            config->codex_allow_unsafe = (strcasecmp(value, "yes") == 0 ||
+                                          strcmp(value, "1") == 0 ||
+                                          strcasecmp(value, "true") == 0);
         }
     }
 
@@ -468,6 +546,44 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         return NULL;
     }
 
+    /* codex backend: security hard-coercion and timeout clamp.
+     * Untrusted text is translated, so force the safe sandbox/approval values
+     * unless the operator explicitly opted into unsafe values. */
+    if (config->model_type == MODEL_TYPE_CODEX) {
+        if (!config->codex_allow_unsafe) {
+            if (config->codex_sandbox && strcmp(config->codex_sandbox, "read-only") != 0) {
+                LOG_INFO("Warning: CODEX_SANDBOX '%s' forced to 'read-only' (set CODEX_ALLOW_UNSAFE=true to override)\n",
+                        config->codex_sandbox);
+                free(config->codex_sandbox);
+                config->codex_sandbox = strdup("read-only");
+            }
+            if (config->codex_approval_policy && strcmp(config->codex_approval_policy, "never") != 0) {
+                LOG_INFO("Warning: CODEX_APPROVAL_POLICY '%s' forced to 'never' (set CODEX_ALLOW_UNSAFE=true to override)\n",
+                        config->codex_approval_policy);
+                free(config->codex_approval_policy);
+                config->codex_approval_policy = strdup("never");
+            }
+        }
+
+        /* Empty CODEX_MODEL / CODEX_REASONING_EFFORT mean "not set" -> NULL */
+        if (config->codex_model && strlen(config->codex_model) == 0) {
+            free(config->codex_model);
+            config->codex_model = NULL;
+        }
+        if (config->codex_reasoning_effort && strlen(config->codex_reasoning_effort) == 0) {
+            free(config->codex_reasoning_effort);
+            config->codex_reasoning_effort = NULL;
+        }
+
+        /* Keep codex timeout below the MHD connection timeout (120s) so a valid
+         * codex response is not cut off by the idle-connection timeout. */
+        if (config->codex_timeout >= 120) {
+            LOG_INFO("Warning: CODEX_TIMEOUT %d >= MHD timeout 120, clamped to 110\n",
+                    config->codex_timeout);
+            config->codex_timeout = 110;
+        }
+    }
+
     /* Validate configuration */
     if (validate_config(config) != 0) {
         free_config(config);
@@ -497,5 +613,12 @@ void free_config(Config *config) {
     free(config->reasoning_effort);
     free(config->prompt_prefix_file);
     free(config->language_table_file);
+    free(config->model_type_str);
+    free(config->codex_bin);
+    free(config->codex_model);
+    free(config->codex_sandbox);
+    free(config->codex_approval_policy);
+    free(config->codex_reasoning_effort);
+    free(config->codex_run_dir);
     free(config);
 }

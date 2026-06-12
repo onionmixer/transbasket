@@ -83,6 +83,28 @@ LISTEN="0.0.0.0"
 PORT="8889"
 ```
 
+#### Translation backend: `MODEL_TYPE`
+
+```
+MODEL_TYPE="normal"   # normal (default) | codex
+```
+
+- **`normal`** — translate via the OpenAI-compatible HTTP API (`OPENAI_*`). Default; unchanged behavior.
+- **`codex`** — translate by driving the installed `codex` CLI as an MCP server (`codex mcp-server`). `OPENAI_*` are ignored; the `CODEX_*` keys apply (see comments in `transbasket.conf`):
+
+```
+MODEL_TYPE="codex"
+#CODEX_BIN="codex"              # codex executable (PATH-searched)
+#CODEX_MODEL="gpt-5.2"          # optional model override (unset = codex default)
+#CODEX_TIMEOUT="100"            # seconds (must be < MHD 120s)
+#CODEX_MAX_CONCURRENCY="8"      # concurrent codex processes (default = MAX_WORKERS)
+#CODEX_RUN_DIR="/var/lib/transbasket/run"   # writable root for per-request temp cwd
+#CODEX_REASONING_EFFORT="none"  # optional arguments.config injection
+#CODEX_ALLOW_UNSAFE="false"     # allow non read-only/never (dev only)
+```
+
+codex mode requires the running user to have completed `codex login` and to have a writable `CODEX_HOME`. The endpoint translates untrusted text, so `sandbox` is forced to `read-only` and `approval-policy` to `never` unless `CODEX_ALLOW_UNSAFE=true`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` for design and the operator/systemd checklist.
+
 ### 2. PROMPT_PREFIX.txt
 
 Located at `../PROMPT_PREFIX.txt` (relative to executable):
@@ -192,9 +214,12 @@ curl http://localhost:8889/health
 {
   "status": "healthy",
   "service": "transbasket",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "model_type": "normal"
 }
 ```
+
+`model_type` reflects the active backend (`normal` or `codex`). The health check is shallow and does not spawn codex.
 
 **Status Codes:**
 - `200 OK`: 서버가 정상 작동 중
@@ -263,13 +288,15 @@ c-impl/
 │   ├── config_loader.h
 │   ├── json_handler.h
 │   ├── http_client.h
-│   └── http_server.h
+│   ├── http_server.h
+│   └── mcp_client.h      # codex MCP client
 ├── src/                  # Source files
 │   ├── utils.c
 │   ├── config_loader.c
 │   ├── json_handler.c
 │   ├── http_client.c
 │   ├── http_server.c
+│   ├── mcp_client.c      # codex MCP client (MODEL_TYPE=codex)
 │   └── main.c
 ├── obj/                  # Object files (generated)
 └── bin/                  # Executable (generated)
@@ -297,10 +324,17 @@ c-impl/
 - Request/response validation
 
 ### http_client.c
-- OpenAI API communication with libcurl
-- Retry logic with exponential backoff
+- Translation dispatch on `MODEL_TYPE` (normal vs codex)
+- normal: OpenAI API communication with libcurl, retry with exponential backoff
+- codex: builds delimiter-isolated prompt, concurrency semaphore, per-request temp cwd
 - Prompt template processing
 - Error handling and status code mapping
+
+### mcp_client.c
+- Minimal MCP stdio JSON-RPC 2.0 client for `codex mcp-server`
+- Spawns codex in its own process group (`posix_spawnp`), reaps the whole tree
+- initialize handshake + `tools/call` (name="codex"), id-matched responses
+- Drains stdout/stderr concurrently (deadlock-safe), EINTR-tolerant, bounded buffers
 
 ### http_server.c
 - HTTP server with libmicrohttpd

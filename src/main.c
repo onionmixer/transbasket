@@ -220,8 +220,17 @@ int main(int argc, char *argv[]) {
 
     if (!run_as_daemon) {
         LOG_INFO("Configuration loaded successfully:");
-        LOG_INFO("  Base URL: %s", config->openai_base_url);
-        LOG_INFO("  Model: %s", config->openai_model);
+        LOG_INFO("  Model Type: %s", config->model_type_str ? config->model_type_str : "normal");
+        if (config->model_type == MODEL_TYPE_CODEX) {
+            /* OPENAI_* may be NULL in codex mode - never %s a NULL */
+            LOG_INFO("  Codex Bin: %s", config->codex_bin ? config->codex_bin : "codex");
+            LOG_INFO("  Codex Model: %s", config->codex_model ? config->codex_model : "(default)");
+            LOG_INFO("  Codex Sandbox: %s", config->codex_sandbox ? config->codex_sandbox : "read-only");
+            LOG_INFO("  Codex Timeout: %ds", config->codex_timeout);
+        } else {
+            LOG_INFO("  Base URL: %s", config->openai_base_url);
+            LOG_INFO("  Model: %s", config->openai_model);
+        }
         LOG_INFO("  Listen: %s:%d", config->listen, config->port);
         LOG_INFO("  Workers: %d", max_workers);
         printf("\n");

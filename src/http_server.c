@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <microhttpd.h>
 #include "http_server.h"
 #include "json_handler.h"
@@ -110,8 +113,14 @@ static void *cache_background_thread(void *arg) {
 }
 
 /* Health check endpoint handler */
-static int handle_health_check(struct MHD_Connection *connection) {
-    const char *response_json = "{\"status\":\"healthy\",\"service\":\"transbasket\",\"version\":\"1.0.0\"}";
+static int handle_health_check(struct MHD_Connection *connection, TranslationServer *server) {
+    /* Shallow health: status + active backend. Does NOT spawn codex. */
+    char response_json[256];
+    const char *model_type = (server && server->config && server->config->model_type_str)
+                                 ? server->config->model_type_str : "normal";
+    snprintf(response_json, sizeof(response_json),
+             "{\"status\":\"healthy\",\"service\":\"transbasket\",\"version\":\"1.0.0\",\"model_type\":\"%s\"}",
+             model_type);
 
     struct MHD_Response *response = create_json_response(response_json, MHD_HTTP_OK);
     if (!response) {
@@ -284,7 +293,14 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
         LOG_INFO("[%s] Translation error: %s", request_uuid,
                 trans_error.message ? trans_error.message : "Unknown error");
 
-        int status_code = trans_error.retryable ? MHD_HTTP_SERVICE_UNAVAILABLE : MHD_HTTP_BAD_GATEWAY;
+        /* codex backend can express precise codes (e.g. 504 timeout) via
+         * status_code; normal backend keeps its existing retryable-based map. */
+        int status_code;
+        if (server->config->model_type == MODEL_TYPE_CODEX && trans_error.status_code != 0) {
+            status_code = trans_error.status_code;
+        } else {
+            status_code = trans_error.retryable ? MHD_HTTP_SERVICE_UNAVAILABLE : MHD_HTTP_BAD_GATEWAY;
+        }
 
         char *error_json = create_error_response("TRANSLATION_ERROR",
                                                  trans_error.message ? trans_error.message : "Translation failed",
@@ -346,7 +362,7 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
 
     /* Health check endpoint */
     if (strcmp(url, "/health") == 0 && strcmp(method, "GET") == 0) {
-        return handle_health_check(connection);
+        return handle_health_check(connection, server);
     }
 
     /* Translation endpoint */
@@ -411,8 +427,28 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
         }
     }
 
-    /* Initialize translator with language table */
-    server->translator = openai_translator_init(config, server->lang_table, 3, 60);
+    /* codex backend: ensure the per-request temp-cwd root exists/writable. */
+    if (config->model_type == MODEL_TYPE_CODEX && config->codex_run_dir) {
+        struct stat rst = {0};
+        if (stat(config->codex_run_dir, &rst) == -1) {
+            if (mkdir(config->codex_run_dir, 0700) == -1) {
+                LOG_INFO("Warning: CODEX_RUN_DIR %s not present and could not be created (%s); "
+                         "per-request cwd will fall back to none",
+                        config->codex_run_dir, strerror(errno));
+            } else {
+                LOG_INFO("Created CODEX_RUN_DIR: %s", config->codex_run_dir);
+            }
+        } else if (access(config->codex_run_dir, W_OK) != 0) {
+            LOG_INFO("Warning: CODEX_RUN_DIR %s is not writable; per-request cwd will fall back to none",
+                    config->codex_run_dir);
+        }
+    }
+
+    /* Initialize translator with language table.
+     * codex concurrency = CODEX_MAX_CONCURRENCY or MAX_WORKERS. */
+    int codex_conc = config->codex_max_concurrency > 0
+                         ? config->codex_max_concurrency : server->max_workers;
+    server->translator = openai_translator_init(config, server->lang_table, 3, 60, codex_conc);
     if (!server->translator) {
         LOG_INFO("Error: Failed to initialize translator");
         if (server->lang_table) {

@@ -12,6 +12,12 @@ typedef enum {
     CACHE_BACKEND_REDIS        /* Redis cache (future) */
 } CacheBackendType;
 
+/* Translation backend type (MODEL_TYPE) */
+typedef enum {
+    MODEL_TYPE_NORMAL = 0,     /* OpenAI-compatible HTTP API (default) */
+    MODEL_TYPE_CODEX           /* codex CLI driven as an MCP server */
+} ModelType;
+
 /* Configuration structure */
 typedef struct {
     char *openai_base_url;
@@ -50,6 +56,21 @@ typedef struct {
     /* Prompt and language configuration */
     char *prompt_prefix_file;    /* Path to prompt prefix file (default: PROMPT_PREFIX.txt) */
     char *language_table_file;   /* Path to language table file (default: language_tables.conf) */
+
+    /* Translation backend selection (MODEL_TYPE) */
+    ModelType model_type;            /* Backend type (default: MODEL_TYPE_NORMAL) */
+    char *model_type_str;            /* Backend type as string for logging */
+
+    /* codex (MCP) backend settings - only used when model_type == MODEL_TYPE_CODEX */
+    char *codex_bin;                 /* codex executable (default "codex", PATH-searched) */
+    char *codex_model;               /* model override (optional, NULL = codex default) */
+    char *codex_sandbox;             /* sandbox mode (forced "read-only" unless allow_unsafe) */
+    char *codex_approval_policy;     /* approval policy (forced "never" unless allow_unsafe) */
+    char *codex_reasoning_effort;    /* arguments.config injection (optional, NULL = not injected) */
+    char *codex_run_dir;             /* root for per-request temp cwd (default /var/lib/transbasket/run) */
+    int   codex_timeout;             /* response timeout seconds (default 100, < MHD timeout) */
+    int   codex_max_concurrency;     /* max concurrent codex processes (0 = use MAX_WORKERS) */
+    bool  codex_allow_unsafe;        /* allow unsafe sandbox/approval values (default false) */
 } Config;
 
 /* Load configuration from file */
