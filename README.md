@@ -5,9 +5,12 @@ Production-ready C implementation of the Transbasket translation server for opti
 ## Features
 
 - High-performance HTTP server using libmicrohttpd
-- OpenAI-compatible API client using libcurl
+- Pluggable translation backend via `MODEL_TYPE`:
+  - **normal**: OpenAI-compatible API client using libcurl (default)
+  - **codex**: drives the installed `codex` CLI as an MCP server (`codex mcp-server`)
 - JSON handling with cJSON
 - Thread-per-connection model for concurrent requests
+- Translation cache (text / SQLite backends)
 - Emoji and shortcode stripping
 - RFC 3339 timestamp and UUID v4 validation
 - Graceful shutdown with signal handling
@@ -26,6 +29,8 @@ sudo apt-get install -y \
     libmicrohttpd-dev \
     libcjson-dev \
     uuid-dev \
+    libssl-dev \
+    libsqlite3-dev \
     pkg-config
 
 # RHEL/CentOS/Fedora
@@ -35,6 +40,8 @@ sudo yum install -y \
     libmicrohttpd-devel \
     cjson-devel \
     libuuid-devel \
+    openssl-devel \
+    sqlite-devel \
     pkg-config
 
 # macOS (Homebrew)
@@ -42,8 +49,26 @@ brew install \
     curl \
     libmicrohttpd \
     cjson \
-    ossp-uuid
+    ossp-uuid \
+    openssl \
+    sqlite
 ```
+
+### Optional: codex CLI (only for `MODEL_TYPE=codex`)
+
+The `codex` translation backend shells out to the installed Codex CLI as an MCP
+server. It is **not** needed for the default `normal` backend.
+
+```bash
+# Verify codex is installed and on PATH
+codex --version
+
+# The user/account that RUNS transbasket must be logged in, with a writable CODEX_HOME
+codex login status
+```
+
+When running as a service user, ensure that user has its own `codex login` and a
+writable `CODEX_HOME` (see the operator checklist in `PLAN_MODEL_TYPE_CODEX_MCP.md`).
 
 ## Build
 
@@ -173,6 +198,22 @@ curl -X POST http://localhost:8889/translate \
 ```bash
 ./bin/transbasket -w 20
 ```
+
+### Using the codex backend
+
+Set `MODEL_TYPE="codex"` in the config (see [Configuration](#1-transbasketconf)),
+make sure `codex login status` shows you are logged in, then run normally:
+
+```bash
+# Translation requests transparently route through `codex mcp-server`.
+./bin/transbasket -c /path/to/codex-config.conf
+
+# /health reports the active backend
+curl http://localhost:8889/health   # -> {"...","model_type":"codex"}
+```
+
+The HTTP request/response format is identical for both backends — only the
+translation engine changes.
 
 or
 
