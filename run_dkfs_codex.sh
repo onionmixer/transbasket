@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# run_codex.sh - launch transbasket with the codex (MCP) translation backend.
+# run_dkfs_codex.sh - launch transbasket with the codex (MCP) translation backend.
 #
 # Usage:
-#   ./run_codex.sh                 # run in foreground
-#   ./run_codex.sh -w 8            # extra args are passed through to transbasket
-#   ./run_codex.sh -d              # run as daemon (transbasket -d)
+#   ./run_dkfs_codex.sh                 # run in foreground
+#   ./run_dkfs_codex.sh -w 8            # extra args are passed through to transbasket
+#   ./run_dkfs_codex.sh -d              # run as daemon (transbasket -d)
 #
 # Requires: built ./transbasket binary, codex CLI on PATH, and `codex login`
 # completed for the user that runs this script.
@@ -17,9 +17,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-CONF="transbasket_codex.conf"
+CONF="transbasket_dkfs_codex.conf"
 BIN="./transbasket"
-RUN_DIR="./codex_run"
+RUN_DIR="./caches/dkfs/run"
 
 # 1. Binary present and built?
 if [[ ! -x "$BIN" ]]; then
@@ -52,7 +52,7 @@ mkdir -p "$RUN_DIR"
 chmod 700 "$RUN_DIR" 2>/dev/null || true
 
 echo "==========================================="
-echo " transbasket - codex (MCP) backend"
+echo " transbasket - codex (MCP) backend [env: dkfs]"
 echo "  config:  $CONF"
 echo "  binary:  $BIN"
 echo "  run dir: $RUN_DIR"

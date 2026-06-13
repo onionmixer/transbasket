@@ -1,0 +1,29 @@
+# ---- Build artifacts ----
+/obj/
+/transbasket
+/cache_tool
+
+# ---- Debug traces ----
+/trace/
+
+# ---- Editor / swap / temp ----
+*.swp
+*.swo
+*~
+
+# ---- Backups ----
+*.backup
+
+# ---- Runtime translation caches (SQLite + WAL/SHM sidecars) ----
+*.db
+*.db-wal
+*.db-shm
+
+# ---- Per-environment caches and codex per-request run dirs ----
+# Created at runtime by run_dkfs_codex.sh / run_pge4_codex.sh (mkdir -p).
+/caches/
+/codex_run/
+
+# ---- Text-backend cache / dictionaries (runtime data) ----
+/trans_dictionary*.txt
+/migrated_back.txt
