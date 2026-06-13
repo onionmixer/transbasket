@@ -27,3 +27,10 @@
 # ---- Text-backend cache / dictionaries (runtime data) ----
 /trans_dictionary*.txt
 /migrated_back.txt
+
+# ---- Per-environment (dkfs/pge4) codex run configs & launch scripts ----
+# Deployment-specific; the generic transbasket_codex.conf template stays tracked.
+/transbasket_dkfs_codex.conf
+/transbasket_pge4_codex.conf
+/run_dkfs_codex.sh
+/run_pge4_codex.sh
