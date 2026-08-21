@@ -633,10 +633,18 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
             cJSON_AddStringToObject(instruction_message, "content", instruction);
             cJSON_AddItemToArray(messages, instruction_message);
 
-            /* Message 3: Language direction */
+            /* Message 3: Language direction.
+             * get_language_name() returns NULL for codes that have no entry in
+             * LANGUAGE_NAMES (e.g. "swe"), and passing NULL to %s is undefined
+             * behaviour - fall back to the raw code. */
+            const char *from_name = get_language_name(from_lang);
+            const char *to_name_dir = get_language_name(to_lang);
+            if (!from_name) from_name = from_lang;
+            if (!to_name_dir) to_name_dir = to_lang;
+
             char language_info[256];
             snprintf(language_info, sizeof(language_info), "Translate FROM %s TO %s",
-                     get_language_name(from_lang), get_language_name(to_lang));
+                     from_name, to_name_dir);
             cJSON *language_message = cJSON_CreateObject();
             cJSON_AddStringToObject(language_message, "role", "user");
             cJSON_AddStringToObject(language_message, "content", language_info);
