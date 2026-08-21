@@ -96,6 +96,26 @@ make debug
 
 The server requires two configuration files:
 
+### 설정 파일 정책 (추적 템플릿 / 로컬 실제 값)
+
+저장소에 **추적되는 `*.conf` 는 전부 템플릿**이며 placeholder 값만 담는다. 실제 엔드포인트·API 키·
+내부 호스트는 같은 디렉터리의 **미추적 `*.local.conf`** 에 둔다(`.gitignore` 가 `*.local.conf` 를 제외).
+
+```bash
+# 최초 1회: 템플릿을 복사해 실제 값을 채운다
+cp transbasket.conf transbasket.local.conf
+$EDITOR transbasket.local.conf        # OPENAI_BASE_URL, OPENAI_API_KEY 등
+
+./transbasket                          # -c 없이 실행하면 transbasket.local.conf 를 자동으로 사용
+```
+
+- `-c` 나 `TRANSBASKET_CONFIG` 가 없을 때만 자동 선택이 동작한다. `transbasket.local.conf` 가 있으면
+  그것을, 없으면 `transbasket.conf`(템플릿)를 읽는다. 기동 로그의
+  `Using configuration file: ...` 줄로 실제 사용된 파일을 확인할 수 있다.
+- codex 백엔드도 동일하다: `cp transbasket_codex.conf transbasket_codex.local.conf` 후 `-c` 로 지정.
+- 환경별 배포 설정(`transbasket_dkfs_codex.conf`, `transbasket_pge4_codex.conf`)도 같은 이유로
+  추적하지 않는다.
+
 ### 1. transbasket.conf
 
 Located at `../transbasket.conf` (relative to executable):

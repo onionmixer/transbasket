@@ -28,6 +28,13 @@
 /trans_dictionary*.txt
 /migrated_back.txt
 
+# ---- Local runtime configs (real endpoints / keys / hosts) ----
+# Policy: tracked *.conf files are TEMPLATES with placeholder values only.
+# Anything carrying a real endpoint, API key or internal host lives in an
+# untracked *.local.conf next to it. Running ./transbasket with no -c picks up
+# transbasket.local.conf automatically when present.
+*.local.conf
+
 # ---- Per-environment (dkfs/pge4) codex run configs & launch scripts ----
 # Deployment-specific; the generic transbasket_codex.conf template stays tracked.
 /transbasket_dkfs_codex.conf

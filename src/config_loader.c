@@ -234,14 +234,11 @@ int validate_config(const Config *config) {
 /* Load configuration from file */
 Config *load_config(const char *config_path, const char *prompt_prefix_path, const char *system_role_path) {
     const char *default_config_path = "transbasket.conf";
+    const char *local_config_path = "transbasket.local.conf";
     const char *default_system_role_path = "ROLS.txt";
 
     /* Track if command-line arguments were explicitly provided */
     bool prompt_prefix_from_cmdline = (prompt_prefix_path != NULL);
-
-    if (!config_path) {
-        config_path = default_config_path;
-    }
 
     /* Don't set default for prompt_prefix_path here - let config file value take precedence */
 
@@ -249,7 +246,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         system_role_path = default_system_role_path;
     }
 
-    /* Resolve config path */
+    /* Resolve config path (paths are relative to the executable's directory) */
     char exe_path[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len == -1) {
@@ -258,11 +255,30 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     }
     exe_path[len] = '\0';
 
-    char *resolved_config_path = resolve_path(exe_path, config_path);
+    char *resolved_config_path = NULL;
+    if (config_path) {
+        resolved_config_path = resolve_path(exe_path, config_path);
+    } else {
+        /* Neither -c nor TRANSBASKET_CONFIG was given. Prefer an untracked
+         * transbasket.local.conf when it exists so that the tracked template
+         * never has to carry a real endpoint or API key; fall back to the
+         * template otherwise. resolve_path() uses realpath(), so a NULL result
+         * here simply means the file is absent. */
+        resolved_config_path = resolve_path(exe_path, local_config_path);
+        if (resolved_config_path) {
+            config_path = local_config_path;
+        } else {
+            config_path = default_config_path;
+            resolved_config_path = resolve_path(exe_path, config_path);
+        }
+    }
+
     if (!resolved_config_path) {
         LOG_INFO( "Error: Could not resolve config path: %s\n", config_path);
         return NULL;
     }
+
+    LOG_INFO("Using configuration file: %s", resolved_config_path);
 
     /* Open config file */
     FILE *fp = fopen(resolved_config_path, "r");

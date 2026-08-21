@@ -110,6 +110,19 @@ For the `codex` backend the same blocking thread spawns a `codex mcp-server` chi
 
 ### Configuration System
 
+**Policy: tracked `*.conf` files are templates, real values live in untracked `*.local.conf`.**
+
+Anything carrying a real endpoint, API key, or internal host must not be committed. `load_config()`
+therefore picks the config in this order when neither `-c` nor `TRANSBASKET_CONFIG` is given:
+
+1. `transbasket.local.conf` next to the executable, if it exists (untracked, `.gitignore` covers `*.local.conf`)
+2. `transbasket.conf` (the tracked template with placeholder values)
+
+The startup log prints `Using configuration file: <path>` so the effective file is never in doubt.
+Per-environment deployment configs (`transbasket_dkfs_codex.conf`, `transbasket_pge4_codex.conf`) are
+untracked for the same reason. When editing a tracked template, keep placeholders such as
+`http://<ollama-host>:11434/v1` and `OPENAI_API_KEY="."`.
+
 Two configuration files:
 
 1. **transbasket.conf**: Shell-style KEY="value" format (not INI)
