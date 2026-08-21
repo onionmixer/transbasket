@@ -34,3 +34,52 @@
 /transbasket_pge4_codex.conf
 /run_dkfs_codex.sh
 /run_pge4_codex.sh
+
+# ---- Agent / editor local settings ----
+# Currently only excluded by the developer's global gitignore, so a clone on
+# another machine would commit it. Keep it out of the repo explicitly.
+.claude/settings.local.json
+.vscode/
+.idea/
+.DS_Store
+
+# ---- Secrets ----
+.env
+.env.*
+*.pem
+*.key
+
+# ---- Extra build / debug artifacts ----
+# `make debug` and ad-hoc symbol builds land in the project root.
+*.o
+*.a
+*.so
+/transbasket_g
+/transbasket_dbg
+core
+core.*
+vgcore.*
+
+# ---- Ad-hoc test configs ----
+# Throwaway copies used while testing (different port, separate cache DB).
+# The tracked templates are transbasket.conf / transbasket_codex.conf /
+# transbasket_example_cache_*.conf.
+*_test.conf
+*_impl.conf
+
+# ---- Run logs ----
+*.log
+nohup.out
+
+# ---- SQLite rollback journal (non-WAL mode) ----
+*.db-journal
+
+# ---- Python (tests/test_client.py) ----
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# ---- Patch leftovers ----
+*.orig
+*.rej
