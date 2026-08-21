@@ -84,7 +84,7 @@ make check-deps
 make
 ```
 
-This will create the executable at `bin/transbasket`.
+This will create the executables `transbasket` and `cache_tool` in the project root.
 
 ### Debug Build
 
@@ -127,6 +127,11 @@ MODEL_TYPE="codex"
 #CODEX_REASONING_EFFORT="none"  # optional arguments.config injection
 #CODEX_ALLOW_UNSAFE="false"     # allow non read-only/never (dev only)
 ```
+
+In codex mode set `TRANS_CACHE_THRESHOLD="1"`: codex output is non-deterministic, so a
+repeated source text is re-worded on every call, which resets the cache entry's `count`
+to 1 — with a higher threshold the cache never reaches it and every request re-invokes
+codex. The ready-made `transbasket_codex.conf` already sets this.
 
 codex mode requires the running user to have completed `codex login` and to have a writable `CODEX_HOME`. The endpoint translates untrusted text, so `sandbox` is forced to `read-only` and `approval-policy` to `never` unless `CODEX_ALLOW_UNSAFE=true`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` for design and the operator/systemd checklist.
 
@@ -184,19 +189,19 @@ curl -X POST http://localhost:8889/translate \
 ### Basic Usage
 
 ```bash
-./bin/transbasket
+./transbasket
 ```
 
 ### With Custom Configuration
 
 ```bash
-./bin/transbasket -c /path/to/config.conf -p /path/to/PROMPT_PREFIX.txt
+./transbasket -c /path/to/config.conf -p /path/to/PROMPT_PREFIX.txt
 ```
 
 ### With Custom Worker Count
 
 ```bash
-./bin/transbasket -w 20
+./transbasket -w 20
 ```
 
 ### Using the codex backend
@@ -206,7 +211,7 @@ make sure `codex login status` shows you are logged in, then run normally:
 
 ```bash
 # Translation requests transparently route through `codex mcp-server`.
-./bin/transbasket -c /path/to/codex-config.conf
+./transbasket -c /path/to/codex-config.conf
 
 # /health reports the active backend
 curl http://localhost:8889/health   # -> {"...","model_type":"codex"}
@@ -218,7 +223,7 @@ translation engine changes.
 or
 
 ```bash
-MAX_WORKERS=20 ./bin/transbasket
+MAX_WORKERS=20 ./transbasket
 ```
 
 ### Command Line Options
@@ -289,7 +294,7 @@ curl -X POST http://localhost:8889/translate \
 - `uuid` (string, required): RFC 4122 UUID v4 형식의 고유 식별자
 - `from` (string, required): 원본 언어 코드 (ISO 639-2, 3자리)
 - `to` (string, required): 대상 언어 코드 (ISO 639-2, 3자리)
-- `text` (string, required): 번역할 텍스트
+- `text` (string, required): 번역할 텍스트 (**1 ~ 10,000 바이트**, 초과 시 422)
 
 **Supported Language Codes:**
 
@@ -307,7 +312,9 @@ curl -X POST http://localhost:8889/translate \
 **Response Body:**
 - `timestamp` (string): 요청의 타임스탬프 (원본 그대로 반환)
 - `uuid` (string): 요청의 UUID (원본 그대로 반환)
-- `translatedText` (string): 번역된 텍스트 (이모지 및 shortcode 제거됨)
+- `translatedText` (string): 번역된 텍스트
+  - `MODEL_TYPE="normal"`: 이스케이프 해제 + 이모지/shortcode 제거 + 공백 정규화가 적용되며 **8,191 바이트에서 잘립니다**(아래 한계 표 참조)
+  - `MODEL_TYPE="codex"`: 앞뒤 공백 제거와 전체 코드펜스 언랩만 적용되고 **길이 제한 없음**
 
 **Status Codes:**
 - `200 OK`: 번역 성공
@@ -317,6 +324,73 @@ curl -X POST http://localhost:8889/translate \
 - `502 Bad Gateway`: OpenAI API 4xx 오류 (재시도 불가)
 - `503 Service Unavailable`: OpenAI API 5xx/타임아웃 (재시도 가능, `Retry-After: 5` 헤더 포함)
 - `504 Gateway Timeout`: 요청 타임아웃
+
+codex 백엔드의 상태 코드 매핑은 조금 다릅니다: 동시 실행 슬롯을 `CODEX_TIMEOUT` 안에 얻지 못하면 `503`,
+codex 호출 자체가 `CODEX_TIMEOUT` 을 넘기면 `504`, 그 밖의 codex 실패(기동/초기화/빈 응답 등)는 `502` 입니다.
+
+---
+
+### 한계와 보장 (Limits and guarantees)
+
+아래 값은 2026-08-21 기준으로 코드와 실측으로 확인된 값입니다. 상수는 `src/http_client.c`,
+`src/json_handler.c`, `src/http_server.c` 에 하드코딩되어 있으며 설정으로 바꿀 수 없습니다.
+
+#### 크기 한계
+
+| 항목 | 값 | 초과 시 동작 |
+|------|-----|--------------|
+| 요청 `text` 길이 | **10,000 바이트** (`MAX_TEXT_LENGTH`) | `422 VALIDATION_ERROR` (명시적 거부) |
+| 요청 `text` 최소 길이 | 1 바이트 | `422` |
+| HTTP 요청 본문 전체 크기 | **상한 없음** | 서버가 메모리에 그대로 누적. 신뢰할 수 없는 클라이언트에 노출할 때는 앞단(리버스 프록시)에서 제한 필요 |
+| 응답 길이 — `normal` | **8,191 바이트** (`MAX_CLEANED_TEXT_BUFFER` 8192) | ⚠️ **조용히 잘림**. HTTP 200 이고 경고 로그도 없으며, 잘린 텍스트가 캐시에도 저장됨 |
+| 이스케이프 해제 중간 버퍼 — `normal` | 16,383 바이트 (`MAX_TRANSLATION_BUFFER` 16384) | 조용히 잘림 (이후 8,191 로 다시 잘림) |
+| 응답 길이 — `codex` | 사실상 제한 없음 | MCP stdout 누적이 **4 MB** (`MCP_RBUF_MAX`)를 넘으면 절단이 아니라 오류(`502`) |
+| 스트리밍 누적 버퍼 (`STREAM=yes`) | 65,535 바이트 (`MAX_STREAM_BUFFER`) | 조용히 잘림 (디버그 빌드에서만 로그) |
+
+> **실측**: 고정 길이 응답을 돌려주는 테스트용 upstream 이 13,500 바이트 번역문을 반환했을 때
+> `normal` 백엔드 클라이언트는 8,191 바이트만 수신했습니다(HTTP 200, 경고 없음).
+> `codex` 백엔드에서는 실제 번역 결과 10,533 바이트가 절단 없이 그대로 전달되었습니다.
+> `text` 가 10,000 바이트를 넘으면 두 백엔드 모두 422 로 거부됩니다.
+>
+> 입력이 10,000 바이트 이하여도 **영→한처럼 바이트 수가 늘어나는 방향**에서는 `normal` 백엔드의 8,191 바이트
+> 상한에 걸릴 수 있습니다(한글은 UTF-8 에서 글자당 3바이트).
+
+#### 시간 한계
+
+| 항목 | 값 | 비고 |
+|------|-----|------|
+| HTTP 연결 타임아웃 | 120초 (MHD) | 설정 불가 |
+| `normal` upstream 호출 타임아웃 | 60초/시도 | 최대 3회 시도, 백오프 `2^attempt` 초 (5xx·타임아웃만 재시도) |
+| `codex` 호출 타임아웃 | `CODEX_TIMEOUT` (기본 100초) | 반드시 120초보다 작아야 함. 초과 시 `504` |
+| `codex` 동시 실행 슬롯 대기 | `CODEX_TIMEOUT` 까지 대기 | 대기 실패 시 `503` |
+
+#### 동시성
+
+- 연결마다 전용 스레드가 생성됩니다(`MHD_USE_THREAD_PER_CONNECTION`).
+- **`MAX_WORKERS` 는 동시 연결 수를 제한하지 않습니다.** MHD 에 `CONNECTION_LIMIT`/`THREAD_POOL_SIZE` 를
+  전달하지 않기 때문이며, 이 값은 `CODEX_MAX_CONCURRENCY` 미설정 시의 codex 동시 실행 수 기본값으로만 쓰입니다.
+- codex 백엔드에서 **실제로 동시에 번역되는 요청 수는 `CODEX_MAX_CONCURRENCY`** 입니다. 초과분은 즉시 거부되지 않고
+  슬롯을 기다리며, `CODEX_TIMEOUT` 을 넘기면 `503` 입니다.
+- **요청 간 격리는 보장됩니다.** 응답의 `uuid`/`timestamp` 는 그 요청의 값이며, 다른 요청의 번역문이 섞이지 않습니다.
+  (실측: 서로 다른 12개 원문을 동시 200 스레드로 1,200건 호출 시 불일치 0건, keep-alive 연결 재사용 240건 불일치 0건,
+  codex 실호출 동시 8건 8/8 일치)
+
+#### 번역 결과의 재현성 — 보장하지 않음
+
+- **같은 원문이라도 호출마다 표현이 달라질 수 있습니다.** 특히 `codex` 백엔드는 비결정적입니다.
+- 결과는 `PROMPT_PREFIX_FILE` 내용에 좌우됩니다. 기본 제공되는 `PROMPT_PREFIX_translategemma.txt` 에는
+  "전체가 ASCII 패턴이면 원문을 byte-for-byte 그대로 출력하라"는 규칙이 있어, **순수 ASCII 영문 장문이
+  번역되지 않고 그대로 반환되는 경우가 실측**되었습니다(7 KB 내외 입력에서 관측; 짧은 ASCII 문장과
+  비ASCII 문자가 섞인 문장은 정상 번역). 이 동작은 서버 버그가 아니라 프롬프트 규칙의 결과입니다.
+- 캐시가 켜져 있고 `TRANS_CACHE_THRESHOLD=1` 이면 **첫 결과가 고정**됩니다. 첫 응답이 잘못 나오면 해당 항목이
+  캐시에서 정리되기 전까지 같은 값이 계속 반환됩니다.
+
+#### 캐시 키
+
+- 키는 `SHA-256("<from>|<to>|<text>")` 이며, **모델·프롬프트·백엔드 종류는 키에 포함되지 않습니다.**
+  서로 다른 `MODEL_TYPE`/프롬프트를 쓰는 인스턴스가 같은 캐시 DB 를 공유하면 다른 설정으로 생성된 번역문이
+  반환됩니다. 기본 제공 설정은 codex 용 캐시 DB 를 분리해 두었으니 배포 시에도 분리를 유지하세요.
+- 캐시 키의 `text` 는 ANSI 이스케이프·제어문자를 제거한 **정규화 후 텍스트**입니다.
 
 ## Project Structure
 

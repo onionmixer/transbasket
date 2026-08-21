@@ -3,6 +3,7 @@
 작성일: 2026-06-12
 대상 브랜치: master (작업 시 별도 feature 브랜치 권장)
 상태: **구현 완료(IMPLEMENTED) & 검증됨** — codex↔claude 교차검토 10회(§10) 후 구현. normal/codex 양 백엔드 end-to-end 동작 확인. 신규 모듈 `mcp_client.[ch]` 추가.
+재검증: 2026-08-21 (codex-cli 0.148.0) — kor↔eng/jpn→kor 번역, 델리미터 인젝션 방어, 동시 6요청(제한 4), 프로세스·임시디렉터리 누수 0 확인. 캐시 임계값 이슈 발견 및 조치(§3.2).
 
 ---
 
@@ -28,12 +29,14 @@
 
 ## 2. 현재 시스템 사실 확인 (Investigation 결과)
 
-- codex CLI 버전: `codex-cli 0.139.0`, 경로 `/usr/bin/codex`
+- codex CLI 버전: 설계 시점 `codex-cli 0.139.0` / **2026-08-21 재검증 시점 `codex-cli 0.148.0`**, 경로 `/usr/bin/codex`
+  (0.148.0 에서도 아래 핸드셰이크·인자 스키마·응답 구조가 그대로 동작함을 실측 확인)
 - `codex mcp-server` 가 **stdio 기반 MCP 서버**를 제공함 (별도 포트 불필요)
 - MCP 핸드셰이크 실제 검증 완료:
   - `initialize` → `{"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"codex-mcp-server",...}}}`
   - `notifications/initialized` (notification, id 없음)
-  - `tools/list` → `codex` 툴 1개 노출. 입력 스키마 주요 필드:
+  - `tools/list` → 설계 시점 `codex` 툴 1개. **0.148.0 에서는 `codex`, `codex-reply` 2개**가 노출되지만
+    transbasket 은 `codex` 만 호출하므로 영향 없음. 입력 스키마 주요 필드:
     - `prompt` (required, string) — 초기 사용자 프롬프트
     - `model` (string) — 모델 오버라이드 (예: gpt-5.2)
     - `sandbox` (`read-only` | `workspace-write` | `danger-full-access`)
@@ -74,7 +77,9 @@ transbasket 은 `MHD_USE_THREAD_PER_CONNECTION` (요청마다 전용 스레드, 
 
 - 장점: 상태 공유 없음 → 스레드 안전, 구현 단순, 격리성 높음, 기존 블로킹 패턴과 일치
 - 단점: 요청마다 codex 기동 지연(수 초)과 토큰 비용 발생
-- 완화: 캐시(`trans_cache`) 가 앞단에 있으나 **기본 임계값 `TRANS_CACHE_THRESHOLD=5`** 이므로 같은 텍스트가 5회 누적되기 전까지는 매번 codex 를 호출한다. codex 모드에서는 `TRANS_CACHE_THRESHOLD=1` 권장. (검토1)
+- 완화: 캐시(`trans_cache`) 가 앞단에 있으나 **기본 임계값은 `TRANS_CACHE_THRESHOLD=5`** 다. codex 모드에서는 이 값을 **반드시 `1` 로** 두어야 한다. (검토1 / 2026-08-21 실측으로 근거 보강)
+  - 이유: codex 출력은 비결정적이라 동일 원문도 호출마다 표현이 달라진다. `http_server.c:handle_translate()` 는 캐시 엔트리와 번역문이 다르면 `trans_cache_update_translation()` 으로 **count 를 1 로 리셋**하므로, 임계값이 2 이상이면 count 가 그 값에 영원히 도달하지 못한다 → 캐시가 사실상 무효화되고 매 요청이 codex 를 호출한다.
+  - 실측(2026-08-21): threshold=3 에서 동일 원문 4회 요청이 모두 codex 재호출(각 ~4초, DB count 계속 1). threshold=1 에서는 2회차부터 캐시 히트(~0.01초).
 - **향후 최적화(별도 과제)**: 영속 MCP 세션 풀 + 뮤텍스 보호 요청 큐 (이번 범위 제외, 문서에만 명시)
 
 > **fork-safety / PATH (검토1)**: fork() 를 멀티스레드 프로세스에서 호출하므로 fork–exec 사이에는 async-signal-safe 함수만 사용한다. `CODEX_BIN="codex"` 같은 bare 이름은 PATH 검색이 필요하므로 **`posix_spawn()` 이 아니라 `posix_spawnp()`** 를 사용한다(절대경로면 둘 다 가능). stdin/stdout 파이프 fd 는 `posix_spawn_file_actions`/`dup2` 로 자식에 연결한다.
@@ -203,7 +208,7 @@ MODEL_TYPE="normal"
 #CODEX_RUN_DIR="/var/lib/transbasket/run"
 ```
 
-> codex 모드 권장: `TRANS_CACHE_THRESHOLD="1"` (반복 텍스트가 즉시 캐시되어 codex 재호출을 줄임 — 검토1)
+> codex 모드 **필수**: `TRANS_CACHE_THRESHOLD="1"`. 2 이상이면 codex 출력의 비결정성 때문에 캐시 count 가 계속 1 로 리셋되어 캐시 히트가 발생하지 않는다(§3.2 실측). 배포용 `transbasket_codex.conf` 에는 이미 1 로 설정되어 있다.
 
 ### 4.4 신규 모듈: `include/mcp_client.h` + `src/mcp_client.c`
 
@@ -404,13 +409,22 @@ curl -s -X POST localhost:8889/translate -H 'Content-Type: application/json' \
 - **인증 의존성**: codex 모드는 호스트의 codex 로그인 상태에 의존. 미로그인 시 실패 → 문서에 명시 + 기동 시 1회 경고 로그 권장.
 - **codex 쓰기가능 상태 의존 (검토2)**: `codex mcp-server` 는 인증뿐 아니라 **`~/.codex`(또는 `CODEX_HOME`) 의 쓰기 가능한 state/config** 가 있어야 핸드셰이크 전에 죽지 않는다(읽기전용 state DB 면 실패 확인됨). systemd 서비스 유저로 구동 시 `CODEX_HOME` 을 서비스 유저가 쓸 수 있는 경로로 지정하고, 기동 시 쓰기 가능 여부를 점검·진단 로그. (`CODEX_HOME` 을 자식 환경에 전달하는 옵션도 고려)
 - **sandbox 의미 구분 (검토2)**: `sandbox=read-only` 는 codex *에이전트 작업공간(cwd)* 에 대한 제약이지 codex 자체 state 디렉터리 쓰기를 막는 것이 아니다 — 위 항목과 혼동 금지.
-- **지연/비용**: 요청당 codex 기동은 normal HTTP 대비 느리고 토큰 비용 발생. 캐시 임계값(`TRANS_CACHE_THRESHOLD`) 활용 권장.
+- **지연/비용**: 요청당 codex 기동은 normal HTTP 대비 느리고(실측 3~5초/요청) 토큰 비용 발생. 캐시가 실제로 효과를 내려면 `TRANS_CACHE_THRESHOLD=1` 이어야 한다(§3.2).
 - **fork-in-threaded-process**: 반드시 `posix_spawnp`(bare 이름 PATH 검색; 절대경로면 `posix_spawn` 도 가능) 또는 fork 직후 즉시 exec. 자식 fd 누수/`O_CLOEXEC` 주의.
 - **좀비 프로세스**: 매 요청 `waitpid` 회수 필수. `SIGCHLD` 는 기본 처리 + 명시적 waitpid.
+- **프롬프트 규칙에 의한 미번역 (실측 2026-08-21)**: `PROMPT_PREFIX_translategemma.txt` 의
+  "전체가 ASCII 패턴이면 byte-for-byte echo" 규칙 때문에, 7 KB 내외의 순수 ASCII 영문 장문이
+  번역되지 않고 원문 그대로 반환되는 사례가 관측됨(3회 중 2회). 비ASCII 문자가 섞이면 정상 번역.
+  서버 결함이 아니라 프롬프트 규칙의 결과이므로, 프롬프트를 바꾸지 않는 한 이 동작은 유지된다.
 - **출력 오염**: codex 가 설명/마크다운/추론 흔적을 섞을 수 있음 → 프롬프트 제약 + 후처리로 방어. **단 코드펜스는 무조건 제거 금지(검토4·8)** — "전체 출력이 통째로 펜스로 감싸진 경우만 언랩", 그 외 오염은 휴리스틱 슬라이싱 대신 **실패/재시도**. 빈 문자열/거부 문구도 실패 처리.
 - **버퍼 한계**: 긴 번역은 스트리밍 이벤트 누적 버퍼 크기 점검(기존 `MAX_STREAM_BUFFER` 65536 참고).
+  - 실측(2026-08-21) 확정: codex 경로는 `unescape_string`/`strip_emoji_and_shortcodes` 를 타지 않으므로
+    **normal 백엔드의 8,191 바이트 상한이 적용되지 않는다**(10,533 바이트 응답이 온전히 전달됨). codex 쪽 상한은
+    MCP stdout 누적 `MCP_RBUF_MAX` = 4 MB 이며, 초과 시 절단이 아니라 오류(502)다.
+    입력은 두 백엔드 공통으로 `MAX_TEXT_LENGTH` = 10,000 바이트에서 422 로 거부된다.
+    전체 한계 표는 `README.md` "한계와 보장" 및 `CLAUDE.md` "Hard Limits" 참조.
 - **셧다운/시그널 안전 (검토6, 선결 결함)**: 현재 시그널 핸들러(`main.c:37-70`)는 `LOG_INFO`/캐시 저장/`translation_server_stop()` 등 **async-signal-safe 하지 않은 호출**을 하고, MHD 스레드모델에서 codex I/O 로 블록된 요청 스레드에 시그널이 도달할 수 있다. codex 블로킹 경로(poll/read/write/sem_timedwait/waitpid/backoff)는 **모두 `EINTR` 를 처리**하고, 셧다운 시 자식/세마포어/임시디렉터리를 **핸들러 밖**에서 정리해야 한다. 근본 개선으로는 self-pipe/`signalfd` 기반 셧다운 권장(범위 외, 문서화).
-- **프로토콜 버전 변동**: codex 0.139.0 기준. 버전 업 시 `tools/list` 로 스키마 재확인.
+- **프로토콜 버전 변동**: codex 0.139.0 기준으로 설계, **0.148.0 에서 재검증 완료(2026-08-21)** — `initialize`/`tools/call`/`structuredContent.content` 모두 동일. 버전 업 시 `tools/list` 로 스키마 재확인.
 
 ---
 

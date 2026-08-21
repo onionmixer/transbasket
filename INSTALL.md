@@ -1,168 +1,112 @@
 # Transbasket Installation Guide
 
-## Quick Start
+> 이 문서는 **C 구현** 기준입니다. 초기 Python POC(`poc/`)는 폐기되었고 저장소에서 제거되었습니다.
+> 설정 키 전체 목록과 API 스펙은 `README.md`, codex 백엔드 설계는 `PLAN_MODEL_TYPE_CODEX_MCP.md` 를 참고하세요.
 
-### 1. Prerequisites
+## 1. 사전 요구사항
 
-- Python 3.8 or higher
-- pip (Python package manager)
-- Access to OpenAI-compatible API endpoint
-
-### 2. Install Python POC
+- GCC (C11) + make
+- 라이브러리: libcurl, libmicrohttpd, cJSON, libuuid, OpenSSL, SQLite3
+- `MODEL_TYPE=codex` 로 쓸 경우: 설치된 `codex` CLI + 해당 사용자 계정의 `codex login`
 
 ```bash
-# Navigate to POC directory
-cd transbasket/poc
+# Ubuntu / Debian
+sudo apt-get install -y build-essential pkg-config \
+    libcurl4-openssl-dev libmicrohttpd-dev libcjson-dev \
+    uuid-dev libssl-dev libsqlite3-dev
 
-# Create virtual environment
-python3 -m venv venv
-
-# Activate virtual environment
-source venv/bin/activate  # Linux/Mac
-# or
-venv\Scripts\activate     # Windows
-
-# Install dependencies
-pip install -r requirements.txt
+# RHEL / CentOS / Fedora
+sudo yum install -y gcc make pkg-config \
+    libcurl-devel libmicrohttpd-devel cjson-devel \
+    libuuid-devel openssl-devel sqlite-devel
 ```
 
-### 3. Configure
-
-Ensure `transbasket.conf` exists in the parent directory with valid settings:
+## 2. 빌드
 
 ```bash
-cd transbasket
-cat transbasket.conf
+make check-deps     # 라이브러리 설치 여부 점검
+make                # 릴리스 빌드
+make debug          # 디버그 빌드 (-g3 -O0 -DDEBUG, core dump)
+make clean          # 산출물 삭제
 ```
 
-Expected content:
+빌드 산출물은 **프로젝트 루트**에 생성됩니다:
+
+- `transbasket` — 번역 서버 데몬
+- `cache_tool` — 번역 캐시 관리 도구
+
+`sudo make install` 은 `transbasket` 만 `/usr/local/bin/` 에 설치합니다.
+
+## 3. 설정
+
+설정 파일은 shell 스타일 `KEY="value"` 포맷입니다. 용도별 템플릿:
+
+| 파일 | 용도 |
+|------|------|
+| `transbasket.conf` | 기본 설정 (`MODEL_TYPE="normal"`, OpenAI 호환 HTTP API) |
+| `transbasket_codex.conf` | codex(MCP) 백엔드용 (`MODEL_TYPE="codex"`) |
+| `transbasket_example_cache_file.conf` / `transbasket_example_cache_sqlite.conf` | 캐시 백엔드별 예시 |
+
+프롬프트/언어 테이블 파일도 함께 필요합니다: `PROMPT_PREFIX.txt`(또는 `PROMPT_PREFIX_translategemma.txt`), `ROLS.txt`, `language_tables.conf`.
+
+상대 경로는 설정 파일 기준으로 해석되므로, 다른 위치에서 실행할 때는 절대 경로 사용을 권장합니다.
+
+## 4. 실행
+
 ```bash
-OPENAI_BASE_URL="http://192.168.1.239:11434/v1"
-OPENAI_MODEL="gpt-oss:20b"
-OPENAI_API_KEY="."
-LISTEN="0.0.0.0"
-PORT="8889"
-PROMPT_PREFIX="translation from language to language. not add more text. note add emoji syntax. only return plain translate text."
+./transbasket                                   # 기본 설정으로 실행
+./transbasket -c /etc/transbasket/transbasket.conf
+./transbasket -c transbasket_codex.conf         # codex(MCP) 백엔드
+./transbasket -w 20                             # 워커 스레드 수 지정
+MAX_WORKERS=20 ./transbasket                    # 환경변수로도 지정 가능
+./transbasket -d -c /etc/transbasket.conf       # 데몬 모드
 ```
 
-### 4. Run Server
+옵션: `-c/--config`, `-p/--prompt`, `-r/--role`, `-w/--workers`, `-d/--daemon`, `-h/--help`.
+환경변수: `TRANSBASKET_CONFIG`, `MAX_WORKERS`. 워커 수 권장값은 `2 * CPU_CORES + 1` 입니다.
+
+## 5. 동작 확인
 
 ```bash
-cd poc
-python main.py
-```
-
-The server will start on the configured address (default: http://0.0.0.0:8889)
-
-### 5. Test
-
-In a separate terminal:
-
-```bash
-cd poc
-python test_client.py
-```
-
-Or test with curl:
-
-```bash
+# 헬스체크 (model_type 으로 활성 백엔드 확인)
 curl http://localhost:8889/health
+# -> {"status":"healthy","service":"transbasket","version":"1.0.0","model_type":"codex"}
+
+# 번역 요청
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2026-08-21T00:00:00.000Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "kor",
+    "to": "eng",
+    "text": "안녕하세요"
+  }'
 ```
 
-## Project Structure
+응답은 요청의 `uuid` / `timestamp` 를 그대로 보존합니다.
 
-```
-transbasket/
-├── README.md                # Project documentation
-├── TODO.md                  # Development roadmap
-├── INSTALL.md              # This file
-├── transbasket.conf        # Configuration file
-├── sample_send.txt         # Prompt template
-│
-└── poc/                    # Python POC
-    ├── __init__.py         # Package initialization
-    ├── main.py             # Main entry point
-    ├── config_loader.py    # Configuration loader
-    ├── utils.py            # Utility functions
-    ├── json_handler.py     # JSON request/response handler
-    ├── openai_client.py    # OpenAI API client
-    ├── http_server.py      # FastAPI HTTP server
-    ├── test_client.py      # Test client
-    ├── requirements.txt    # Python dependencies
-    └── README.md          # POC documentation
-```
-
-## Module Overview
-
-### 1. config_loader.py (2. 설정파일 로드)
-- Loads and validates `transbasket.conf`
-- Parses configuration in KEY="value" format
-- Validates required fields and formats
-
-### 2. json_handler.py (3. client 요청 JSON 처리)
-- Parses client JSON requests
-- Validates RFC 3339 timestamps
-- Validates UUID v4 format
-- Validates ISO 639-2 language codes
-- Generates JSON responses
-
-### 3. openai_client.py (4. openai api 서버 JSON 처리)
-- Builds prompts from template
-- Sends requests to OpenAI API
-- Handles retries and timeouts
-- Processes API responses
-
-### 4. utils.py (5. 공통 유틸리티 함수)
-- UUID validation
-- Timestamp validation (RFC 3339)
-- Language code validation (ISO 639-2)
-- Text truncation
-- Helper functions
-
-### 5. http_server.py (6. http 처리 network 루틴)
-- FastAPI-based HTTP server
-- Async request handling
-- Thread pool for blocking operations
-- Error handling and responses
-
-### 6. main.py (1. 메인루틴)
-- Entry point
-- Logging setup
-- Signal handling
-- Server lifecycle management
-
-## Running Options
-
-### Development Mode (with auto-reload)
+## 6. codex(MCP) 백엔드 추가 준비
 
 ```bash
-cd poc
-uvicorn main:app --reload --host 0.0.0.0 --port 8889
+codex --version          # CLI 설치 확인 (0.148.0 에서 동작 검증됨)
+codex login status       # 서버를 '실행하는 계정'이 로그인되어 있어야 함
 ```
 
-### Production Mode
+체크 포인트:
 
-```bash
-cd poc
-python main.py
-```
+- 서비스 계정이 쓰기 가능한 `CODEX_HOME`(기본 `~/.codex`)을 가져야 핸드셰이크가 성공합니다.
+- `CODEX_RUN_DIR`(요청별 임시 cwd 루트, 기본 `/var/lib/transbasket/run`)을 **미리 생성**하고 0700 으로 두세요.
+  없으면 `mkdtemp` 가 실패해 codex 가 서버의 작업 디렉터리에서 실행됩니다.
+- **`TRANS_CACHE_THRESHOLD="1"` 필수** — codex 출력은 비결정적이라 임계값이 2 이상이면
+  캐시 count 가 계속 1 로 리셋되어 캐시가 무효화되고 매 요청마다 codex 를 호출합니다.
+- `CODEX_MAX_CONCURRENCY` 로 동시 codex 프로세스 수를 제한하세요(요청당 프로세스 1개 spawn).
 
-### With Custom Settings
+운영/systemd 상세 점검표는 `PLAN_MODEL_TYPE_CODEX_MCP.md` §7.1 을 참고하세요.
 
-```bash
-# Custom log level
-LOG_LEVEL=DEBUG python main.py
+## 7. systemd 서비스
 
-# Custom worker count
-MAX_WORKERS=20 python main.py
-
-# Custom config path
-TRANSBASKET_CONFIG=/path/to/config.conf python main.py
-```
-
-## Systemd Service (Optional)
-
-Create `/etc/systemd/system/transbasket.service`:
+`/etc/systemd/system/transbasket.service`:
 
 ```ini
 [Unit]
@@ -173,13 +117,14 @@ After=network.target
 Type=simple
 User=transbasket
 Group=transbasket
-WorkingDirectory=/opt/transbasket/poc
-Environment="PATH=/opt/transbasket/poc/venv/bin"
-ExecStart=/opt/transbasket/poc/venv/bin/python main.py
-Restart=on-failure
-RestartSec=5s
+WorkingDirectory=/opt/transbasket
+ExecStart=/opt/transbasket/transbasket -c /etc/transbasket/transbasket.conf -p /etc/transbasket/PROMPT_PREFIX.txt
+Restart=always
+RestartSec=5
 
-# Logging
+# codex 백엔드를 쓸 때만 필요 (서비스 계정이 쓸 수 있는 경로)
+# Environment="CODEX_HOME=/var/lib/transbasket/codex"
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=transbasket
@@ -188,77 +133,45 @@ SyslogIdentifier=transbasket
 WantedBy=multi-user.target
 ```
 
-Enable and start:
-
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable transbasket
-sudo systemctl start transbasket
-sudo systemctl status transbasket
-```
-
-View logs:
-
-```bash
+sudo systemctl enable --now transbasket
 sudo journalctl -u transbasket -f
 ```
 
-## Troubleshooting
+## 8. 문제 해결
 
-### Import Errors
-
-Make sure you're in the POC directory and virtual environment is activated:
-
+**빌드 실패 (라이브러리 없음)**
 ```bash
-cd poc
-source venv/bin/activate
-which python  # Should point to venv/bin/python
+make check-deps          # 어떤 라이브러리가 빠졌는지 확인 후 설치
 ```
 
-### Configuration Not Found
-
-Check if configuration file exists:
-
+**설정 파일을 찾지 못함**
 ```bash
-ls -l ../transbasket.conf
+./transbasket -c /absolute/path/transbasket.conf
+# 또는 TRANSBASKET_CONFIG 환경변수 사용
 ```
 
-Or specify custom path:
-
+**포트 사용 중**
 ```bash
-TRANSBASKET_CONFIG=/path/to/transbasket.conf python main.py
+ss -ltnp | grep 8889     # 또는 lsof -i :8889
 ```
 
-### Port Already in Use
-
-Change port in `transbasket.conf` or kill the process using the port:
-
+**normal 백엔드 API 연결 실패**
 ```bash
-# Find process
-lsof -i :8889
-
-# Kill process
-kill -9 <PID>
+curl $OPENAI_BASE_URL/models
 ```
 
-### OpenAI API Connection Failed
-
-Test API endpoint directly:
-
+**codex 백엔드 실패 (502/504)**
 ```bash
-curl -X POST http://192.168.1.239:11434/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ." \
-  -d '{
-    "model": "gpt-oss:20b",
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'
+codex login status                     # 로그인 상태
+ls -ld "${CODEX_HOME:-$HOME/.codex}"   # 쓰기 가능 여부
+ls -ld <CODEX_RUN_DIR>                 # 임시 cwd 루트 존재/권한
 ```
+`DEBUG=yes` 이면 요청마다 `./trace/<timestamp>_<uuid>.codex.txt` 에 프롬프트/결과 트레이스가 남습니다.
+운영 환경에서는 파일이 무한히 쌓이고 원문·번역문 평문이 저장되므로 `DEBUG=no` 를 권장합니다.
 
-## Next Steps
-
-1. Review `poc/README.md` for detailed API documentation
-2. Review `TODO.md` for development roadmap
-3. Run test suite: `python test_client.py`
-4. Configure systemd service for production
-5. Set up monitoring and logging
+**메모리 누수 점검**
+```bash
+valgrind --leak-check=full --show-leak-kinds=all ./transbasket
+```
