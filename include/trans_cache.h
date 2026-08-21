@@ -13,8 +13,8 @@ typedef struct TransCache TransCache;
 typedef struct {
     int id;
     char hash[65];          /* SHA256 hex string (64 chars + null) */
-    char from_lang[4];      /* ISO 639-2 language code */
-    char to_lang[4];        /* ISO 639-2 language code */
+    char from_lang[4];      /* 3-letter code: ISO 639-2, or zhs/zht */
+    char to_lang[4];        /* 3-letter code: ISO 639-2, or zhs/zht */
     char *source_text;      /* Original text */
     char *translated_text;  /* Translated text */
     int count;              /* Number of times this translation was requested */

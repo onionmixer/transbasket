@@ -19,7 +19,8 @@ void log_message(const char *level, const char *format, ...);
 /* Get current timestamp for logging */
 void get_log_timestamp(char *buffer, size_t size);
 
-/* ISO 639-2 language code validation */
+/* Language code validation. Accepts ISO 639-2 codes plus the transbasket
+ * specific codes "zhs"/"zht" (Chinese Simplified/Traditional). */
 bool validate_language_code(const char *lang_code);
 
 /* UUID v4 validation (RFC 4122) */
@@ -28,10 +29,12 @@ bool validate_uuid(const char *uuid_str);
 /* RFC 3339 timestamp validation */
 bool validate_timestamp(const char *timestamp_str);
 
-/* Get human-readable language name from ISO 639-2 code */
+/* Get human-readable language name from a supported 3-letter code */
 const char *get_language_name(const char *lang_code);
 
-/* Normalize language code or name to ISO 639-2 code (accepts both "kor" and "Korean") */
+/* Normalize a language code or name to a supported 3-letter code.
+ * Accepts "kor", "Korean", and Chinese BCP-47 tags such as "zh-Hans"
+ * (-> "zhs") / "zh-Hant" (-> "zht"). See PLAN_CHINESE_SCRIPT_CODES.md. */
 const char *normalize_language_code(const char *lang_input);
 
 /* Generate UUID v4 */

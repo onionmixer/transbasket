@@ -79,6 +79,12 @@ static const char *ISO_639_2_CODES[] = {
     "tat", "tel", "tgk", "tgl", "tha", "tib", "tir", "ton", "tsn", "tso",
     "tuk", "tur", "twi", "uig", "ukr", "urd", "uzb", "ven", "vie", "vol",
     "wel", "wln", "wol", "xho", "yid", "yor", "zha", "zul",
+    /* transbasket 전용 3글자 코드 (ISO 639-2 미할당 영역).
+     * 중국어 스크립트를 구분하기 위해 도입했다. 캐시의 3글자 제약을 지키면서
+     * zh-Hans / zh-Hant 를 서로 다른 캐시 키로 분리한다.
+     * 자세한 내용은 PLAN_CHINESE_SCRIPT_CODES.md 참조. */
+    "zhs",  /* Chinese (Simplified)  <- zh-Hans, zh-CN, zh-SG, zh-MY */
+    "zht",  /* Chinese (Traditional) <- zh-Hant, zh-TW, zh-HK, zh-MO */
     NULL
 };
 
@@ -109,6 +115,10 @@ static const LanguageMap LANGUAGE_NAMES[] = {
     {"may", "Malay"},
     {"hin", "Hindi"},
     {"ben", "Bengali"},
+    /* transbasket 전용 코드. 이름이 없으면 프롬프트 언어명이 비거나 코드가 그대로
+     * 들어가므로 반드시 함께 유지할 것. */
+    {"zhs", "Chinese (Simplified)"},
+    {"zht", "Chinese (Traditional)"},
     {NULL, NULL}
 };
 
@@ -192,10 +202,157 @@ const char *get_language_name(const char *lang_code) {
     return NULL;
 }
 
-/* Normalize language code or name to ISO 639-2 code */
+/* ---- Chinese script tag handling -------------------------------------------
+ *
+ * The cache stores 3-character language codes (see the CHECK constraints in
+ * cache_sqlite_schema.sql), but clients send BCP-47 tags such as "zh-Hans".
+ * Those tags are folded here into the transbasket-specific codes "zhs"
+ * (Simplified) and "zht" (Traditional) so the rest of the server - buffers,
+ * cache keys, schema - keeps working unchanged. See
+ * PLAN_CHINESE_SCRIPT_CODES.md for the full rationale.
+ * -------------------------------------------------------------------------- */
+
+#define ZH_SIMPLIFIED   "zhs"
+#define ZH_TRADITIONAL  "zht"
+#define LANG_TAG_MAX    32   /* longest tag we fold; longer input is left alone */
+#define LANG_SUBTAG_MAX 8    /* BCP-47 subtag length limit */
+#define LANG_SUBTAG_COUNT 8  /* how many subtags we are willing to look at */
+
+typedef struct {
+    const char *subtag;  /* lowercased BCP-47 subtag */
+    const char *code;    /* transbasket 3-letter code it maps to */
+} ChineseSubtagMap;
+
+/* Script subtags decide the result before any region subtag does. */
+static const ChineseSubtagMap ZH_SCRIPT_SUBTAGS[] = {
+    {"hans", ZH_SIMPLIFIED},
+    {"hant", ZH_TRADITIONAL},
+    {NULL, NULL}
+};
+
+/* Region subtags are only consulted when no script subtag is present. */
+static const ChineseSubtagMap ZH_REGION_SUBTAGS[] = {
+    {"cn", ZH_SIMPLIFIED},  {"sg", ZH_SIMPLIFIED},  {"my", ZH_SIMPLIFIED},
+    {"tw", ZH_TRADITIONAL}, {"hk", ZH_TRADITIONAL}, {"mo", ZH_TRADITIONAL},
+    {NULL, NULL}
+};
+
+/* Lowercase `in` into `buf`, mapping '_' to '-' so locale-style tags such as
+ * "zh_Hans" are accepted. Returns -1 when the input does not fit, which keeps
+ * oversized input away from the fixed buffer. */
+static int fold_lang_tag(const char *in, char *buf, size_t buf_size) {
+    if (!in || !buf || buf_size == 0) {
+        return -1;
+    }
+
+    size_t len = strlen(in);
+    if (len == 0 || len >= buf_size) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)in[i];  /* tolower() needs unsigned */
+        buf[i] = (ch == '_') ? '-' : (char)tolower(ch);
+    }
+    buf[len] = '\0';
+
+    return 0;
+}
+
+/* Map a folded (lowercased) language tag to a Chinese code, or NULL when the
+ * tag is not Chinese - in which case the caller falls through to the regular
+ * code/name lookup. A malformed tag also returns NULL and ends up rejected.
+ *
+ * Rules (PLAN_CHINESE_SCRIPT_CODES.md 4):
+ *   - every subtag must be a non-empty [a-z0-9] run of at most 8 characters
+ *   - "zh"/"zho" alone means Chinese with no script preference -> "chi"
+ *   - a script subtag (hans/hant) wins over any region subtag
+ *   - otherwise a known region subtag decides
+ *   - anything else is rejected
+ */
+static const char *normalize_chinese_tag(const char *folded) {
+    char subtags[LANG_SUBTAG_COUNT][LANG_SUBTAG_MAX + 1];
+    int subtag_count = 0;
+
+    const char *cursor = folded;
+    while (*cursor) {
+        const char *dash = strchr(cursor, '-');
+        size_t len = dash ? (size_t)(dash - cursor) : strlen(cursor);
+
+        if (len == 0 || len > LANG_SUBTAG_MAX) {
+            return NULL;  /* empty subtag (leading/double/trailing '-') or too long */
+        }
+        if (subtag_count >= LANG_SUBTAG_COUNT) {
+            return NULL;  /* absurd number of subtags */
+        }
+        for (size_t i = 0; i < len; i++) {
+            unsigned char ch = (unsigned char)cursor[i];
+            if (ch > 127 || !isalnum(ch)) {
+                return NULL;  /* non-ASCII or punctuation inside a subtag */
+            }
+        }
+
+        memcpy(subtags[subtag_count], cursor, len);
+        subtags[subtag_count][len] = '\0';
+        subtag_count++;
+
+        if (!dash) {
+            break;
+        }
+        cursor = dash + 1;
+        if (*cursor == '\0') {
+            return NULL;  /* trailing '-' */
+        }
+    }
+
+    if (subtag_count == 0) {
+        return NULL;
+    }
+
+    if (subtag_count == 1) {
+        if (strcmp(subtags[0], "zh") == 0 || strcmp(subtags[0], "zho") == 0) {
+            return "chi";  /* no script requested: behave exactly like "chi" */
+        }
+        return NULL;
+    }
+
+    if (strcmp(subtags[0], "zh") != 0) {
+        return NULL;
+    }
+
+    for (int i = 1; i < subtag_count; i++) {
+        for (int k = 0; ZH_SCRIPT_SUBTAGS[k].subtag != NULL; k++) {
+            if (strcmp(subtags[i], ZH_SCRIPT_SUBTAGS[k].subtag) == 0) {
+                return ZH_SCRIPT_SUBTAGS[k].code;
+            }
+        }
+    }
+
+    for (int i = 1; i < subtag_count; i++) {
+        for (int k = 0; ZH_REGION_SUBTAGS[k].subtag != NULL; k++) {
+            if (strcmp(subtags[i], ZH_REGION_SUBTAGS[k].subtag) == 0) {
+                return ZH_REGION_SUBTAGS[k].code;
+            }
+        }
+    }
+
+    return NULL;  /* "zh" with only unknown subtags */
+}
+
+/* Normalize language code or name to a supported 3-letter code */
 const char *normalize_language_code(const char *lang_input) {
     if (!lang_input) {
         return NULL;
+    }
+
+    /* Chinese tags are handled first: "zho" is three characters but is not an
+     * ISO_639_2_CODES entry, so the 3-letter branch below would reject it. */
+    char folded[LANG_TAG_MAX];
+    if (fold_lang_tag(lang_input, folded, sizeof(folded)) == 0) {
+        const char *chinese = normalize_chinese_tag(folded);
+        if (chinese) {
+            return chinese;
+        }
     }
 
     size_t len = strlen(lang_input);

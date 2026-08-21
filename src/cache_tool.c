@@ -138,7 +138,7 @@ static int cmd_clear(TransCache *cache, const char *from_lang, const char *to_la
 
     /* Validate language codes */
     if (!validate_language_code(from_lang) || !validate_language_code(to_lang)) {
-        fprintf(stderr, "Error: Invalid language code (must be ISO 639-2)\n");
+        fprintf(stderr, "Error: Invalid language code (3-letter ISO 639-2, or zhs/zht)\n");
         return -1;
     }
 

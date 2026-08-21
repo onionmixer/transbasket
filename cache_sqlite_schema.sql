@@ -6,8 +6,8 @@
 CREATE TABLE IF NOT EXISTS trans_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hash TEXT NOT NULL UNIQUE,              -- SHA256 hash of from|to|source_text (64 chars)
-    from_lang TEXT NOT NULL,                -- ISO 639-2 source language code (3 chars)
-    to_lang TEXT NOT NULL,                  -- ISO 639-2 target language code (3 chars)
+    from_lang TEXT NOT NULL,                -- 3-char source code (ISO 639-2, or zhs/zht)
+    to_lang TEXT NOT NULL,                  -- 3-char target code (ISO 639-2, or zhs/zht)
     source_text TEXT NOT NULL,              -- Original text to translate
     translated_text TEXT NOT NULL,          -- Translated result
     count INTEGER DEFAULT 1,                -- Number of times this translation was requested
@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS trans_cache (
 
     -- Constraints
     CHECK(length(hash) = 64),               -- Ensure valid SHA256 hex string
-    CHECK(length(from_lang) = 3),           -- Ensure valid ISO 639-2 code
-    CHECK(length(to_lang) = 3),             -- Ensure valid ISO 639-2 code
+    CHECK(length(from_lang) = 3),           -- All supported codes are 3 chars
+    CHECK(length(to_lang) = 3),             -- All supported codes are 3 chars
     CHECK(count >= 1),                      -- Count must be at least 1
     CHECK(last_used >= created_at)          -- Last used cannot be before creation
 );
