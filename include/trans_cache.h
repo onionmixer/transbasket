@@ -80,11 +80,22 @@ TransCache *trans_cache_init_with_backend(CacheBackendType type,
 /* Initialize translation cache from file (legacy, defaults to text backend) */
 TransCache *trans_cache_init(const char *file_path);
 
-/* Lookup cache entry by language pair and text */
+/* Lookup cache entry by language pair and text.
+ *
+ * OWNERSHIP: the returned entry is a caller-owned DEEP COPY of the stored
+ * record (all backends). Release it with trans_cache_entry_free(). Holding it
+ * is safe after the cache lock is dropped, because no other thread can touch
+ * the copy. Backends locate the stored record through entry->hash, so
+ * trans_cache_update_count()/_update_translation() still work with the copy.
+ *
+ * Returns NULL when the text is not cached. */
 CacheEntry *trans_cache_lookup(TransCache *cache,
                                const char *from_lang,
                                const char *to_lang,
                                const char *text);
+
+/* Free an entry returned by trans_cache_lookup(). Safe with NULL. */
+void trans_cache_entry_free(CacheEntry *entry);
 
 /* Add new cache entry */
 int trans_cache_add(TransCache *cache,

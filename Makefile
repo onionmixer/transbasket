@@ -1,7 +1,10 @@
 # Makefile for Transbasket C implementation
 
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c11 -O2 -D_POSIX_C_SOURCE=200809L
+# _DEFAULT_SOURCE is required for realpath() (glibc guards it behind
+# __USE_MISC/__USE_XOPEN_EXTENDED). Without it the -O0 debug build only gets an
+# implicit declaration, truncating the returned pointer to int -> startup crash.
+CFLAGS = -Wall -Wextra -std=c11 -O2 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
 LDFLAGS = -pthread
 LIBS = -lcurl -lmicrohttpd -lcjson -luuid -lm -lssl -lcrypto -lsqlite3
 
@@ -72,7 +75,7 @@ uninstall:
 	@echo "Uninstalled"
 
 # Debug build with DEBUG macro and core dump support
-debug: CFLAGS = -Wall -Wextra -std=c11 -g3 -O0 -DDEBUG -D_POSIX_C_SOURCE=200809L
+debug: CFLAGS = -Wall -Wextra -std=c11 -g3 -O0 -DDEBUG -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
 debug: LDFLAGS += -rdynamic
 debug: clean directories $(TARGET) $(CACHE_TOOL)
 	@echo "Debug build complete: $(TARGET) and $(CACHE_TOOL) (with -g3 -O0 -DDEBUG -rdynamic)"

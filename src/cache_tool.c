@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp */
 #include <time.h>
 #include <unistd.h>
 #include <getopt.h>
@@ -396,6 +397,9 @@ static int cmd_search(TransCache *cache, const char *from_lang, const char *to_l
     printf("Created:      %s\n", created_str);
     printf("Last used:    %s\n", last_used_str);
     printf("\n");
+
+    /* trans_cache_lookup() hands back a caller-owned copy */
+    trans_cache_entry_free(entry);
 
     return 0;
 }

@@ -203,7 +203,49 @@ TransCache *text_backend_init(const char *file_path) {
     return cache;
 }
 
-/* Lookup cache entry */
+/* Find the stored entry for `hash` (caller holds the cache lock).
+ * Returns the INTERNAL entry - never hand this pointer outside the backend. */
+static CacheEntry *text_find_stored(TextBackendContext *ctx, const char *hash) {
+    for (size_t i = 0; i < ctx->size; i++) {
+        if (strcmp(ctx->entries[i]->hash, hash) == 0) {
+            return ctx->entries[i];
+        }
+    }
+    return NULL;
+}
+
+/* Deep-copy a stored entry so the caller can use it after the lock is
+ * released. Returns NULL on allocation failure. */
+static CacheEntry *text_entry_clone(const CacheEntry *src) {
+    CacheEntry *copy = calloc(1, sizeof(CacheEntry));
+    if (!copy) {
+        return NULL;
+    }
+
+    copy->id = src->id;
+    memcpy(copy->hash, src->hash, sizeof(copy->hash));
+    memcpy(copy->from_lang, src->from_lang, sizeof(copy->from_lang));
+    memcpy(copy->to_lang, src->to_lang, sizeof(copy->to_lang));
+    copy->count = src->count;
+    copy->last_used = src->last_used;
+    copy->created_at = src->created_at;
+    copy->source_text = strdup(src->source_text ? src->source_text : "");
+    copy->translated_text = strdup(src->translated_text ? src->translated_text : "");
+
+    if (!copy->source_text || !copy->translated_text) {
+        free(copy->source_text);
+        free(copy->translated_text);
+        free(copy);
+        return NULL;
+    }
+
+    return copy;
+}
+
+/* Lookup cache entry.
+ * Returns a caller-owned COPY (see trans_cache.h); the stored entry must not
+ * escape the backend, or another thread could free its strings while the
+ * caller is still reading them. */
 static CacheEntry* text_backend_lookup(void *backend_ctx,
                                        const char *from_lang,
                                        const char *to_lang,
@@ -219,20 +261,15 @@ static CacheEntry* text_backend_lookup(void *backend_ctx,
     trans_cache_calculate_hash(from_lang, to_lang, text, hash);
 
     /* Search for entry (no lock needed - caller handles locking) */
-    CacheEntry *found = NULL;
-    for (size_t i = 0; i < ctx->size; i++) {
-        if (strcmp(ctx->entries[i]->hash, hash) == 0) {
-            found = ctx->entries[i];
-            break;
-        }
+    CacheEntry *found = text_find_stored(ctx, hash);
+    if (!found) {
+        return NULL;
     }
 
-    /* Update last_used timestamp if found */
-    if (found) {
-        found->last_used = time(NULL);
-    }
+    /* Update last_used timestamp on the stored entry */
+    found->last_used = time(NULL);
 
-    return found;
+    return text_entry_clone(found);
 }
 
 /* Add new cache entry */
@@ -247,6 +284,18 @@ static int text_backend_add(void *backend_ctx,
 
     TextBackendContext *ctx = (TextBackendContext*)backend_ctx;
 
+    /* Calculate hash */
+    char hash[65];
+    trans_cache_calculate_hash(from_lang, to_lang, source_text, hash);
+
+    /* Skip if already stored. Two requests for the same new text can miss the
+     * cache at the same time and both end up here; appending twice would leave
+     * a duplicate that lookup can never reach and that never goes away.
+     * (The sqlite backend gets this from its UNIQUE index on hash.) */
+    if (text_find_stored(ctx, hash)) {
+        return 0;
+    }
+
     /* Allocate new entry */
     CacheEntry *entry = calloc(1, sizeof(CacheEntry));
     if (!entry) {
@@ -254,8 +303,7 @@ static int text_backend_add(void *backend_ctx,
         return -1;
     }
 
-    /* Calculate hash */
-    trans_cache_calculate_hash(from_lang, to_lang, source_text, entry->hash);
+    memcpy(entry->hash, hash, sizeof(entry->hash));
 
     /* Fill entry data */
     entry->id = ctx->next_id++;
@@ -297,19 +345,34 @@ static int text_backend_add(void *backend_ctx,
     return 0;
 }
 
-/* Update cache entry count */
+/* Update cache entry count.
+ * `entry` is the caller's copy, so the stored record is located by hash and
+ * updated there; the copy is kept in sync for the caller's logging. */
 static int text_backend_update_count(void *backend_ctx, CacheEntry *entry) {
     if (!backend_ctx || !entry) {
         return -1;
     }
 
-    entry->count++;
-    entry->last_used = time(NULL);
+    TextBackendContext *ctx = (TextBackendContext*)backend_ctx;
+    CacheEntry *stored = text_find_stored(ctx, entry->hash);
+    if (!stored) {
+        return -1;
+    }
+
+    stored->count++;
+    stored->last_used = time(NULL);
+
+    entry->count = stored->count;
+    entry->last_used = stored->last_used;
 
     return 0;
 }
 
-/* Update cache entry translation */
+/* Update cache entry translation.
+ * `entry` is the caller's copy: the stored record is located by hash and
+ * updated there, then the copy is kept in sync. Both strings are allocated
+ * before anything is freed, so a failed strdup never leaves a dangling
+ * translated_text behind. */
 static int text_backend_update_translation(void *backend_ctx,
                                            CacheEntry *entry,
                                            const char *new_translation) {
@@ -317,19 +380,32 @@ static int text_backend_update_translation(void *backend_ctx,
         return -1;
     }
 
-    /* Free old translation */
-    free(entry->translated_text);
-
-    /* Set new translation */
-    entry->translated_text = strdup(new_translation);
-    if (!entry->translated_text) {
-        LOG_DEBUG("Error: Memory allocation failed\n");
+    TextBackendContext *ctx = (TextBackendContext*)backend_ctx;
+    CacheEntry *stored = text_find_stored(ctx, entry->hash);
+    if (!stored) {
         return -1;
     }
 
-    /* Reset count to 1 */
-    entry->count = 1;
-    entry->last_used = time(NULL);
+    char *stored_copy = strdup(new_translation);
+    char *caller_copy = strdup(new_translation);
+    if (!stored_copy || !caller_copy) {
+        LOG_DEBUG("Error: Memory allocation failed\n");
+        free(stored_copy);
+        free(caller_copy);
+        return -1;
+    }
+
+    /* Stored record: new translation, count reset to 1 */
+    free(stored->translated_text);
+    stored->translated_text = stored_copy;
+    stored->count = 1;
+    stored->last_used = time(NULL);
+
+    /* Caller's copy mirrors the stored state */
+    free(entry->translated_text);
+    entry->translated_text = caller_copy;
+    entry->count = stored->count;
+    entry->last_used = stored->last_used;
 
     return 0;
 }

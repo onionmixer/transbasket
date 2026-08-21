@@ -100,12 +100,6 @@ static int setup_signal_handlers(void) {
     return 0;
 }
 
-/* Get environment variable with default */
-static const char *getenv_default(const char *name, const char *default_value) {
-    const char *value = getenv(name);
-    return value ? value : default_value;
-}
-
 /* Print usage information */
 static void print_usage(const char *program_name) {
     printf("Usage: %s [OPTIONS]\n\n", program_name);

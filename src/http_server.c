@@ -17,12 +17,19 @@
 #include "utils.h"
 #include "trans_cache.h"
 
+/* libmicrohttpd 0.9.74 renamed the 422 constant and deprecated the old name.
+ * Define the new name ourselves on older releases so both versions build clean. */
+#ifndef MHD_HTTP_UNPROCESSABLE_CONTENT
+#define MHD_HTTP_UNPROCESSABLE_CONTENT 422
+#endif
+
 #define DEFAULT_MAX_WORKERS 30
 #define TRUNCATE_DISPLAY_LENGTH 50
 #define TRUNCATE_BUFFER_SIZE 100
 
-/* Response helper function */
-static struct MHD_Response *create_json_response(const char *json_str, int status_code) {
+/* Build an MHD response body; the HTTP status is applied by the caller
+ * when it queues the response. */
+static struct MHD_Response *create_json_response(const char *json_str) {
     struct MHD_Response *response = MHD_create_response_from_buffer(
         strlen(json_str), (void *)json_str, MHD_RESPMEM_MUST_COPY);
 
@@ -41,7 +48,7 @@ static int send_json_response(struct MHD_Connection *connection,
         return MHD_NO;
     }
 
-    struct MHD_Response *response = create_json_response(json_str, status_code);
+    struct MHD_Response *response = create_json_response(json_str);
     free_json_response(json_str);
 
     if (!response) {
@@ -93,7 +100,7 @@ static void *cache_background_thread(void *arg) {
 
         /* Periodic save */
         if (trans_cache_save(server->cache) == 0) {
-            LOG_DEBUG("Cache periodically saved to disk (%d entries)", (int)server->cache->size);
+            LOG_DEBUG("Cache periodically saved to disk");
         }
 
         /* Cleanup check (if enabled) */
@@ -122,7 +129,7 @@ static int handle_health_check(struct MHD_Connection *connection, TranslationSer
              "{\"status\":\"healthy\",\"service\":\"transbasket\",\"version\":\"1.0.0\",\"model_type\":\"%s\"}",
              model_type);
 
-    struct MHD_Response *response = create_json_response(response_json, MHD_HTTP_OK);
+    struct MHD_Response *response = create_json_response(response_json);
     if (!response) {
         return MHD_NO;
     }
@@ -181,7 +188,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
         char *error_json = create_error_response("VALIDATION_ERROR",
                                                  "Request validation failed",
                                                  NULL);
-        return send_json_response(connection, error_json, MHD_HTTP_UNPROCESSABLE_ENTITY, false);
+        return send_json_response(connection, error_json, MHD_HTTP_UNPROCESSABLE_CONTENT, false);
     }
 
     request_uuid = strdup(req->uuid);
@@ -191,22 +198,22 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     char *cleaned_text = malloc(text_len + 1);
     if (!cleaned_text) {
         LOG_INFO("[%s] Memory allocation failed for ANSI stripping", request_uuid);
-        free(request_uuid);
         free_translation_request(req);
         char *error_json = create_error_response("INTERNAL_ERROR",
                                                  "Memory allocation failed",
                                                  request_uuid);
+        free(request_uuid);
         return send_json_response(connection, error_json, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
     }
 
     if (strip_ansi_codes(req->text, cleaned_text, text_len + 1) != 0) {
         LOG_INFO("[%s] Failed to strip ANSI codes", request_uuid);
         free(cleaned_text);
-        free(request_uuid);
         free_translation_request(req);
         char *error_json = create_error_response("INTERNAL_ERROR",
                                                  "Text processing failed",
                                                  request_uuid);
+        free(request_uuid);
         return send_json_response(connection, error_json, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
     }
 
@@ -215,11 +222,11 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     if (!control_filtered_text) {
         LOG_INFO("[%s] Memory allocation failed for control character stripping", request_uuid);
         free(cleaned_text);
-        free(request_uuid);
         free_translation_request(req);
         char *error_json = create_error_response("INTERNAL_ERROR",
                                                  "Memory allocation failed",
                                                  request_uuid);
+        free(request_uuid);
         return send_json_response(connection, error_json, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
     }
 
@@ -227,11 +234,11 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
         LOG_INFO("[%s] Failed to strip control characters", request_uuid);
         free(control_filtered_text);
         free(cleaned_text);
-        free(request_uuid);
         free_translation_request(req);
         char *error_json = create_error_response("INTERNAL_ERROR",
                                                  "Text processing failed",
                                                  request_uuid);
+        free(request_uuid);
         return send_json_response(connection, error_json, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
     }
 
@@ -265,6 +272,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
             truncate_text(cached->translated_text, truncated_result, TRUNCATE_DISPLAY_LENGTH, "...");
             LOG_INFO("[%s] Translation from cache, result: %s", request_uuid, truncated_result);
 
+            trans_cache_entry_free(cached);
             free(request_uuid);
             free_translation_request(req);
 
@@ -306,6 +314,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
                                                  trans_error.message ? trans_error.message : "Translation failed",
                                                  request_uuid);
 
+        trans_cache_entry_free(cached);
         free(trans_error.message);
         free(request_uuid);
         free_translation_request(req);
@@ -321,7 +330,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
                 /* Same translation - increment count */
                 trans_cache_update_count(server->cache, cached);
                 LOG_DEBUG("[%s] Cache updated (same translation, count: %d)",
-                        request_uuid, cached->count + 1);
+                        request_uuid, cached->count);
             } else {
                 /* Different translation - update translation and reset count */
                 trans_cache_update_translation(server->cache, cached, translated_text);
@@ -336,6 +345,10 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
             }
         }
     }
+
+    /* Lookup result is a caller-owned copy - release it (NULL-safe). */
+    trans_cache_entry_free(cached);
+    cached = NULL;
 
     /* Create success response */
     char *response_json = create_translation_response(req, translated_text);
@@ -372,7 +385,7 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
 
     /* 404 Not Found */
     const char *not_found = "{\"error\":\"Not Found\"}";
-    struct MHD_Response *response = create_json_response(not_found, MHD_HTTP_NOT_FOUND);
+    struct MHD_Response *response = create_json_response(not_found);
 
     if (!response) {
         return MHD_NO;

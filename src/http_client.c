@@ -145,6 +145,10 @@ static char *str_replace(const char *orig, const char *rep, const char *with) {
 
 /* Parse SSE (Server-Sent Events) chunk and extract content from delta */
 static char *parse_sse_chunk(const char *chunk, const char *request_uuid) {
+    /* request_uuid is only referenced by LOG_DEBUG, which compiles out in
+     * release builds - keep the parameter live for `make debug`. */
+    (void)request_uuid;
+
     if (!chunk) {
         return NULL;
     }
