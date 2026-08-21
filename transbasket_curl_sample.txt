@@ -9,7 +9,8 @@ curl http://localhost:8889/health
 {
   "status": "healthy",
   "service": "transbasket",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "model_type": "normal"
 }
 
 

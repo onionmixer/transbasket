@@ -83,12 +83,18 @@ The C implementation follows a clear separation of concerns across these core mo
 - **libmicrohttpd**: Creates a new thread for each incoming connection
 - **Blocking I/O**: Each thread can safely block on OpenAI API calls
 - **Connection Persistence**: HTTP connection maintained until translation completes
-- **Scalability**: Number of worker threads configured via MAX_WORKERS
+- **Scalability**: libmicrohttpd spawns one thread per connection
 
 This approach is efficient because:
 - No async complexity needed (blocking calls are fine in dedicated threads)
-- Natural backpressure (limited by thread pool size)
 - Simple to reason about and debug
+
+⚠ **`MAX_WORKERS` does not limit concurrent connections.** `MHD_start_daemon()` is called without
+`MHD_OPTION_CONNECTION_LIMIT` or `MHD_OPTION_THREAD_POOL_SIZE` (`http_server.c`), so the connection
+count is bounded by libmicrohttpd's own default, not by this setting. `MAX_WORKERS` is only used as
+the default for `CODEX_MAX_CONCURRENCY`. In codex mode that semaphore is the real limit on concurrent
+translations; in normal mode there is no server-side cap. Measured: 100 concurrent `/health` requests
+and 500 concurrent `/translate` requests are all served with `MAX_WORKERS=30`.
 
 Implementation in `http_server.c`:
 - `MHD_USE_THREAD_PER_CONNECTION` flag creates dedicated threads
@@ -165,7 +171,8 @@ Text-backend `add()` skips insertion when the hash is already stored (two thread
 **Strictly enforced formats:**
 - Timestamps: RFC 3339 (e.g., `2025-10-10T01:23:45.678Z`)
 - UUIDs: RFC 4122 UUID v4 with regex validation
-- Language codes: ISO 639-2 3-letter codes (e.g., `kor`, `eng`, `jpn`)
+- Language codes: ISO 639-2 3-letter codes (e.g., `kor`, `eng`, `jpn`), English language names,
+  and Chinese BCP-47 tags (`zh-Hans`/`zh-Hant`, see "Chinese Script Codes")
 
 These validations occur in `utils.c` using POSIX regex.
 
@@ -198,12 +205,17 @@ This improves LLM translation quality vs raw codes.
 
 ### Prompt Template Processing
 
-`sample_send.txt` has special handling:
-- If contains `{{TEXT}}`, direct replacement
-- If format is "... :: 번역요청 text 입니다.", text replaces after `::`
-- Maintains backward compatibility with original template format
+`http_client.c:build_instruction_message()` builds the instruction from
+`PROMPT_PREFIX_FILE`, and the template's own content selects the format:
 
-Implementation in `http_client.c:build_prompt()`.
+- **contains `{TEXT}`** (TranslateGemma style, e.g. `PROMPT_PREFIX_translategemma.txt`):
+  `{SOURCE_LANG}`, `{SOURCE_CODE}`, `{TARGET_LANG}`, `{TARGET_CODE}` and `{TEXT}` are substituted
+  from the language table, and everything travels as a single user message
+- **no `{TEXT}`** (legacy, e.g. `PROMPT_PREFIX.txt`): only the target language is substituted, into
+  `[TARGET LANGUAGE]` or `{{LANGUAGE_TO}}`, and the text is sent as a separate message
+
+The codex backend reuses the same instruction but appends the source inside a per-request random
+delimiter instead of substituting it blindly.
 
 ### Response Preservation
 
@@ -213,6 +225,11 @@ This enables client-side request/response correlation.
 Implementation in `json_handler.c:create_translation_response()`.
 
 ### Emoji and Shortcode Stripping
+
+**Normal backend only.** `strip_emoji_and_shortcodes()` runs in `translate_via_openai()` and nowhere
+else; the codex path deliberately skips it (re-processing already-decoded output would corrupt it) and
+only trims plus unwraps a whole-output code fence. Note this is also where normal-backend responses get
+truncated at 8,191 bytes - see "Hard Limits".
 
 Automatic removal of:
 - Unicode emoji (U+1F300–U+1FAFF range)
@@ -272,7 +289,8 @@ sudo apt-get install libcurl4-openssl-dev libmicrohttpd-dev libcjson-dev \
 
 ## Environment Variables
 
-- `TRANSBASKET_CONFIG`: Config file path (default: ../transbasket.conf)
+- `TRANSBASKET_CONFIG`: Config file path. Unset means `transbasket.local.conf` next to the
+  executable if present, otherwise `transbasket.conf`
 - `MAX_WORKERS`: Thread pool size (default: 30)
 
 Rule of thumb for `MAX_WORKERS`: `2 * CPU_CORES + 1`
@@ -407,10 +425,10 @@ valgrind --leak-check=full --show-leak-kinds=all ./transbasket
 
 ### Scalability
 
-- Thread-per-connection model scales to hundreds of concurrent requests
-- Limited by MAX_WORKERS setting
-- Memory per thread: ~8 MB (stack size)
-- Recommended MAX_WORKERS: 2 * CPU_CORES + 1
+- Thread-per-connection model scales to hundreds of concurrent requests (measured: 500 concurrent)
+- Not limited by `MAX_WORKERS` - see the warning under "Threading Model"
+- Memory per thread: ~8 MB of virtual address space (stack reservation)
+- `MAX_WORKERS` still sets the default codex concurrency; `2 * CPU_CORES + 1` remains a sane value
 
 ## Deployment
 
@@ -443,7 +461,9 @@ sudo systemctl start transbasket
 
 ### Docker
 
-See `Dockerfile` for containerized deployment (if available).
+There is no Dockerfile in this repository. Containerizing means installing the libraries from
+"Library Dependencies", running `make`, and mounting the config, prompt, language table and cache
+paths - remember that relative paths in the config resolve against the executable's directory.
 
 ## Security Considerations
 

@@ -255,7 +255,7 @@ def main():
 
     if not client.health_check():
         print("Error: Server is not healthy. Please start the server first.")
-        print("Run: ./bin/transbasket")
+        print("Run: ./transbasket")
         sys.exit(1)
 
     # Run tests

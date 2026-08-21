@@ -39,7 +39,19 @@ make clean          # 산출물 삭제
 
 ## 3. 설정
 
-설정 파일은 shell 스타일 `KEY="value"` 포맷입니다. 용도별 템플릿:
+설정 파일은 shell 스타일 `KEY="value"` 포맷입니다.
+
+> **정책**: 저장소에 추적되는 `*.conf` 는 전부 **템플릿**(placeholder 전용)입니다. 실제 엔드포인트·
+> API 키·내부 호스트는 같은 디렉터리의 **미추적 `*.local.conf`** 에 두세요(`.gitignore` 대상).
+> `-c` 나 `TRANSBASKET_CONFIG` 없이 실행하면 `transbasket.local.conf` 가 있으면 그것을, 없으면
+> `transbasket.conf` 를 읽습니다. 기동 로그의 `Using configuration file: ...` 로 확인할 수 있습니다.
+>
+> ```bash
+> cp transbasket.conf transbasket.local.conf   # 최초 1회
+> $EDITOR transbasket.local.conf               # 실제 값 입력
+> ```
+
+용도별 템플릿:
 
 | 파일 | 용도 |
 |------|------|
@@ -54,7 +66,7 @@ make clean          # 산출물 삭제
 ## 4. 실행
 
 ```bash
-./transbasket                                   # 기본 설정으로 실행
+./transbasket                                   # transbasket.local.conf → 없으면 transbasket.conf
 ./transbasket -c /etc/transbasket/transbasket.conf
 ./transbasket -c transbasket_codex.conf         # codex(MCP) 백엔드
 ./transbasket -w 20                             # 워커 스레드 수 지정

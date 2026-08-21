@@ -105,7 +105,8 @@ static void print_usage(const char *program_name) {
     printf("Usage: %s [OPTIONS]\n\n", program_name);
     printf("HTTP-based translation server daemon\n\n");
     printf("Options:\n");
-    printf("  -c, --config PATH       Path to configuration file (default: transbasket.conf)\n");
+    printf("  -c, --config PATH       Path to configuration file\n");
+    printf("                          (default: transbasket.local.conf, else transbasket.conf)\n");
     printf("  -p, --prompt PATH       Path to prompt prefix file (default: PROMPT_PREFIX.txt)\n");
     printf("  -r, --role PATH         Path to system role file (default: ROLS.txt)\n");
     printf("  -w, --workers NUM       Number of worker threads (default: 30)\n");

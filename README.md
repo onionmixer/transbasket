@@ -10,8 +10,9 @@ Production-ready C implementation of the Transbasket translation server for opti
   - **codex**: drives the installed `codex` CLI as an MCP server (`codex mcp-server`)
 - JSON handling with cJSON
 - Thread-per-connection model for concurrent requests
-- Translation cache (text / SQLite backends)
-- Emoji and shortcode stripping
+- Translation cache (text / SQLite backends), keyed per language pair
+- Chinese script support: `zh-Hans` / `zh-Hant` translate and cache separately
+- Emoji and shortcode stripping (normal backend only - codex output is passed through)
 - RFC 3339 timestamp and UUID v4 validation
 - Graceful shutdown with signal handling
 - Retry logic with exponential backoff
@@ -118,7 +119,8 @@ $EDITOR transbasket.local.conf        # OPENAI_BASE_URL, OPENAI_API_KEY 등
 
 ### 1. transbasket.conf
 
-Located at `../transbasket.conf` (relative to executable):
+실행 파일과 **같은 디렉터리**에서 찾습니다(상대 경로는 실행 파일 위치 기준으로 해석). 위의
+설정 파일 정책에 따라 `transbasket.local.conf` 가 있으면 그쪽이 먼저 사용됩니다.
 
 ```
 OPENAI_BASE_URL="http://<ollama-host>:11434/v1"   # OpenAI 호환 엔드포인트
@@ -163,15 +165,7 @@ Located at `../PROMPT_PREFIX.txt` (relative to executable):
 translation from language to language. not add more text. note add emoji syntax. only return plain translate text.
 ```
 
-### 3. sample_send.txt (Optional)
-
-Template file for translation prompts. Default format:
-
-```
-{{PROMPT_PREFIX}} FROM {{LANGUAGE_BASE}} to {{LANGUAGE_TO}} :: {{TEXT}}
-```
-
-### 4. SAMPLE_SOURCE_ENGLISH.txt (Test File)
+### 3. SAMPLE_SOURCE_ENGLISH.txt (Test File)
 
 번역 규칙 테스트를 위한 샘플 영문 텍스트 파일입니다. 다음 규칙들을 테스트합니다:
 
@@ -252,7 +246,8 @@ MAX_WORKERS=20 ./transbasket
 Usage: transbasket [OPTIONS]
 
 Options:
-  -c, --config PATH       Path to configuration file (default: ../transbasket.conf)
+  -c, --config PATH       Path to configuration file
+                          (default: transbasket.local.conf, else transbasket.conf)
   -p, --prompt PATH       Path to prompt prefix file (default: ../PROMPT_PREFIX.txt)
   -w, --workers NUM       Number of worker threads (default: 30)
   -h, --help              Show help message
@@ -439,32 +434,38 @@ codex 호출 자체가 `CODEX_TIMEOUT` 을 넘기면 `504`, 그 밖의 codex 실
 ## Project Structure
 
 ```
-c-impl/
-├── Makefile              # Build system
-├── README.md             # This file
-├── include/              # Header files
-│   ├── utils.h
-│   ├── config_loader.h
-│   ├── json_handler.h
-│   ├── http_client.h
-│   ├── http_server.h
-│   └── mcp_client.h      # codex MCP client
-├── src/                  # Source files
-│   ├── utils.c
-│   ├── config_loader.c
-│   ├── json_handler.c
-│   ├── http_client.c
-│   ├── http_server.c
-│   ├── mcp_client.c      # codex MCP client (MODEL_TYPE=codex)
-│   └── main.c
-├── obj/                  # Object files (generated)
-└── bin/                  # Executable (generated)
+transbasket/
+├── Makefile                    # Build system (binaries land in the project root)
+├── README.md                   # This file
+├── CLAUDE.md                   # Implementation notes for contributors
+├── transbasket.conf            # Default config TEMPLATE (real values go in *.local.conf)
+├── transbasket_codex.conf      # codex backend config template
+├── language_tables.conf        # Language code/name table
+├── PROMPT_PREFIX*.txt          # Prompt templates
+├── ROLS.txt                    # System role text
+├── cache_sqlite_schema.sql     # Reference schema for the sqlite cache backend
+├── include/                    # Header files
+│   ├── utils.h  config_loader.h  json_handler.h
+│   ├── http_client.h  http_server.h  mcp_client.h
+│   ├── language_table.h
+│   └── trans_cache.h  cache_backend_text.h  cache_backend_sqlite.h
+├── src/                        # Source files
+│   ├── main.c  utils.c  config_loader.c  json_handler.c
+│   ├── http_client.c  http_server.c  mcp_client.c
+│   ├── language_table.c
+│   ├── trans_cache.c  cache_backend_text.c  cache_backend_sqlite.c
+│   └── cache_tool.c            # Cache management tool (separate binary)
+├── tests/test_client.py        # Python test client
+├── obj/                        # Object files (generated)
+├── transbasket                 # Server binary (generated)
+└── cache_tool                  # Cache tool binary (generated)
 ```
 
 ## Module Overview
 
 ### utils.c
-- ISO 639-2 language code validation
+- Language code validation and normalization (ISO 639-2, English names, and
+  Chinese BCP-47 tags folded to `zhs`/`zht`)
 - UUID v4 validation (RFC 4122)
 - RFC 3339 timestamp validation
 - Emoji and shortcode stripping
@@ -472,9 +473,10 @@ c-impl/
 
 ### config_loader.c
 - Configuration file parsing (KEY="value" format)
-- Prompt prefix file loading
-- Configuration validation
-- Path resolution
+- Config selection: `transbasket.local.conf` first, then `transbasket.conf`
+- Prompt prefix / system role file loading
+- Configuration validation (including the codex sandbox/approval hard-coercion)
+- Path resolution relative to the executable
 
 ### json_handler.c
 - JSON request parsing with cJSON
@@ -486,7 +488,8 @@ c-impl/
 - Translation dispatch on `MODEL_TYPE` (normal vs codex)
 - normal: OpenAI API communication with libcurl, retry with exponential backoff
 - codex: builds delimiter-isolated prompt, concurrency semaphore, per-request temp cwd
-- Prompt template processing
+- Prompt building: `{TEXT}`-style templates (TranslateGemma) and the legacy
+  `[TARGET LANGUAGE]` / `{{LANGUAGE_TO}}` form
 - Error handling and status code mapping
 
 ### mcp_client.c
@@ -501,6 +504,20 @@ c-impl/
 - Health check endpoint
 - Translation endpoint
 - Error response handling
+
+### language_table.c
+- Loads `language_tables.conf` (code→name entries and ISO 639-2↔639-1 mappings)
+- Resolves plain codes and regional/script variants (`zh-Hant-HK` → Chinese (Traditional))
+
+### trans_cache.c / cache_backend_text.c / cache_backend_sqlite.c
+- Backend-agnostic cache API with a text (JSONL) and a SQLite backend
+- SHA-256(`from|to|text`) cache keys via the OpenSSL EVP API
+- All backend calls are serialized; lookups return a caller-owned copy
+  (see "Translation Cache Concurrency" in CLAUDE.md)
+
+### cache_tool.c
+- Separate `cache_tool` binary: list / clear / stats / cleanup / search / export / migrate
+- Note: every command except `migrate` operates on the **text** backend
 
 ### main.c
 - Entry point with signal handling
