@@ -101,7 +101,7 @@ The server requires two configuration files:
 Located at `../transbasket.conf` (relative to executable):
 
 ```
-OPENAI_BASE_URL="http://192.168.1.239:11434/v1"
+OPENAI_BASE_URL="http://<ollama-host>:11434/v1"   # OpenAI 호환 엔드포인트
 OPENAI_MODEL="gpt-oss:20b"
 OPENAI_API_KEY="."
 LISTEN="0.0.0.0"

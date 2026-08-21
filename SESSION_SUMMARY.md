@@ -355,7 +355,7 @@ wc -l trans_dictionary.txt migrated_back.txt
 ### 4. 데이터베이스 파일 확인
 ```bash
 ls -lh migrated_cache.db
-# -rw-r--r-- 1 onion onion 124K 10월 25 12:44 migrated_cache.db
+# -rw-r--r-- 1 <user> <group> 124K 10월 25 12:44 migrated_cache.db
 
 file migrated_cache.db
 # SQLite 3.x database, WAL mode, UTF-8, 9 pages
