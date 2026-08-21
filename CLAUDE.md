@@ -270,6 +270,35 @@ Rule of thumb for `MAX_WORKERS`: `2 * CPU_CORES + 1`
 
 Add to `ISO_639_2_CODES` array in `utils.c` and `LANGUAGE_NAMES` array in `get_language_name()`.
 
+Both arrays matter: `ISO_639_2_CODES` decides what requests are accepted, and `LANGUAGE_NAMES` supplies
+the name that reaches the prompt. A code present in the first but missing from the second falls back to
+the raw code in the prompt, which the model cannot interpret.
+
+### Chinese Script Codes (`zhs` / `zht`)
+
+Clients send BCP-47 tags (`zh-Hans`, `zh-Hant`, `zh-CN`, `zh-TW`, …), but the cache stores 3-character
+codes — `CacheEntry.from_lang[4]` and the SQLite `CHECK(length(from_lang) = 3)` constraint baked into
+existing databases. `normalize_language_code()` therefore folds Chinese tags into two transbasket
+specific codes before anything else sees them:
+
+| Input | Internal code | Prompt language name |
+|---|---|---|
+| `zh-Hans*`, `zh-CN`, `zh-SG`, `zh-MY`, `zhs`, `Chinese (Simplified)` | `zhs` | Chinese (Simplified) |
+| `zh-Hant*`, `zh-TW`, `zh-HK`, `zh-MO`, `zht`, `Chinese (Traditional)` | `zht` | Chinese (Traditional) |
+| `zh`, `zho`, `chi`, `Chinese` | `chi` | Chinese |
+
+Rules enforced in `normalize_chinese_tag()`:
+- every subtag must be a non-empty `[a-z0-9]` run of at most 8 characters, so `zh-Hans-`,
+  `zh-Hans--CN`, and `zh-Hans-中文` are rejected (422)
+- a script subtag (`hans`/`hant`) outranks any region subtag, so `zh-CN-Hant` is Traditional
+- `fold_lang_tag()` bounds the input at `LANG_TAG_MAX` and casts to `unsigned char` before `tolower()`
+
+Two files must stay in sync — `src/utils.c` (`ISO_639_2_CODES`, `LANGUAGE_NAMES`) and
+`language_tables.conf`. In the config the `zhs:zh`/`zht:zh` mappings must stay **after** `chi:zh`
+(`language_table_to_iso639_2()` returns the first match), and the `zhs=`/`zht=` name entries must exist:
+without them `language_table_resolve()` falls back to the name for `zh` and a Traditional request is
+silently translated as Simplified. Full rationale in `PLAN_CHINESE_SCRIPT_CODES.md`.
+
 ### Modifying OpenAI Retry Logic
 
 Edit `http_client.c`:

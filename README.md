@@ -292,13 +292,37 @@ curl -X POST http://localhost:8889/translate \
 **Request Body:**
 - `timestamp` (string, required): RFC 3339 형식의 타임스탬프
 - `uuid` (string, required): RFC 4122 UUID v4 형식의 고유 식별자
-- `from` (string, required): 원본 언어 코드 (ISO 639-2, 3자리)
-- `to` (string, required): 대상 언어 코드 (ISO 639-2, 3자리)
+- `from` (string, required): 원본 언어 코드 (아래 "언어 코드" 참조)
+- `to` (string, required): 대상 언어 코드 (아래 "언어 코드" 참조)
 - `text` (string, required): 번역할 텍스트 (**1 ~ 10,000 바이트**, 초과 시 422)
 
 **Supported Language Codes:**
 
 번역 지원 언어는 Model에 따라 다르며, 언어의 형식은 `language_tables.conf`를 참고하세요.
+
+기본적으로 **ISO 639-2 3글자 코드**(`kor`, `eng`, `jpn` …) 또는 **영어 언어명**(`Korean`, `English` …)을
+받습니다. 대소문자는 구분하지 않습니다.
+
+**중국어 간체/번체 구분**
+
+중국어는 스크립트를 구분해 요청할 수 있으며, 세 가지 표기를 모두 받습니다:
+
+| 표기 | 예 | 내부 코드 | 번역 결과 |
+|---|---|---|---|
+| **BCP-47 태그** (권장) | `zh-Hans`, `zh-Hant`, `zh-Hant-TW`, `zh-Hans-SG` | `zhs` / `zht` | 간체 / 번체 |
+| BCP-47 지역 태그 | `zh-CN`, `zh-SG`, `zh-MY` → 간체 / `zh-TW`, `zh-HK`, `zh-MO` → 번체 | `zhs` / `zht` | 간체 / 번체 |
+| **3글자 코드** | `zhs`, `zht` | 그대로 | 간체 / 번체 |
+| 언어명 | `Chinese (Simplified)`, `Chinese (Traditional)` | `zhs` / `zht` | 간체 / 번체 |
+| 스크립트 미지정 | `zh`, `zho`, `chi`, `Chinese` | `chi` | 모델 기본값(대개 간체) |
+
+- 구분자는 `-` 와 `_` 를 모두 받습니다(`zh_Hans` 가능). 대소문자 무시.
+- **스크립트 서브태그가 지역보다 우선**합니다: `zh-Hant-CN`, `zh-CN-Hant` → 모두 번체.
+- `zhs` / `zht` 는 ISO 639-2 코드가 아니라 **transbasket 전용 3글자 코드**입니다. 3글자 코드만 다루는
+  클라이언트를 위해 공식 지원하지만, 표준 표기인 `zh-Hans` / `zh-Hant` 사용을 권장합니다.
+- 캐시는 스크립트별로 분리됩니다: `zh-Hans`·`zhs`·`zh-CN` 은 같은 캐시 항목을 공유하고,
+  `zh-Hant` 계열과는 별개 항목입니다. `chi` 는 또 다른 항목입니다.
+- 지원하지 않는 값은 `422` 입니다: `cmn`, `yue`, `zh-yue`, `zh-latn`, `zh-xx`,
+  그리고 서브태그 문법을 어긴 값(`zh-Hans-`, `zh-Hans--CN`, `zh-Hans-中文`).
 
 **Response:**
 ```json

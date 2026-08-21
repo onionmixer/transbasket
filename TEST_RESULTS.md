@@ -436,3 +436,84 @@ DEBUG 전용 코드가 존재하지 않는 `TransCache.size` 를 참조하던 �
 
 이 조사 결과는 `README.md`(공개 API 한계)와 `CLAUDE.md`(구현 측 상수·주의사항)에 반영되어 있으며,
 코드 수정 없이 **문서화된 한계**로 관리한다.
+
+---
+
+## 중국어 간체/번체 지원 구현 검증 (2026-08-21)
+
+계획서: `PLAN_CHINESE_SCRIPT_CODES.md` (codex 교차검토 + 전건 재검증 후 반영)
+
+### 구현 요약
+
+외부 API 는 BCP-47 태그(`zh-Hans`/`zh-Hant` 등)와 3글자 코드(`zhs`/`zht`)를 모두 받고,
+`normalize_language_code()` 가 이를 3글자 내부 코드로 정규화한다. 버퍼·SQLite 스키마·기존 캐시 DB 는
+변경하지 않았다.
+
+### 단위 테스트 (`normalize_language_code()` 직접 호출, 52건)
+
+| 그룹 | 결과 |
+|---|---|
+| `zh-Hans` / `zh-hans` / `ZH-HANS` / `zh_Hans` / `zh-Hans-HK,SG,TW` | → `zhs` ✅ |
+| `zh-Hant` / `ZH-HANT` / `zh-Hant-TW` / `zh_Hant` | → `zht` ✅ |
+| `zh-CN`, `zh-SG`, `zh-MY` / `zh-TW`, `zh-HK`, `zh-MO` | → `zhs` / `zht` ✅ |
+| `zh-Hant-CN`, `zh-CN-Hant` → `zht`, `zh-TW-Hans` → `zhs` | 스크립트 우선 ✅ |
+| `zh`, `zho`, `ZH` | → `chi` ✅ |
+| `zhs`, `zht` 직접 입력 | 그대로 ✅ |
+| `Chinese (Simplified)` / `(Traditional)` | → `zhs` / `zht` ✅ |
+| `zh-Hans-`, `zh-Hans--CN`, `zh-Hans-中文`, `zh-Hans-!!!`, `zh-`, `zh--hans`, `zh-hansx`, `zh-xx`, `zh-latn`, `zh-verylongsubtag`, `cmn`, `yue`, 10,000자 | 전부 NULL(422) ✅ |
+| 기존 코드 회귀 (`kor`, `eng`, `jpn`, `Korean`, `English`, `chi`, `CHI`) | 변화 없음 ✅ |
+
+**52건 중 불일치 0건.**
+
+### 통합 테스트 (HTTP API, codex 백엔드)
+
+원문: `안녕하세요. 오늘 회의는 오후 3시에 시작하며, 자료는 미리 준비해 주세요.`
+
+| 요청 `to` | HTTP | 스크립트 | 결과 |
+|---|---|---|---|
+| `zh-Hans` | 200 | 간체 | 您好。今天的会议于下午3点开始，请提前准备好资料。 |
+| `zh-Hant` | 200 | 번체 | 您好。今天的會議將於下午3點開始，請事先準備好資料。 |
+| `zhs` (3글자) | 200 | 간체 | `zh-Hans` 와 **같은 캐시 항목에 히트**(0.0초) |
+| `zht` (3글자) | 200 | 번체 | `zh-Hant` 와 같은 캐시 항목 |
+| `zh-CN` / `zh-TW` | 200 | 간체 / 번체 | 각각 같은 항목 공유 |
+| `zh-Hant-CN` | 200 | 번체 | 스크립트 우선 규칙 확인 |
+| `Chinese (Traditional)` | 200 | 번체 | 이름 경로 확인 |
+| `chi` | 200 | 간체 | **별도 캐시 항목**(신규 codex 호출) — 기존 동작 보존 |
+| `cmn`, `yue`, `zh-xx`, `zh-latn`, `zh-Hans-`, `zh-Hans--CN`, `zh-Hans-中文`, `zh-Hans-!!!` | 422 | — | 전부 거부 |
+
+캐시 DB 확인 — 스크립트별로 정확히 분리됨:
+
+```
+from_lang  to_lang  count
+kor        zhs      5
+kor        zht      7
+kor        chi      1
+kor        eng      1
+eng        kor      1
+zht        kor      1     <- 역방향(from=zh-Hant)도 동작
+```
+
+### 회귀 테스트
+
+| 항목 | 결과 |
+|---|---|
+| `kor→eng`, `eng→kor`, `from=zh-Hant→kor` | ✅ 정상 |
+| 동시 300요청 (같은 항목) | ✅ 전부 200, 서버 정상 |
+| 서로 다른 중국어 코드 6종 혼합 동시 200요청 | ✅ 200/200 스크립트·UUID 모두 자기 요청과 일치 |
+| valgrind (중국어 코드 8종 요청) | ✅ `All heap blocks were freed`, 오류 0 |
+| `make` / `make debug` | ✅ 경고 0 |
+| `cache_tool clear kor zht` | ✅ 수용 / `clear kor xyz` → 거부 |
+| 언어 테이블 로드 | ✅ `zhs`/`zht` → 이름·코드 정상, `to_iso639_2("zh")` 는 여전히 `chi` |
+
+### 함께 수정한 선결 결함
+
+`src/http_client.c` 의 legacy 프롬프트 경로가 `get_language_name()` 결과를 NULL 검사 없이 `%s` 로
+넘기고 있었다. `LANGUAGE_NAMES` 는 20여 개뿐이라 `swe`(Swedish), `fin`(Finnish) 같은 코드에서
+프롬프트에 `(null)` 이 들어간다(표준상 UB). 코드로 폴백하도록 수정했다.
+
+### 부수 수정
+
+- `language_tables.conf` 의 `zh-CH="Chinese"` → `zh-CN="Chinese (Simplified)"` (CH 는 스위스, 오타)
+- `zh-TW="Chinese"` → `"Chinese (Traditional)"`
+- `include/utils.h`, `include/trans_cache.h`, `cache_sqlite_schema.sql`, `cache_tool` 오류 문구의
+  "ISO 639-2" 서술을 `zhs`/`zht` 포함하도록 정정
