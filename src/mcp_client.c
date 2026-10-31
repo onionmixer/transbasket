@@ -190,8 +190,17 @@ static cJSON *wait_for_id(MCPClient *c, int want_id, int timeout_sec,
                     if (msg) {
                         cJSON *id = cJSON_GetObjectItem(msg, "id");
                         if (cJSON_IsNumber(id) && id->valueint == want_id) {
-                            /* matched: shift any trailing bytes down, return */
-                            return msg;  /* leftover discarded at stop (per-request) */
+                            /* matched: consume this line and keep the rest for
+                             * the next wait. The '\n' is already '\0', so a
+                             * stale line left in rbuf would swallow the next
+                             * message - a server that answers tools/call with
+                             * no notifications in between would never match. */
+                            char *next = nl + 1;
+                            size_t tail = c->rbuf_len - (size_t)(next - c->rbuf);
+                            memmove(c->rbuf, next, tail);
+                            c->rbuf_len = tail;
+                            c->rbuf[c->rbuf_len] = '\0';
+                            return msg;
                         }
                         cJSON_Delete(msg);  /* notification / other id */
                     }
