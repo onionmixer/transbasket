@@ -218,6 +218,8 @@ int main(int argc, char *argv[]) {
         LOG_INFO("  Model Type: %s", config->model_type_str ? config->model_type_str : "normal");
         if (config->model_type == MODEL_TYPE_CODEX) {
             /* OPENAI_* may be NULL in codex mode - never %s a NULL */
+            LOG_INFO("  Codex Interface: %s",
+                     config->codex_interface == CODEX_INTERFACE_MCP ? "mcp (legacy)" : "exec");
             LOG_INFO("  Codex Bin: %s", config->codex_bin ? config->codex_bin : "codex");
             LOG_INFO("  Codex Model: %s", config->codex_model ? config->codex_model : "(default)");
             LOG_INFO("  Codex Sandbox: %s", config->codex_sandbox ? config->codex_sandbox : "read-only");

@@ -56,7 +56,7 @@ make clean          # 산출물 삭제
 | 파일 | 용도 |
 |------|------|
 | `transbasket.conf` | 기본 설정 (`MODEL_TYPE="normal"`, OpenAI 호환 HTTP API) |
-| `transbasket_codex.conf` | codex(MCP) 백엔드용 (`MODEL_TYPE="codex"`) |
+| `transbasket_codex.conf` | codex 백엔드용 (`MODEL_TYPE="codex"`) |
 | `transbasket_example_cache_file.conf` / `transbasket_example_cache_sqlite.conf` | 캐시 백엔드별 예시 |
 
 프롬프트/언어 테이블 파일도 함께 필요합니다: `PROMPT_PREFIX.txt`(또는 `PROMPT_PREFIX_translategemma.txt`), `ROLS.txt`, `language_tables.conf`.
@@ -68,7 +68,7 @@ make clean          # 산출물 삭제
 ```bash
 ./transbasket                                   # transbasket.local.conf → 없으면 transbasket.conf
 ./transbasket -c /etc/transbasket/transbasket.conf
-./transbasket -c transbasket_codex.conf         # codex(MCP) 백엔드
+./transbasket -c transbasket_codex.conf         # codex 백엔드
 ./transbasket -w 20                             # 워커 스레드 수 지정
 MAX_WORKERS=20 ./transbasket                    # 환경변수로도 지정 가능
 ./transbasket -d -c /etc/transbasket.conf       # 데몬 모드
@@ -98,14 +98,23 @@ curl -X POST http://localhost:8889/translate \
 
 응답은 요청의 `uuid` / `timestamp` 를 그대로 보존합니다.
 
-## 6. codex(MCP) 백엔드 추가 준비
+## 6. codex 백엔드 추가 준비
 
 ```bash
-codex --version          # CLI 설치 확인 (0.148.0 에서 동작 검증됨)
+codex --version          # CLI 설치 확인 (exec: 0.166.0, 레거시 mcp: 0.148.0 에서 검증)
 codex login status       # 서버를 '실행하는 계정'이 로그인되어 있어야 함
+codex exec --help        # 기본 인터페이스(exec)가 있는지
+codex mcp list           # 이 계정의 MCP 서버 - 있으면 아래 CODEX_IGNORE_USER_CONFIG 참고
 ```
 
 체크 포인트:
+
+- **codex-cli 0.154.0 부터 `codex mcp-server` 가 없습니다.** 기본값 `CODEX_INTERFACE="exec"` 를
+  유지하세요. `mcp` 는 그 이전 버전에 고정된 호스트에서만 동작합니다. 기동 로그의
+  `codex CLI: codex-cli X.Y.Z (interface=...)` 줄과 그 아래 `Warning:` 으로 확인할 수 있습니다.
+- 서비스 계정의 `config.toml` 에 MCP 서버/플러그인이 있으면 매 번역마다 함께 기동되고, 그 도구는
+  read-only 샌드박스 밖입니다. 번역 전용 계정을 쓰거나 `CODEX_IGNORE_USER_CONFIG="true"` +
+  `CODEX_MODEL` 을 지정하세요.
 
 - 서비스 계정이 쓰기 가능한 `CODEX_HOME`(기본 `~/.codex`)을 가져야 핸드셰이크가 성공합니다.
 - `CODEX_RUN_DIR`(요청별 임시 cwd 루트, 기본 `/var/lib/transbasket/run`)을 **미리 생성**하고 0700 으로 두세요.
@@ -176,11 +185,14 @@ curl $OPENAI_BASE_URL/models
 
 **codex 백엔드 실패 (502/504)**
 ```bash
+grep -E "codex CLI|Warning" <로그>      # 기동 시 감지한 버전/인터페이스 문제
 codex login status                     # 로그인 상태
 ls -ld "${CODEX_HOME:-$HOME/.codex}"   # 쓰기 가능 여부
 ls -ld <CODEX_RUN_DIR>                 # 임시 cwd 루트 존재/권한
 ```
-`DEBUG=yes` 이면 요청마다 `./trace/<timestamp>_<uuid>.codex.txt` 에 프롬프트/결과 트레이스가 남습니다.
+`502` 응답의 `errorMessage` 에는 codex 의 마지막 `ERROR:` 줄이 담깁니다(예: 지원하지 않는 모델).
+`codex MCP initialize failed` 라면 `CODEX_INTERFACE="mcp"` 로 신버전 codex 를 구동한 것입니다.
+`DEBUG=yes` 이면 요청마다 `./trace/<timestamp>_<uuid>.codex.txt` 에 프롬프트/결과/codex stderr 트레이스가 남습니다.
 운영 환경에서는 파일이 무한히 쌓이고 원문·번역문 평문이 저장되므로 `DEBUG=no` 를 권장합니다.
 
 **메모리 누수 점검**

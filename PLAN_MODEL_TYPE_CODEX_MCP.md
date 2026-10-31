@@ -5,6 +5,14 @@
 상태: **구현 완료(IMPLEMENTED) & 검증됨** — codex↔claude 교차검토 10회(§10) 후 구현. normal/codex 양 백엔드 end-to-end 동작 확인. 신규 모듈 `mcp_client.[ch]` 추가.
 재검증: 2026-08-21 (codex-cli 0.148.0) — kor↔eng/jpn→kor 번역, 델리미터 인젝션 방어, 동시 6요청(제한 4), 프로세스·임시디렉터리 누수 0 확인. 캐시 임계값 이슈 발견 및 조치(§3.2).
 
+> **2026-10-31 갱신 — 이 문서의 MCP 경로는 이제 레거시다.** codex-cli 0.154.0 에서 `codex mcp-server`
+> 서브커맨드가 제거되었다(0.166.0 바이너리에도 문자열 0건). 신버전에서는 그 인자가 대화형 프롬프트로
+> 해석되어 `Error: stdin is not a terminal` 로 즉시 종료하고, 모든 번역 요청이 `502 codex MCP initialize
+> failed` 가 되었다. 기본 경로는 `CODEX_INTERFACE="exec"`(`src/codex_exec.c`, 요청마다 `codex exec`)로
+> 바뀌었고, 이 문서의 MCP 설계는 `CODEX_INTERFACE="mcp"`(codex-cli < 0.154.0 전용)에만 해당한다.
+> 프롬프트 격리·동시성 세마포어·요청별 임시 cwd·보안 강제값·후처리 규칙은 두 경로 공통으로 유지된다.
+> exec 경로의 동작·설정·주의점은 `README.md`(codex 절)와 `CLAUDE.md`("Translation Backend") 참고.
+
 ---
 
 ## 1. 목표 (Requirements)

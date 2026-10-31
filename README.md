@@ -7,7 +7,7 @@ Production-ready C implementation of the Transbasket translation server for opti
 - High-performance HTTP server using libmicrohttpd
 - Pluggable translation backend via `MODEL_TYPE`:
   - **normal**: OpenAI-compatible API client using libcurl (default)
-  - **codex**: drives the installed `codex` CLI as an MCP server (`codex mcp-server`)
+  - **codex**: drives the installed `codex` CLI (`codex exec` per request; legacy `codex mcp-server` optional)
 - JSON handling with cJSON
 - Thread-per-connection model for concurrent requests
 - Translation cache (text / SQLite backends), keyed per language pair
@@ -57,8 +57,15 @@ brew install \
 
 ### Optional: codex CLI (only for `MODEL_TYPE=codex`)
 
-The `codex` translation backend shells out to the installed Codex CLI as an MCP
-server. It is **not** needed for the default `normal` backend.
+The `codex` translation backend shells out to the installed Codex CLI (`codex exec`,
+one process per request). It is **not** needed for the default `normal` backend.
+
+> **codex-cli 0.154.0 removed `codex mcp-server`.** With a current CLI that subcommand
+> is parsed as an interactive prompt and exits with `Error: stdin is not a terminal`, so
+> the old MCP route answered every request with `502 codex MCP initialize failed`.
+> `CODEX_INTERFACE="exec"` (the default) uses the supported `codex exec` surface instead;
+> `CODEX_INTERFACE="mcp"` remains only for hosts pinned to an older CLI. The startup log
+> prints the detected version and warns if the chosen interface is missing.
 
 ```bash
 # Verify codex is installed and on PATH
@@ -137,25 +144,52 @@ MODEL_TYPE="normal"   # normal (default) | codex
 ```
 
 - **`normal`** — translate via the OpenAI-compatible HTTP API (`OPENAI_*`). Default; unchanged behavior.
-- **`codex`** — translate by driving the installed `codex` CLI as an MCP server (`codex mcp-server`). `OPENAI_*` are ignored; the `CODEX_*` keys apply (see comments in `transbasket.conf`):
+- **`codex`** — translate with the installed `codex` CLI. `OPENAI_*` are ignored; the `CODEX_*` keys apply (see comments in `transbasket.conf`):
 
 ```
 MODEL_TYPE="codex"
+#CODEX_INTERFACE="exec"         # exec (default) | mcp (legacy, codex-cli < 0.154.0 only)
 #CODEX_BIN="codex"              # codex executable (PATH-searched)
 #CODEX_MODEL="gpt-5.2"          # optional model override (unset = codex default)
 #CODEX_TIMEOUT="100"            # seconds (must be < MHD 120s)
 #CODEX_MAX_CONCURRENCY="8"      # concurrent codex processes (default = MAX_WORKERS)
 #CODEX_RUN_DIR="/var/lib/transbasket/run"   # writable root for per-request temp cwd
-#CODEX_REASONING_EFFORT="none"  # optional arguments.config injection
+#CODEX_REASONING_EFFORT="none"  # optional model_reasoning_effort override (valid values depend on the model)
 #CODEX_ALLOW_UNSAFE="false"     # allow non read-only/never (dev only)
+#CODEX_IGNORE_USER_CONFIG="false"  # exec only: skip $CODEX_HOME/config.toml (set CODEX_MODEL too)
 ```
+
+With `CODEX_INTERFACE="exec"` each request runs
+
+```
+codex exec --skip-git-repo-check --color never [--ephemeral] [--ignore-user-config] \
+           -s <CODEX_SANDBOX> -c approval_policy="<CODEX_APPROVAL_POLICY>" \
+           [-c model_reasoning_effort="<CODEX_REASONING_EFFORT>"] [-m <CODEX_MODEL>] \
+           -C <per-request temp dir> -o <temp dir>/last-message.txt -
+```
+
+The prompt is written to **stdin** (never argv, so the untrusted text does not appear in
+`ps` or `/proc/<pid>/cmdline`), and the result is read from `--output-last-message`.
+`--ephemeral` is added when the installed CLI supports it, so no session files pile up
+under `$CODEX_HOME/sessions`. codex echoes the whole prompt on stderr, so stderr is never
+copied into client-facing errors; only its last `ERROR:` line is (e.g. an unsupported
+model), and with `DEBUG=yes` the stderr tail goes into the trace file.
+
+**MCP servers in `config.toml`.** codex starts every MCP server and plugin from the
+running user's `$CODEX_HOME/config.toml` on each translation. Their tools are outside the
+`read-only` sandbox, so untrusted source text could steer codex into calling them. At
+startup transbasket lists them in a warning. On a host whose codex account also has MCP
+servers configured, set `CODEX_IGNORE_USER_CONFIG="true"` together with an explicit
+`CODEX_MODEL` (the config file's `model` is skipped too, and codex's built-in default model
+may reject `CODEX_REASONING_EFFORT="none"`). Measured: with 5 configured servers one
+translation spawned 9 helper processes; with the flag set it spawned none.
 
 In codex mode set `TRANS_CACHE_THRESHOLD="1"`: codex output is non-deterministic, so a
 repeated source text is re-worded on every call, which resets the cache entry's `count`
 to 1 — with a higher threshold the cache never reaches it and every request re-invokes
 codex. The ready-made `transbasket_codex.conf` already sets this.
 
-codex mode requires the running user to have completed `codex login` and to have a writable `CODEX_HOME`. The endpoint translates untrusted text, so `sandbox` is forced to `read-only` and `approval-policy` to `never` unless `CODEX_ALLOW_UNSAFE=true`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` for design and the operator/systemd checklist.
+codex mode requires the running user to have completed `codex login` and to have a writable `CODEX_HOME`. The endpoint translates untrusted text, so `sandbox` is forced to `read-only` and `approval_policy` to `never` unless `CODEX_ALLOW_UNSAFE=true`; `CODEX_APPROVAL_POLICY` and `CODEX_REASONING_EFFORT` must match `[A-Za-z0-9._-]{1,64}` because they are passed as TOML `-c` overrides. See `PLAN_MODEL_TYPE_CODEX_MCP.md` for design and the operator/systemd checklist.
 
 ### 2. PROMPT_PREFIX.txt
 
@@ -224,7 +258,7 @@ Set `MODEL_TYPE="codex"` in the config (see [Configuration](#1-transbasketconf))
 make sure `codex login status` shows you are logged in, then run normally:
 
 ```bash
-# Translation requests transparently route through `codex mcp-server`.
+# Translation requests transparently route through `codex exec`.
 ./transbasket -c /path/to/codex-config.conf
 
 # /health reports the active backend
@@ -383,7 +417,7 @@ codex 호출 자체가 `CODEX_TIMEOUT` 을 넘기면 `504`, 그 밖의 codex 실
 | HTTP 요청 본문 전체 크기 | **상한 없음** | 서버가 메모리에 그대로 누적. 신뢰할 수 없는 클라이언트에 노출할 때는 앞단(리버스 프록시)에서 제한 필요 |
 | 응답 길이 — `normal` | **8,191 바이트** (`MAX_CLEANED_TEXT_BUFFER` 8192) | ⚠️ **조용히 잘림**. HTTP 200 이고 경고 로그도 없으며, 잘린 텍스트가 캐시에도 저장됨 |
 | 이스케이프 해제 중간 버퍼 — `normal` | 16,383 바이트 (`MAX_TRANSLATION_BUFFER` 16384) | 조용히 잘림 (이후 8,191 로 다시 잘림) |
-| 응답 길이 — `codex` | 사실상 제한 없음 | MCP stdout 누적이 **4 MB** (`MCP_RBUF_MAX`)를 넘으면 절단이 아니라 오류(`502`) |
+| 응답 길이 — `codex` | 사실상 제한 없음 | 결과가 **4 MB** (`exec`: `CODEX_OUT_MAX`, `mcp`: `MCP_RBUF_MAX`)를 넘으면 절단이 아니라 오류(`502`) |
 | 스트리밍 누적 버퍼 (`STREAM=yes`) | 65,535 바이트 (`MAX_STREAM_BUFFER`) | 조용히 잘림 (디버그 빌드에서만 로그) |
 
 > **실측**: 고정 길이 응답을 돌려주는 테스트용 upstream 이 13,500 바이트 번역문을 반환했을 때
@@ -446,12 +480,12 @@ transbasket/
 ├── cache_sqlite_schema.sql     # Reference schema for the sqlite cache backend
 ├── include/                    # Header files
 │   ├── utils.h  config_loader.h  json_handler.h
-│   ├── http_client.h  http_server.h  mcp_client.h
+│   ├── http_client.h  http_server.h  codex_exec.h  mcp_client.h
 │   ├── language_table.h
 │   └── trans_cache.h  cache_backend_text.h  cache_backend_sqlite.h
 ├── src/                        # Source files
 │   ├── main.c  utils.c  config_loader.c  json_handler.c
-│   ├── http_client.c  http_server.c  mcp_client.c
+│   ├── http_client.c  http_server.c  codex_exec.c  mcp_client.c
 │   ├── language_table.c
 │   ├── trans_cache.c  cache_backend_text.c  cache_backend_sqlite.c
 │   └── cache_tool.c            # Cache management tool (separate binary)
@@ -476,7 +510,8 @@ transbasket/
 - Config selection: `transbasket.local.conf` first, then `transbasket.conf`
 - Prompt prefix / system role file loading
 - Configuration validation (including the codex sandbox/approval hard-coercion)
-- Path resolution relative to the executable
+- Path resolution: the config file relative to the executable, prompt/role/language
+  files relative to the config file's directory
 
 ### json_handler.c
 - JSON request parsing with cJSON
@@ -492,8 +527,15 @@ transbasket/
   `[TARGET LANGUAGE]` / `{{LANGUAGE_TO}}` form
 - Error handling and status code mapping
 
+### codex_exec.c
+- Default codex interface: one `codex exec` child per request, prompt on stdin
+- Startup probe: `codex --version`, `codex exec --help` (flag detection), `codex mcp list --json`
+- Spawns codex in its own process group, kills the whole group on timeout
+- Collects the final message from `--output-last-message` (stdout fallback), bounded at 4 MB
+
 ### mcp_client.c
-- Minimal MCP stdio JSON-RPC 2.0 client for `codex mcp-server`
+- Legacy (`CODEX_INTERFACE="mcp"`): MCP stdio JSON-RPC 2.0 client for `codex mcp-server`,
+  which only exists in codex-cli < 0.154.0
 - Spawns codex in its own process group (`posix_spawnp`), reaps the whole tree
 - initialize handshake + `tools/call` (name="codex"), id-matched responses
 - Drains stdout/stderr concurrently (deadlock-safe), EINTR-tolerant, bounded buffers

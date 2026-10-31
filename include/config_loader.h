@@ -15,8 +15,14 @@ typedef enum {
 /* Translation backend type (MODEL_TYPE) */
 typedef enum {
     MODEL_TYPE_NORMAL = 0,     /* OpenAI-compatible HTTP API (default) */
-    MODEL_TYPE_CODEX           /* codex CLI driven as an MCP server */
+    MODEL_TYPE_CODEX           /* codex CLI (CODEX_INTERFACE: exec or legacy MCP) */
 } ModelType;
+
+/* How the codex backend talks to the CLI (CODEX_INTERFACE) */
+typedef enum {
+    CODEX_INTERFACE_EXEC = 0,  /* `codex exec` per request (default, current CLIs) */
+    CODEX_INTERFACE_MCP        /* `codex mcp-server` (legacy, codex-cli < 0.154.0) */
+} CodexInterface;
 
 /* Configuration structure */
 typedef struct {
@@ -61,16 +67,18 @@ typedef struct {
     ModelType model_type;            /* Backend type (default: MODEL_TYPE_NORMAL) */
     char *model_type_str;            /* Backend type as string for logging */
 
-    /* codex (MCP) backend settings - only used when model_type == MODEL_TYPE_CODEX */
+    /* codex backend settings - only used when model_type == MODEL_TYPE_CODEX */
+    CodexInterface codex_interface;  /* exec (default) or legacy mcp */
     char *codex_bin;                 /* codex executable (default "codex", PATH-searched) */
     char *codex_model;               /* model override (optional, NULL = codex default) */
     char *codex_sandbox;             /* sandbox mode (forced "read-only" unless allow_unsafe) */
     char *codex_approval_policy;     /* approval policy (forced "never" unless allow_unsafe) */
-    char *codex_reasoning_effort;    /* arguments.config injection (optional, NULL = not injected) */
+    char *codex_reasoning_effort;    /* model_reasoning_effort override (optional, NULL = not set) */
     char *codex_run_dir;             /* root for per-request temp cwd (default /var/lib/transbasket/run) */
     int   codex_timeout;             /* response timeout seconds (default 100, < MHD timeout) */
     int   codex_max_concurrency;     /* max concurrent codex processes (0 = use MAX_WORKERS) */
     bool  codex_allow_unsafe;        /* allow unsafe sandbox/approval values (default false) */
+    bool  codex_ignore_user_config;  /* exec: skip $CODEX_HOME/config.toml (default false) */
 } Config;
 
 /* Load configuration from file */

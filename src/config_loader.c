@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <regex.h>
 #include <libgen.h>
@@ -162,6 +163,17 @@ static char *resolve_path(const char *base_path, const char *relative_path) {
     return resolved;
 }
 
+/* true if s is a non-empty run of at most 64 [A-Za-z0-9._-] characters
+ * (codex_exec.c sizes its `-c key="value"` buffers for that, CODEX_TOKEN_MAX) */
+static bool is_codex_token(const char *s) {
+    if (!s || !*s || strlen(s) > 64) return false;
+    for (; *s; s++) {
+        unsigned char ch = (unsigned char)*s;
+        if (!isalnum(ch) && ch != '.' && ch != '_' && ch != '-') return false;
+    }
+    return true;
+}
+
 /* Validate configuration */
 int validate_config(const Config *config) {
     if (!config) {
@@ -200,6 +212,17 @@ int validate_config(const Config *config) {
         /* codex mode: codex_bin must be present */
         if (!config->codex_bin || strlen(config->codex_bin) == 0) {
             LOG_INFO( "Error: CODEX_BIN is required in codex mode");
+            return -1;
+        }
+
+        /* These end up inside `-c key="value"` TOML overrides for codex exec,
+         * so keep them to plain identifiers. */
+        if (!is_codex_token(config->codex_approval_policy)) {
+            LOG_INFO("Error: CODEX_APPROVAL_POLICY must match [A-Za-z0-9._-]{1,64}");
+            return -1;
+        }
+        if (config->codex_reasoning_effort && !is_codex_token(config->codex_reasoning_effort)) {
+            LOG_INFO("Error: CODEX_REASONING_EFFORT must match [A-Za-z0-9._-]{1,64}");
             return -1;
         }
     }
@@ -329,6 +352,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->model_type_str = strdup("normal");
 
     /* codex backend defaults */
+    config->codex_interface = CODEX_INTERFACE_EXEC;
     config->codex_bin = strdup("codex");
     config->codex_model = NULL;             /* NULL = codex default model */
     config->codex_sandbox = strdup("read-only");
@@ -480,6 +504,15 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
                 config->model_type = MODEL_TYPE_NORMAL;
                 config->model_type_str = strdup("normal");
             }
+        } else if (strcmp(key, "CODEX_INTERFACE") == 0) {
+            if (strcasecmp(value, "exec") == 0) {
+                config->codex_interface = CODEX_INTERFACE_EXEC;
+            } else if (strcasecmp(value, "mcp") == 0) {
+                config->codex_interface = CODEX_INTERFACE_MCP;
+            } else {
+                LOG_INFO("Warning: Invalid CODEX_INTERFACE '%s', using 'exec'\n", value);
+                config->codex_interface = CODEX_INTERFACE_EXEC;
+            }
         } else if (strcmp(key, "CODEX_BIN") == 0) {
             free(config->codex_bin);
             config->codex_bin = strdup(value);
@@ -519,6 +552,10 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             config->codex_allow_unsafe = (strcasecmp(value, "yes") == 0 ||
                                           strcmp(value, "1") == 0 ||
                                           strcasecmp(value, "true") == 0);
+        } else if (strcmp(key, "CODEX_IGNORE_USER_CONFIG") == 0) {
+            config->codex_ignore_user_config = (strcasecmp(value, "yes") == 0 ||
+                                                strcmp(value, "1") == 0 ||
+                                                strcasecmp(value, "true") == 0);
         }
     }
 

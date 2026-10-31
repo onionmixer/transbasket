@@ -16,6 +16,7 @@ typedef struct {
     /* codex backend: limit concurrent codex processes (codex mode only) */
     sem_t codex_sem;
     bool  codex_sem_inited;
+    bool  codex_ephemeral;      /* installed `codex exec` supports --ephemeral */
 } OpenAITranslator;
 
 /* Translation error structure */

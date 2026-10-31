@@ -70,9 +70,10 @@ The C implementation follows a clear separation of concerns across these core mo
 2. **config_loader.c**: Parses `transbasket.conf` (KEY="value" format) and `PROMPT_PREFIX.txt`
 3. **utils.c**: Validation utilities (RFC 3339 timestamps, UUID v4, ISO 639-2 language codes, emoji stripping)
 4. **json_handler.c**: JSON request/response handling using cJSON
-5. **http_client.c**: Translation dispatch — `normal` (OpenAI API via libcurl, retry/backoff) and `codex` (MCP) backends
+5. **http_client.c**: Translation dispatch — `normal` (OpenAI API via libcurl, retry/backoff) and `codex` backends
 6. **http_server.c**: HTTP server using libmicrohttpd with thread-per-connection model
-7. **mcp_client.c**: Minimal MCP stdio JSON-RPC 2.0 client that drives `codex mcp-server` (used by the `codex` backend)
+7. **codex_exec.c**: `codex exec` driver — the codex backend's default interface, plus the startup CLI probe
+8. **mcp_client.c**: Minimal MCP stdio JSON-RPC 2.0 client for the legacy `codex mcp-server` interface (codex-cli < 0.154.0)
 
 (Cache and language-table concerns live in `trans_cache.c`, `cache_backend_*.c`, and `language_table.c`.)
 
@@ -100,7 +101,7 @@ Implementation in `http_server.c`:
 - `MHD_USE_THREAD_PER_CONNECTION` flag creates dedicated threads
 - `openai_translate()` called directly (no executor needed)
 
-For the `codex` backend the same blocking thread spawns a `codex mcp-server` child per request, so the model still maps cleanly: one blocked thread = one outstanding codex process (capped by a semaphore).
+For the `codex` backend the same blocking thread spawns a `codex exec` (or legacy `codex mcp-server`) child per request, so the model still maps cleanly: one blocked thread = one outstanding codex process (capped by a semaphore).
 
 ### Request Flow
 
@@ -109,7 +110,7 @@ For the `codex` backend the same blocking thread spawns a `codex mcp-server` chi
 3. Thread → Cache lookup; on hit above threshold, returns cached translation
 4. Thread → `openai_translate()` dispatches on `MODEL_TYPE`:
    - **normal**: builds prompt, calls OpenAI API via libcurl (retry: max 3, exponential backoff), unescapes + strips emoji/shortcodes
-   - **codex**: builds a delimiter-isolated prompt, acquires a concurrency slot, spawns `codex mcp-server`, runs initialize + `tools/call`, takes `structuredContent.content` (trim + whole-fence unwrap only)
+   - **codex**: builds a delimiter-isolated prompt, acquires a concurrency slot, then either runs `codex exec` with the prompt on stdin and reads `--output-last-message` (default), or spawns `codex mcp-server` and runs initialize + `tools/call` (legacy); trim + whole-fence unwrap only
 5. Thread → Updates cache
 6. Thread → Sends JSON response preserving original UUID/timestamp
 7. Connection closes, thread terminates
@@ -134,7 +135,8 @@ Two configuration files:
 1. **transbasket.conf**: Shell-style KEY="value" format (not INI)
    - Parsed with regex pattern matching
    - Custom validation for URLs, ports
-   - Relative paths resolved from executable location
+   - The config file itself is resolved relative to the executable; prompt, role and language
+     table paths inside it are resolved relative to the **config file's directory**
 
 2. **PROMPT_PREFIX.txt**: Multi-line prompt prefix
    - Loaded at startup
@@ -146,15 +148,28 @@ Two configuration files:
 `MODEL_TYPE` selects how translations are produced (see `config_loader.c`, `http_client.c:openai_translate()` dispatch):
 
 - **`normal`** (default): existing OpenAI-compatible HTTP API path (`/v1/chat/completions` via libcurl). Uses `OPENAI_BASE_URL/MODEL/API_KEY`. Behavior unchanged.
-- **`codex`**: drives the installed `codex` CLI as an MCP server (`codex mcp-server`, stdio JSON-RPC 2.0) via the `mcp_client.c` module. `OPENAI_*` are unused; `CODEX_*` settings apply.
+- **`codex`**: drives the installed `codex` CLI. `OPENAI_*` are unused; `CODEX_*` settings apply. `CODEX_INTERFACE` picks how:
+  - **`exec`** (default, `codex_exec.c`): `codex exec --skip-git-repo-check --color never [--ephemeral] [--ignore-user-config] -s … -c approval_policy="…" [-c model_reasoning_effort="…"] [-m …] -C <tmp> -o <tmp>/last-message.txt -`
+  - **`mcp`** (legacy, `mcp_client.c`): `codex mcp-server` over stdio JSON-RPC 2.0, result from `structuredContent.content`
+
+⚠ **codex-cli 0.154.0 removed `codex mcp-server`** (0 occurrences in the 0.166.0 binary). A current CLI parses it as
+an interactive prompt and exits with `Error: stdin is not a terminal`; with `CODEX_INTERFACE="mcp"` every request
+then fails with `502 codex MCP initialize failed`. Keep `exec` unless the host is pinned to an older CLI. The codex
+CLI surface keeps moving, which is why `openai_translator_init()` runs `codex_cli_probe()` at startup (version,
+`exec --help` flag detection, `mcp list --json`) and logs a `Warning:` when the chosen interface or flag is missing.
 
 codex backend specifics:
-- One `codex mcp-server` child is spawned per request (`posix_spawnp`, in its own process group so the node wrapper **and** the real codex grandchild are reaped on stop).
+- One codex child is spawned per request (`posix_spawnp`, in its own process group so the node wrapper **and** the real codex grandchild are reaped on stop). Note codex itself starts MCP-server helpers in *their own* process groups, so a timeout kill does not reach them; codex reaps them when it exits.
+- exec: the prompt goes on **stdin, never argv** (argv is world-readable via `ps`/`/proc/<pid>/cmdline`). codex echoes the full prompt on **stderr**, so stderr must never be copied into client-facing errors — only the last `ERROR:` line is (`last_error_line()`); the full tail goes to the DEBUG trace only.
+- exec: `CODEX_APPROVAL_POLICY` / `CODEX_REASONING_EFFORT` become TOML `-c key="value"` overrides, so `validate_config()` restricts them to `[A-Za-z0-9._-]{1,64}`.
+- exec: `--ephemeral` is passed only if `codex exec --help` advertises it (keeps `$CODEX_HOME/sessions` from growing).
+- **MCP servers / plugins from the codex user's `config.toml` start on every translation** and their tools are not covered by `sandbox=read-only`, so untrusted text could steer codex into calling them (measured: 5 configured servers → 9 helper processes per request). `CODEX_IGNORE_USER_CONFIG=true` (exec only) passes `--ignore-user-config`, which also drops the config's `model`, so `CODEX_MODEL` must be set — codex's built-in default model rejected `model_reasoning_effort="none"`. Default is `false` so existing deployments keep working; startup logs a warning listing the servers.
 - Concurrency is capped by a semaphore in `OpenAITranslator` (`CODEX_MAX_CONCURRENCY`, default = `MAX_WORKERS`); exhaustion → 503, call timeout → 504.
 - Untrusted text is isolated with a per-request random delimiter (uuid-based); `sandbox=read-only`/`approval-policy=never` are force-validated unless `CODEX_ALLOW_UNSAFE=true`.
 - Each request runs in a fresh `mkdtemp` cwd under `CODEX_RUN_DIR` (default `/var/lib/transbasket/run`), removed afterward.
-- The translation is taken from `result.structuredContent.content`; codex output is **not** re-unescaped or emoji-stripped (would corrupt it), only trimmed + whole-output code-fence unwrapped.
-- Requires the host (service user) to have `codex login` done and a writable `CODEX_HOME`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` §7.1 for the systemd/operator checklist.
+- codex output is **not** re-unescaped or emoji-stripped (would corrupt it), only trimmed + whole-output code-fence unwrapped.
+- Requires the host (service user) to have `codex login` done and a writable `CODEX_HOME`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` §7.1 for the systemd/operator checklist (that plan describes the now-legacy MCP route; the operator steps still apply).
+- `mcp_client.c:wait_for_id()` must consume the matched line from `rbuf` before returning. It used to leave it there with its `\n` already turned into `\0`, so the next wait parsed the stale line and swallowed the following one; with the real `codex mcp-server` that was a `codex/event` notification, so it only failed against servers that answer without notifications (fixed 2026-10-31).
 - **`TRANS_CACHE_THRESHOLD` must be `1` in codex mode.** codex output is non-deterministic, so the same source text comes back slightly reworded on each call; `handle_translate()` then treats it as a changed translation and resets the entry's `count` to 1. With any threshold above 1 the count never reaches it, the cache never serves a hit, and every request pays for a codex call. Verified: threshold 3 → 4 identical requests all took ~4 s and re-invoked codex; threshold 1 → second request served from cache in ~0.01 s.
 
 ### Translation Cache Concurrency
@@ -252,7 +267,8 @@ Verified against the code and measured end-to-end on 2026-08-21. Public-facing c
 | `MAX_TRANSLATION_BUFFER` | `http_client.c` | 16,384 | `unescape_string()` stops at 16,383 bytes and still returns 0 (**silent truncation**) |
 | `MAX_CLEANED_TEXT_BUFFER` | `http_client.c` | 8,192 | `strip_emoji_and_shortcodes()` stops at 8,191 bytes and returns 0 — **the effective response cap for `normal`**, silent, cached truncated |
 | `MAX_STREAM_BUFFER` | `http_client.c` | 65,536 | stream mode stops accumulating; only a `LOG_DEBUG` (invisible in release builds) |
-| `MCP_RBUF_MAX` | `mcp_client.c` | 4 MB | codex path **errors** ("codex MCP response too large" → 502) rather than truncating |
+| `CODEX_OUT_MAX` | `codex_exec.c` | 4 MB | exec path **errors** ("codex response too large" → 502) rather than truncating |
+| `MCP_RBUF_MAX` | `mcp_client.c` | 4 MB | legacy MCP path **errors** ("codex MCP response too large" → 502) rather than truncating |
 | MHD connection timeout | `http_server.c` | 120 s | connection closed |
 | curl timeout (`normal`) | `http_client.c` | 60 s/attempt, 3 attempts, `2^attempt` backoff | 503/504 |
 
