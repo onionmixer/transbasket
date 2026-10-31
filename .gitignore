@@ -90,3 +90,6 @@ venv/
 # ---- Patch leftovers ----
 *.orig
 *.rej
+
+# ---- Session handoff notes (local, per working copy) ----
+HANDOFF.md
