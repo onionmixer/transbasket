@@ -5,6 +5,7 @@
 #include <time.h>
 #include <pthread.h>
 #include "config_loader.h"  /* For CacheBackendType */
+#include "utils.h"
 
 /* Forward declaration */
 typedef struct TransCache TransCache;
@@ -13,7 +14,7 @@ typedef struct TransCache TransCache;
 typedef struct {
     int id;
     char hash[65];          /* SHA256 hex string (64 chars + null) */
-    char from_lang[4];      /* 3-letter code: ISO 639-2, or zhs/zht */
+    char from_lang[SOURCE_LANGUAGE_SIZE]; /* 3-letter code, or source mode auto */
     char to_lang[4];        /* 3-letter code: ISO 639-2, or zhs/zht */
     char *source_text;      /* Original text */
     char *translated_text;  /* Translated text */

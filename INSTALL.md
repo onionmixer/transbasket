@@ -60,6 +60,8 @@ make clean          # 산출물 삭제
 | `transbasket_example_cache_file.conf` / `transbasket_example_cache_sqlite.conf` | 캐시 백엔드별 예시 |
 
 프롬프트/언어 테이블 파일도 함께 필요합니다: `PROMPT_PREFIX.txt`(또는 `PROMPT_PREFIX_translategemma.txt`), `ROLS.txt`, `language_tables.conf`.
+`auto` 요청은 내장 지시를 사용하므로 별도 파일이 필요하지 않습니다. 선택 설정
+`PROMPT_PREFIX_AUTO_FILE`을 사용하면 해당 파일도 배포해야 하며, 파일 오류는 서버 시작을 중단합니다.
 
 상대 경로는 설정 파일 기준으로 해석되므로, 다른 위치에서 실행할 때는 절대 경로 사용을 권장합니다.
 
@@ -97,6 +99,25 @@ curl -X POST http://localhost:8889/translate \
 ```
 
 응답은 요청의 `uuid` / `timestamp` 를 그대로 보존합니다.
+
+자동 감지는 같은 엔드포인트에서 `from`만 `auto`로 지정합니다.
+
+```bash
+curl -X POST http://localhost:8889/translate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timestamp": "2026-11-03T01:23:45.678Z",
+    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+    "from": "auto",
+    "to": "kor",
+    "text": "Please check the meeting schedule."
+  }'
+```
+
+`auto`는 언어 테이블에 추가하지 않습니다. `to=auto`는 422이며,
+응답에 감지된 언어명이나 신뢰도는 추가되지 않습니다.
+2026-11-03의 오프라인 검증은 9개 통과했고 실제 TranslateGemma 호출은 503으로 실패했습니다.
+배포 후 실제 대상 모델에서 자동 감지·번역 결과를 확인하세요. 세부 검증 기록은 [TEST_RESULTS.md](TEST_RESULTS.md)에 있습니다.
 
 ## 6. codex 백엔드 추가 준비
 
@@ -160,7 +181,31 @@ sudo systemctl enable --now transbasket
 sudo journalctl -u transbasket -f
 ```
 
-## 8. 문제 해결
+## 8. auto 지원 버전으로 업그레이드
+
+`from=auto`는 설정 추가 없이 활성화됩니다. 기존 명시적 언어 요청은 기존 프롬프트를 사용하고,
+auto는 내장 자동 감지 지시를 사용합니다. 선택 설정 `PROMPT_PREFIX_AUTO_FILE`은 설정 파일
+기준 상대 경로로 해석되며, 예제는 `PROMPT_PREFIX_auto.txt`입니다.
+
+1. 기존 서버와 같은 캐시를 사용하는 프로세스를 정지합니다.
+2. 실제 설정의 SQLite 캐시를 SQLite 백업 기능으로 백업합니다. WAL 사용 중에는 DB 파일만
+   복사하지 않습니다. 예: `sqlite3 /actual/cache.db '.backup /backup/cache-before-auto.db'`.
+   text 캐시를 쓰면 JSONL 파일도 백업합니다.
+3. `make`로 서버와 `cache_tool`을 함께 빌드하고 배포합니다. SQLite 0/1 스키마는 초기화 시
+   트랜잭션 안에서 버전 2로 이전됩니다. 기존 행과 해시, 추가 제약, 인덱스·트리거·뷰 및 ID 순번을 보존합니다.
+   `cache_sqlite_schema.sql`은 신규 DB용이며 기존 DB에 재실행하여 이전하는 용도로 사용하지 않습니다.
+4. 시작 로그에서 캐시 초기화 성공을 확인하고 `from=auto` 요청과 반복 요청을 확인합니다.
+   이전 실패는 롤백됩니다. 기존 서버 정책에 따라 캐시 초기화 실패 시 캐시 없이 실행될 수 있으므로,
+   `Cannot initialize/migrate translation cache schema` 또는 `continuing without cache` 로그가 있으면
+   캐시가 정상 이전된 것으로 간주하지 말고 원인을 해결합니다.
+
+구버전으로 롤백할 때는 서버를 정지하고 배포 전 캐시 백업을 복원하거나 별도 캐시 경로를 지정합니다.
+구버전은 `auto`를 `aut`로 잘라 읽을 수 있어 새 캐시를 그대로 공유하면 안 됩니다.
+미래 버전·알 수 없는 구조의 DB는 자동 덮어쓰지 않습니다.
+
+오프라인 검증: `make test-auto`. 외부 모델 호출 없이 임시 DB와 127.0.0.1 서버로 동작합니다.
+
+## 9. 문제 해결
 
 **빌드 실패 (라이브러리 없음)**
 ```bash

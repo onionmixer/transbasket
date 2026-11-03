@@ -34,7 +34,7 @@ class TranslationClient:
 
         Args:
             text: Text to translate
-            from_lang: Source language (ISO 639-2, e.g., 'kor', 'eng', 'jpn')
+            from_lang: Source language (e.g., 'kor', 'eng', 'jpn') or 'auto'
             to_lang: Target language (ISO 639-2)
             test_uuid: Optional UUID for testing (generates new if None)
             test_timestamp: Optional timestamp for testing (uses current if None)
@@ -109,6 +109,9 @@ def test_valid_requests():
     print("Test 3: Japanese to English")
     print("-" * 60)
     client.translate("こんにちは", "jpn", "eng")
+
+    print("Automatic source language to Korean")
+    client.translate("Please check the meeting schedule.", "auto", "kor")
 
     # Test 4: Long text
     print("Test 4: Long text translation")

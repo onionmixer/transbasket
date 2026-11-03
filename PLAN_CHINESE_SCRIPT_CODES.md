@@ -6,6 +6,11 @@
 채택 방식: **Option A** — 외부 API 는 BCP-47 서브태그를 그대로 받고, 내부에서는 3글자 코드로 정규화
 교차검토: codex(codex-cli 0.148.0, read-only) 1회 → 전건 재검증 후 반영. 판정 내역은 §11.
 
+> 2026-11-03 후속 변경: 원문 `auto` 모드가 추가되어 원문 버퍼는 5바이트, SQLite는 버전 2가 되었다.
+> 아래의 “버퍼·스키마 변경 없음”과 `[4]` 설명은 중국어 지원을 구현한 당시 기준이다.
+> 중국어의 `zhs`/`zht` 정규화와 기존 해시는 유지한다. 현재 원문 제약은 3글자 코드 또는 `auto`다.
+> 변경 상세는 [PLAN_SOURCE_LANGUAGE_AUTO.md](PLAN_SOURCE_LANGUAGE_AUTO.md), 검증은 [TEST_RESULTS.md](TEST_RESULTS.md) 참조.
+
 ---
 
 ## 1. 목표

@@ -12,6 +12,7 @@ Production-ready C implementation of the Transbasket translation server for opti
 - Thread-per-connection model for concurrent requests
 - Translation cache (text / SQLite backends), keyed per language pair
 - Chinese script support: `zh-Hans` / `zh-Hant` translate and cache separately
+- Automatic source language: `from: "auto"` (normal and codex backends)
 - Emoji and shortcode stripping (normal backend only - codex output is passed through)
 - RFC 3339 timestamp and UUID v4 validation
 - Graceful shutdown with signal handling
@@ -99,6 +100,18 @@ This will create the executables `transbasket` and `cache_tool` in the project r
 ```bash
 make debug
 ```
+
+### Offline regression tests
+
+```bash
+make test-auto
+```
+
+Python 3 표준 라이브러리만 사용하며 임시 캐시와 127.0.0.1 테스트 서버를 생성합니다.
+외부 모델 호출 없이 API 계약, normal·codex 프롬프트, 캐시와 SQLite 이전을 검증합니다.
+2026-11-03 검증 결과는 9개 통과입니다. 실제 모델의 번역 품질 검증과는 별개이며,
+현재 설정의 TranslateGemma 호출은 503으로 실패했습니다.
+세부 범위와 남은 검증은 [TEST_RESULTS.md](TEST_RESULTS.md)를 참고하세요.
 
 ## Configuration
 
@@ -341,7 +354,7 @@ curl -X POST http://localhost:8889/translate \
 **Request Body:**
 - `timestamp` (string, required): RFC 3339 형식의 타임스탬프
 - `uuid` (string, required): RFC 4122 UUID v4 형식의 고유 식별자
-- `from` (string, required): 원본 언어 코드 (아래 "언어 코드" 참조)
+- `from` (string, required): 원본 언어 코드 또는 `auto` (아래 "언어 코드" 참조)
 - `to` (string, required): 대상 언어 코드 (아래 "언어 코드" 참조)
 - `text` (string, required): 번역할 텍스트 (**1 ~ 10,000 바이트**, 초과 시 422)
 
@@ -351,6 +364,49 @@ curl -X POST http://localhost:8889/translate \
 
 기본적으로 **ISO 639-2 3글자 코드**(`kor`, `eng`, `jpn` …) 또는 **영어 언어명**(`Korean`, `English` …)을
 받습니다. 대소문자는 구분하지 않습니다.
+
+**원문 언어 자동 감지**
+
+`"from": "auto"`를 보내면 모델이 같은 번역 호출 안에서 원문 언어를 판단합니다.
+`AUTO`, `Auto`도 허용하며 내부에서는 `auto`로 통일합니다. `auto`는 언어 테이블 조회와
+일반 언어 검증 전에 판별하는 원문 전용 모드이므로 테이블에 등록할 필요가 없습니다.
+`to`에는 구체적인 대상 언어를 지정해야 하며 `to=auto`는 422입니다.
+`from` 누락·빈 값·앞뒤 공백은 자동 감지로 처리하지 않습니다.
+
+```json
+{
+  "timestamp": "2026-11-03T01:23:45.678Z",
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "from": "auto",
+  "to": "kor",
+  "text": "Please check the meeting schedule."
+}
+```
+
+normal과 codex 모두 지원하며 응답 필드는 기존과 같습니다. 감지된 언어명·신뢰도는 반환하지 않습니다.
+혼합 언어와 짧은 문장의 해석은 모델에 의존합니다.
+
+자동 감지는 기존 `PROMPT_PREFIX_FILE` 대신 내장 자동 감지 지시를 사용합니다. 기존 템플릿의
+English 고정 지시나 ASCII 원문 반환 규칙을 자동 감지 요청에 적용하지 않습니다.
+필요하면 설정 파일 기준 상대 경로 또는 절대 경로로 추가 지시를 지정할 수 있습니다.
+
+```conf
+# 선택 설정. 생략하면 내장 지시만 사용합니다.
+PROMPT_PREFIX_AUTO_FILE="PROMPT_PREFIX_auto.txt"
+```
+
+이 파일은 `{TARGET_LANG}`, `{TARGET_CODE}`, `[TARGET LANGUAGE]`, `{{LANGUAGE_TO}}`와
+선택적인 `{TEXT}`를 지원합니다. `{TEXT}`가 있으면 normal은 단일 사용자 메시지로 전달하고,
+없으면 본문을 별도 메시지로 전달합니다. codex는 두 형식 모두 요청별 구분자로 본문을 감쌉니다.
+자동 감지·대상 언어·데이터 취급 지시는 서버가 앞에 붙입니다.
+`{SOURCE_LANG}`·`{SOURCE_CODE}`, 빈 파일, 읽을 수 없는 파일은 시작 시 설정 오류입니다.
+`SYSTEM_ROLE`은 계속 적용되므로 특정 언어를 강제하는 지시가 없는지 확인하세요.
+
+캐시는 `auto → 대상 언어`로 저장하고 명시적 원문 언어의 캐시와 분리합니다.
+SQLite의 기존 버전 0/1 DB는 시작 시 버전 2로 이전하며, 기존 행·해시·횟수·시각·인덱스·트리거를
+보존합니다. 배포 전 백업 및 구버전으로의 롤백 절차는 [INSTALL.md](INSTALL.md)를 참고하세요.
+
+오프라인 회귀 검증은 `make test-auto`로 실행합니다. 임시 캐시와 로컬 가짜 HTTP·codex 서버만 사용합니다.
 
 **중국어 간체/번체 구분**
 
@@ -391,8 +447,7 @@ curl -X POST http://localhost:8889/translate \
 
 **Status Codes:**
 - `200 OK`: 번역 성공
-- `400 Bad Request`: 잘못된 JSON 형식
-- `422 Unprocessable Entity`: 유효하지 않은 UUID, 언어 코드, 또는 타임스탬프
+- `422 Unprocessable Entity`: JSON 파싱 실패 또는 유효하지 않은 UUID, 언어 코드, 타임스탬프, 텍스트
 - `500 Internal Server Error`: 예상치 못한 내부 오류
 - `502 Bad Gateway`: OpenAI API 4xx 오류 (재시도 불가)
 - `503 Service Unavailable`: OpenAI API 5xx/타임아웃 (재시도 가능, `Retry-After: 5` 헤더 포함)
@@ -451,10 +506,12 @@ codex 호출 자체가 `CODEX_TIMEOUT` 을 넘기면 `504`, 그 밖의 codex 실
 #### 번역 결과의 재현성 — 보장하지 않음
 
 - **같은 원문이라도 호출마다 표현이 달라질 수 있습니다.** 특히 `codex` 백엔드는 비결정적입니다.
-- 결과는 `PROMPT_PREFIX_FILE` 내용에 좌우됩니다. 기본 제공되는 `PROMPT_PREFIX_translategemma.txt` 에는
+- 명시적 원문 언어 요청의 결과는 `PROMPT_PREFIX_FILE` 내용에 좌우됩니다. 기본 제공되는 `PROMPT_PREFIX_translategemma.txt` 에는
   "전체가 ASCII 패턴이면 원문을 byte-for-byte 그대로 출력하라"는 규칙이 있어, **순수 ASCII 영문 장문이
   번역되지 않고 그대로 반환되는 경우가 실측**되었습니다(7 KB 내외 입력에서 관측; 짧은 ASCII 문장과
   비ASCII 문자가 섞인 문장은 정상 번역). 이 동작은 서버 버그가 아니라 프롬프트 규칙의 결과입니다.
+- `from=auto`는 별도의 내장 지시와 선택적인 `PROMPT_PREFIX_AUTO_FILE`을 사용하므로 위 템플릿의
+  ASCII 원문 반환 규칙을 적용하지 않습니다. 모델 출력과 엔진별 후처리까지 원문 보존을 보장하는 것은 아닙니다.
 - 캐시가 켜져 있고 `TRANS_CACHE_THRESHOLD=1` 이면 **첫 결과가 고정**됩니다. 첫 응답이 잘못 나오면 해당 항목이
   캐시에서 정리되기 전까지 같은 값이 계속 반환됩니다.
 
@@ -464,6 +521,8 @@ codex 호출 자체가 `CODEX_TIMEOUT` 을 넘기면 `504`, 그 밖의 codex 실
   서로 다른 `MODEL_TYPE`/프롬프트를 쓰는 인스턴스가 같은 캐시 DB 를 공유하면 다른 설정으로 생성된 번역문이
   반환됩니다. 기본 제공 설정은 codex 용 캐시 DB 를 분리해 두었으니 배포 시에도 분리를 유지하세요.
 - 캐시 키의 `text` 는 ANSI 이스케이프·제어문자를 제거한 **정규화 후 텍스트**입니다.
+- `from=auto`는 소문자 `auto`를 키에 사용하며, `auto|kor|text`와 `eng|kor|text`는 별도 항목입니다.
+  자동 감지 결과를 추측하여 명시적 원문 언어 캐시를 재사용하지 않습니다.
 
 ## Project Structure
 
@@ -477,7 +536,8 @@ transbasket/
 ├── language_tables.conf        # Language code/name table
 ├── PROMPT_PREFIX*.txt          # Prompt templates
 ├── ROLS.txt                    # System role text
-├── cache_sqlite_schema.sql     # Reference schema for the sqlite cache backend
+├── cache_sqlite_schema.sql     # Version 2 schema for NEW sqlite caches
+├── PLAN_SOURCE_LANGUAGE_AUTO.md # auto design, implementation and validation status
 ├── include/                    # Header files
 │   ├── utils.h  config_loader.h  json_handler.h
 │   ├── http_client.h  http_server.h  codex_exec.h  mcp_client.h
@@ -489,7 +549,10 @@ transbasket/
 │   ├── language_table.c
 │   ├── trans_cache.c  cache_backend_text.c  cache_backend_sqlite.c
 │   └── cache_tool.c            # Cache management tool (separate binary)
-├── tests/test_client.py        # Python test client
+├── tests/
+│   ├── test_client.py          # Manual client (uses the configured real server)
+│   ├── test_source_auto.py     # Offline integration tests (make test-auto)
+│   └── fake_codex_auto.py      # exec/MCP fixture; no external model calls
 ├── obj/                        # Object files (generated)
 ├── transbasket                 # Server binary (generated)
 └── cache_tool                  # Cache tool binary (generated)
@@ -500,6 +563,7 @@ transbasket/
 ### utils.c
 - Language code validation and normalization (ISO 639-2, English names, and
   Chinese BCP-47 tags folded to `zhs`/`zht`)
+- Source-only `auto` detection before general language normalization
 - UUID v4 validation (RFC 4122)
 - RFC 3339 timestamp validation
 - Emoji and shortcode stripping
@@ -509,6 +573,7 @@ transbasket/
 - Configuration file parsing (KEY="value" format)
 - Config selection: `transbasket.local.conf` first, then `transbasket.conf`
 - Prompt prefix / system role file loading
+- Optional `PROMPT_PREFIX_AUTO_FILE` loading and source-placeholder rejection
 - Configuration validation (including the codex sandbox/approval hard-coercion)
 - Path resolution: the config file relative to the executable, prompt/role/language
   files relative to the config file's directory
@@ -525,6 +590,7 @@ transbasket/
 - codex: builds delimiter-isolated prompt, concurrency semaphore, per-request temp cwd
 - Prompt building: `{TEXT}`-style templates (TranslateGemma) and the legacy
   `[TARGET LANGUAGE]` / `{{LANGUAGE_TO}}` form
+- `auto` branch bypasses source language lookup and resolves only the target
 - Error handling and status code mapping
 
 ### codex_exec.c
@@ -556,10 +622,24 @@ transbasket/
 - SHA-256(`from|to|text`) cache keys via the OpenSSL EVP API
 - All backend calls are serialized; lookups return a caller-owned copy
   (see "Translation Cache Concurrency" in CLAUDE.md)
+- Source buffers accept `auto`; SQLite migrates known version 0/1 caches to version 2 atomically
 
 ### cache_tool.c
 - Separate `cache_tool` binary: list / clear / stats / cleanup / search / export / migrate
 - Note: every command except `migrate` operates on the **text** backend
+- Language filters accept `auto` only as source, including case-insensitive `AUTO`
+
+text 캐시의 자동 감지 항목은 다음처럼 관리합니다. `-f` 등 전역 옵션은 명령 앞에 둡니다.
+
+```bash
+./cache_tool -f /actual/dictionary.jsonl list auto kor
+./cache_tool -f /actual/dictionary.jsonl search AUTO kor "Hello"
+./cache_tool -f /actual/dictionary.jsonl export auto kor
+./cache_tool -f /actual/dictionary.jsonl clear auto kor
+```
+
+`clear`는 지정 언어쌍의 항목을 삭제합니다. SQLite와 text 간 이전은 `cache_tool migrate`를 사용하며,
+기존 SQLite DB를 열면 스키마 이전도 실행될 수 있으므로 먼저 [백업 절차](INSTALL.md)를 따르세요.
 
 ### main.c
 - Entry point with signal handling

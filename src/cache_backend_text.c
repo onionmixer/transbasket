@@ -74,6 +74,13 @@ static int load_cache_from_file(TextBackendContext *ctx, const char *file_path) 
             continue;
         }
 
+        if ((strlen(from_json->valuestring) != 3 && strcmp(from_json->valuestring, "auto") != 0) ||
+            strlen(to_json->valuestring) != 3) {
+            LOG_INFO("Warning: Invalid cache language length, skipping entry");
+            cJSON_Delete(json);
+            continue;
+        }
+
         /* Allocate cache entry */
         CacheEntry *entry = calloc(1, sizeof(CacheEntry));
         if (!entry) {

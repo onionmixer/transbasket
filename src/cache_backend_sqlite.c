@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include <sqlite3.h>
+#include <regex.h>
 #include "cache_backend_sqlite.h"
 #include "trans_cache.h"
 #include "utils.h"
@@ -40,7 +41,7 @@ static const char *SQL_CREATE_TABLE =
     "  last_used INTEGER NOT NULL,"
     "  created_at INTEGER NOT NULL,"
     "  CHECK(length(hash) = 64),"
-    "  CHECK(length(from_lang) = 3),"
+    "  CHECK(length(from_lang) = 3 OR from_lang = 'auto'),"
     "  CHECK(length(to_lang) = 3),"
     "  CHECK(count >= 1)"
     ");";
@@ -60,20 +61,120 @@ static const char *SQL_CREATE_INDEX_COUNT =
 static const char *SQL_CREATE_INDEX_LANG_HASH =
     "CREATE INDEX IF NOT EXISTS idx_lang_hash ON trans_cache(from_lang, to_lang, hash);";
 
-/* Apply database schema */
-static int apply_schema(sqlite3 *db) {
-    char *err_msg = NULL;
-    int rc;
+static int schema_exec(sqlite3 *db, const char *sql) {
+    char *message = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &message);
+    if (rc != SQLITE_OK) LOG_INFO("Cache schema error: %s", message ? message : sqlite3_errmsg(db));
+    sqlite3_free(message);
+    return rc == SQLITE_OK ? 0 : -1;
+}
 
-    /* Create table */
-    rc = sqlite3_exec(db, SQL_CREATE_TABLE, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) {
-        LOG_DEBUG("Error creating table: %s\n", err_msg);
-        sqlite3_free(err_msg);
-        return -1;
+static int schema_integer(sqlite3 *db, const char *sql, sqlite3_int64 *value) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) *value = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_ROW ? 0 : -1;
+}
+
+/* Only migrate the known column layout. Preserve the original table body so
+ * constraints from the standalone SQL file are not lost or newly imposed. */
+static int known_cache_columns(sqlite3 *db) {
+    const char *names[] = {"id", "hash", "from_lang", "to_lang", "source_text",
+                          "translated_text", "count", "last_used", "created_at"};
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA table_xinfo(trans_cache)", -1, &stmt, NULL) != SQLITE_OK) return 0;
+    size_t i = 0;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        if (i >= sizeof(names) / sizeof(names[0]) || !name || strcmp(name, names[i]) != 0) break;
+        i++;
+    }
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE && i == sizeof(names) / sizeof(names[0]);
+}
+
+static int source_constraint(const char *ddl, bool automatic, regmatch_t *match) {
+    const char *old = "CHECK[[:space:]]*\\([[:space:]]*length[[:space:]]*\\([[:space:]]*from_lang[[:space:]]*\\)[[:space:]]*=[[:space:]]*3[[:space:]]*\\)";
+    const char *current = "CHECK[[:space:]]*\\([[:space:]]*length[[:space:]]*\\([[:space:]]*from_lang[[:space:]]*\\)[[:space:]]*=[[:space:]]*3[[:space:]]+OR[[:space:]]+from_lang[[:space:]]*=[[:space:]]*'auto'[[:space:]]*\\)";
+    regex_t regex;
+    if (regcomp(&regex, automatic ? current : old, REG_EXTENDED | REG_ICASE) != 0) return 0;
+    int found = regexec(&regex, ddl, 1, match, 0) == 0;
+    regfree(&regex);
+    return found;
+}
+
+/* Runs within the startup transaction, before any prepared cache statements.
+ * Save custom indexes/triggers and the high-water sequence, including deleted
+ * IDs. legacy_alter_table keeps existing views valid while swapping tables. */
+static int migrate_source_constraint(sqlite3 *db, const char *ddl, regmatch_t match) {
+    const char *body = strchr(ddl, '(');
+    if (!body || body > ddl + match.rm_so) return -1;
+    sqlite3_int64 sequence = 0;
+    if (schema_integer(db, "SELECT coalesce(max(seq),0) FROM sqlite_sequence WHERE name='trans_cache'", &sequence) != 0) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT sql FROM sqlite_master WHERE tbl_name='trans_cache' "
+                          "AND type IN ('index','trigger') AND sql IS NOT NULL", -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_str *builder = sqlite3_str_new(db);
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        sqlite3_str_appendf(builder, "%s;\n", sqlite3_column_text(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+    int builder_error = sqlite3_str_errcode(builder);
+    char *objects = sqlite3_str_finish(builder);
+    if (rc != SQLITE_DONE || builder_error != SQLITE_OK) { sqlite3_free(objects); return -1; }
+
+    char *create = sqlite3_mprintf("CREATE TABLE trans_cache_auto_new %.*s"
+        "CHECK(length(from_lang) = 3 OR from_lang = 'auto')%s",
+        (int)(ddl + match.rm_so - body), body, ddl + match.rm_eo);
+    if (!create) { sqlite3_free(objects); return -1; }
+    int result = schema_exec(db, create);
+    sqlite3_free(create);
+    if (result == 0) result = schema_exec(db,
+        "INSERT INTO trans_cache_auto_new (id,hash,from_lang,to_lang,source_text,translated_text,count,last_used,created_at) "
+        "SELECT id,hash,from_lang,to_lang,source_text,translated_text,count,last_used,created_at FROM trans_cache;"
+        "DROP TABLE trans_cache;"
+        "ALTER TABLE trans_cache_auto_new RENAME TO trans_cache;");
+    if (result == 0 && objects) result = schema_exec(db, objects);
+    sqlite3_free(objects);
+    if (result == 0) {
+        char *restore = sqlite3_mprintf("UPDATE sqlite_sequence SET seq=max(seq,%lld) WHERE name='trans_cache'", sequence);
+        result = restore ? schema_exec(db, restore) : -1;
+        sqlite3_free(restore);
+    }
+    return result;
+}
+
+/* Version 0 is used by the former runtime schema; version 1 by the SQL file. */
+static int apply_schema(sqlite3 *db) {
+    sqlite3_int64 version = 0, legacy = 0;
+    char *ddl = NULL;
+    sqlite3_stmt *stmt = NULL;
+    if (schema_integer(db, "PRAGMA legacy_alter_table", &legacy) != 0) return -1;
+    if (schema_exec(db, "PRAGMA legacy_alter_table=ON; BEGIN IMMEDIATE;") != 0) goto fail;
+    if (schema_integer(db, "PRAGMA user_version", &version) != 0 || version > 2 || version < 0) goto fail;
+    if (sqlite3_prepare_v2(db, "SELECT sql FROM sqlite_master WHERE name='trans_cache' AND type='table'", -1, &stmt, NULL) != SQLITE_OK) goto fail;
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) ddl = strdup((const char *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) goto fail;
+    if (rc == SQLITE_ROW && !ddl) goto fail;
+
+    if (!ddl) {
+        if (version == 2 || schema_exec(db, SQL_CREATE_TABLE) != 0) goto fail;
+    } else {
+        regmatch_t match;
+        if (!known_cache_columns(db)) goto fail;
+        if (source_constraint(ddl, false, &match)) {
+            if (version == 2 || migrate_source_constraint(db, ddl, match) != 0) goto fail;
+        } else if (!source_constraint(ddl, true, &match)) goto fail;
     }
 
-    /* Create indexes */
     const char *indexes[] = {
         SQL_CREATE_INDEX_HASH,
         SQL_CREATE_INDEX_LANG_PAIR,
@@ -83,15 +184,21 @@ static int apply_schema(sqlite3 *db) {
     };
 
     for (size_t i = 0; i < sizeof(indexes) / sizeof(indexes[0]); i++) {
-        rc = sqlite3_exec(db, indexes[i], NULL, NULL, &err_msg);
-        if (rc != SQLITE_OK) {
-            LOG_DEBUG("Error creating index: %s\n", err_msg);
-            sqlite3_free(err_msg);
-            return -1;
-        }
+        if (schema_exec(db, indexes[i]) != 0) goto fail;
     }
-
+    if (schema_exec(db, "PRAGMA user_version=2; COMMIT;") != 0) goto fail;
+    free(ddl);
+    if (!legacy) schema_exec(db, "PRAGMA legacy_alter_table=OFF;");
     return 0;
+
+fail:
+    LOG_INFO("Error: Cannot initialize/migrate translation cache schema (version %lld): %s",
+             (long long)version, sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    free(ddl);
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    if (!legacy) sqlite3_exec(db, "PRAGMA legacy_alter_table=OFF", NULL, NULL, NULL);
+    return -1;
 }
 
 /* Apply PRAGMA optimizations */

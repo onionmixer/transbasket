@@ -91,4 +91,7 @@ check-deps:
 	@pkg-config --exists openssl && echo "✓ openssl found" || echo "✗ openssl NOT found"
 	@pkg-config --exists sqlite3 && echo "✓ sqlite3 found" || echo "✗ sqlite3 NOT found"
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps
+test-auto: all
+	python3 tests/test_source_auto.py
+
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto

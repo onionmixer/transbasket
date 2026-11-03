@@ -1,12 +1,14 @@
 -- Translation Cache SQLite Schema
 -- This schema is designed to store translation cache entries with optimal indexing
 -- for fast lookup and efficient cleanup operations.
+-- New databases only. Existing databases must be migrated by the application;
+-- CREATE TABLE IF NOT EXISTS cannot update an existing CHECK constraint.
 
 -- Main cache table
 CREATE TABLE IF NOT EXISTS trans_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hash TEXT NOT NULL UNIQUE,              -- SHA256 hash of from|to|source_text (64 chars)
-    from_lang TEXT NOT NULL,                -- 3-char source code (ISO 639-2, or zhs/zht)
+    from_lang TEXT NOT NULL,                -- 3-char source code, or auto
     to_lang TEXT NOT NULL,                  -- 3-char target code (ISO 639-2, or zhs/zht)
     source_text TEXT NOT NULL,              -- Original text to translate
     translated_text TEXT NOT NULL,          -- Translated result
@@ -16,7 +18,7 @@ CREATE TABLE IF NOT EXISTS trans_cache (
 
     -- Constraints
     CHECK(length(hash) = 64),               -- Ensure valid SHA256 hex string
-    CHECK(length(from_lang) = 3),           -- All supported codes are 3 chars
+    CHECK(length(from_lang) = 3 OR from_lang = 'auto'),
     CHECK(length(to_lang) = 3),             -- All supported codes are 3 chars
     CHECK(count >= 1),                      -- Count must be at least 1
     CHECK(last_used >= created_at)          -- Last used cannot be before creation
@@ -44,7 +46,8 @@ CREATE INDEX IF NOT EXISTS idx_lang_hash ON trans_cache(from_lang, to_lang, hash
 
 -- Schema version metadata
 -- Used for database migration tracking
-PRAGMA user_version = 1;
+-- Existing version 0/1 databases are migrated by the server on startup.
+PRAGMA user_version = 2;
 
 -- Performance optimizations
 -- Enable Write-Ahead Logging for better concurrency

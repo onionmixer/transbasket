@@ -2,12 +2,16 @@
 
 > **상태: 완료(2026-01-25 검증)**. 이 문서는 완료된 작업 계획의 기록입니다. §완료 기준 참조.
 > 언어 코드 처리는 이후 중국어 스크립트 지원으로 확장되었습니다 — `PLAN_CHINESE_SCRIPT_CODES.md`.
+> 2026-11-03에는 원문 전용 `auto` 모드를 구현했습니다. 테이블 조회 전 판별, 전용 프롬프트,
+> 5바이트 원문 버퍼와 SQLite 버전 2를 사용합니다. 아래의 “from/to 모두 3글자” 설명은 당시 기록입니다.
+> 현재 작업 상태는 [PLAN_SOURCE_LANGUAGE_AUTO.md](PLAN_SOURCE_LANGUAGE_AUTO.md),
+> 9개 오프라인 테스트 통과와 실제 모델 503 미완료 기록은 [TEST_RESULTS.md](TEST_RESULTS.md)를 참고하세요.
 
 ## 개요
 
 TranslateGemma 모델의 프롬프트 포맷을 지원하기 위한 개선 작업입니다.
 
-### 현재 상태
+### 구현 전 상태 2026-01-25
 
 1. **언어 코드 시스템**
    - `transbasket_curl_sample.txt`의 from/to: ISO 639-2 3글자 코드 사용 (`kor`, `eng`, `jpn`)

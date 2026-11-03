@@ -2,12 +2,13 @@
 #define JSON_HANDLER_H
 
 #include <cjson/cJSON.h>
+#include "utils.h"
 
 /* Translation request structure */
 typedef struct {
     char timestamp[64];
     char uuid[37];
-    char from_lang[4];
+    char from_lang[SOURCE_LANGUAGE_SIZE];
     char to_lang[4];
     char *text;
 } TranslationRequest;

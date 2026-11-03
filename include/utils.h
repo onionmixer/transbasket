@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Source modes need four characters ("auto") plus the terminator. */
+#define SOURCE_LANGUAGE_SIZE 5
+
 /* Logging macros */
 #ifdef DEBUG
     #define LOG_DEBUG(...) log_message("DEBUG", __VA_ARGS__)
@@ -36,6 +39,10 @@ const char *get_language_name(const char *lang_code);
  * Accepts "kor", "Korean", and Chinese BCP-47 tags such as "zh-Hans"
  * (-> "zhs") / "zh-Hant" (-> "zht"). See PLAN_CHINESE_SCRIPT_CODES.md. */
 const char *normalize_language_code(const char *lang_input);
+
+/* auto is a source mode, checked before any language lookup. */
+bool is_auto_source_language(const char *lang_input);
+const char *normalize_source_language(const char *lang_input);
 
 /* Generate UUID v4 */
 int generate_uuid(char *uuid_buf, size_t buf_size);

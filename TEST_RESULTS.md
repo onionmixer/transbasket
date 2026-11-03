@@ -1,7 +1,48 @@
 # Transbasket C Implementation - Test Results
 
-> 아래 1~5 절은 **2025-10-09 시점의 `normal` 백엔드** 검증 기록입니다.
-> `codex`(MCP) 백엔드의 최신 검증 결과는 문서 끝의 [codex (MCP) 백엔드 검증 (2026-08-21)](#codex-mcp-백엔드-검증-2026-08-21) 절을 참고하세요.
+> 최신 기록은 바로 아래의 **원문 언어 auto 검증 2026-11-03**입니다.
+> 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
+> 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
+> 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## 원문 언어 auto 검증 2026-11-03
+
+`from=auto`를 일반 언어 검증·조회 전에 처리하고, 대상 언어 검증과 기존 응답 형식을 유지했다.
+구현 상세는 [PLAN_SOURCE_LANGUAGE_AUTO.md](PLAN_SOURCE_LANGUAGE_AUTO.md),
+사용법은 [README.md](README.md), 이전·롤백은 [INSTALL.md](INSTALL.md)를 참고한다.
+
+### 실행 결과
+
+| 확인 | 결과 |
+|---|---|
+| `make -j4` | 서버·관리 도구 빌드 성공, 컴파일 경고 없음 |
+| `make test-auto` | 9개 통과, 41.310초 |
+| `git diff --check` | 통과 |
+| 실제 설정의 `translategemma:27b` 호출 | 첫 요청이 503으로 실패, 실제 번역 결과 확인 못 함 |
+| 실제 codex 모델의 auto 품질 | 미검증. 아래 exec·MCP 검증은 가짜 실행 파일 사용 |
+
+재현 명령은 `make test-auto`다. Python 3 표준 라이브러리, 임시 디렉터리·DB,
+127.0.0.1 HTTP 서버와 `tests/fake_codex_auto.py`를 사용하며 외부 모델을 호출하지 않는다.
+운영 설정과 운영 캐시는 변경하지 않았다.
+
+### 오프라인 검증 범위
+
+| 테스트 | 확인한 동작 |
+|---|---|
+| `test_contract_cache_and_regression` | auto/AUTO/Auto 통일, 잘못된 타입·공백·코드·길이·UUID·시각 거부, to=auto 거부, 기존 언어명·중국어 대상 처리, 캐시 분리와 재시작 |
+| `test_threshold_text_restart_and_tools` | 임계값 2에서 캐시 적중, text 재시작, 동시 20요청, list/search/export/stats/clear와 필터 정규화 |
+| `test_custom_single_message_and_missing_language_table` | 언어 테이블을 읽을 수 없어도 auto 처리, 단일 메시지와 대상 언어 치환, 본문의 토큰 보존 |
+| `test_codex_exec_and_mcp_prompts` | 가짜 exec·MCP에 자동 감지 지시 전달, 원문 1회 삽입, 동일한 구분자로 원문 감싸기, 반복 요청 캐시 적중 |
+| `test_invalid_auto_templates_fail_startup` | 원문 언어 토큰·빈 파일·없는 파일에서 서버 시작 실패 |
+| `test_migration_preserves_data_objects_sequence_and_roundtrip` | 버전 0/1의 행·해시·횟수·시각·추가 제약·인덱스·트리거·뷰·ID 순번 보존, 재초기화와 text↔SQLite 왕복 |
+| `test_new_sql_schema_and_empty_legacy_database` | 신규 SQL 스키마와 빈 기존 DB의 버전 2 초기화·이전, auto 행 추가 |
+| `test_migration_failure_is_atomic` | 미래 버전·알 수 없는 열·임시 테이블 충돌·잠금·복사 실패·읽기 전용 DB에서 기존 행과 테이블 정의 보존 |
+| `test_normal_error_mapping` | 가짜 upstream의 400을 기존 normal 규칙에 따라 502로 전달 |
+
+실제 모델의 감지 정확도·혼합 언어·중국어 간체/번체 산출 품질은 위 테스트의 보장 범위에 포함되지 않는다.
+실제 호출이 가능한 환경에서 같은 샘플을 다시 확인해야 한다. normal의 기존 응답 후처리와 길이 제한도 유지된다.
+
+---
 
 ## Build Information
 

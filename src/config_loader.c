@@ -245,6 +245,14 @@ int validate_config(const Config *config) {
         return -1;
     }
 
+    if (config->prompt_prefix_auto &&
+        (!*config->prompt_prefix_auto ||
+         strstr(config->prompt_prefix_auto, "{SOURCE_LANG}") ||
+         strstr(config->prompt_prefix_auto, "{SOURCE_CODE}"))) {
+        LOG_INFO("Error: PROMPT_PREFIX_AUTO_FILE must be nonempty and must not contain source language placeholders");
+        return -1;
+    }
+
     /* Validate SYSTEM_ROLE */
     if (!config->system_role || strlen(config->system_role) == 0) {
         LOG_INFO( "Error: SYSTEM_ROLE is required");
@@ -488,6 +496,9 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         } else if (strcmp(key, "PROMPT_PREFIX_FILE") == 0) {
             free(config->prompt_prefix_file);
             config->prompt_prefix_file = strdup(value);
+        } else if (strcmp(key, "PROMPT_PREFIX_AUTO_FILE") == 0) {
+            free(config->prompt_prefix_auto_file);
+            config->prompt_prefix_auto_file = strdup(value);
         } else if (strcmp(key, "LANGUAGE_TABLE_FILE") == 0) {
             free(config->language_table_file);
             config->language_table_file = strdup(value);
@@ -581,6 +592,19 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         return NULL;
     }
 
+    if (config->prompt_prefix_auto_file) {
+        char *auto_path = resolve_path(resolved_config_path, config->prompt_prefix_auto_file);
+        config->prompt_prefix_auto = auto_path
+            ? load_text_file(auto_path, "Automatic source prompt") : NULL;
+        free(auto_path);
+        if (!config->prompt_prefix_auto) {
+            LOG_INFO("Error: Could not load PROMPT_PREFIX_AUTO_FILE: %s", config->prompt_prefix_auto_file);
+            free(resolved_config_path);
+            free_config(config);
+            return NULL;
+        }
+    }
+
     /* Load system role */
     char *resolved_system_role_path = resolve_path(resolved_config_path, system_role_path);
     free(resolved_config_path);
@@ -657,6 +681,8 @@ void free_config(Config *config) {
     free(config->openai_api_key);
     free(config->listen);
     free(config->prompt_prefix);
+    free(config->prompt_prefix_auto);
+    free(config->prompt_prefix_auto_file);
     free(config->system_role);
     free(config->cache_type_str);
     free(config->cache_file);

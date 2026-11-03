@@ -32,6 +32,8 @@ typedef struct {
     char *listen;
     int port;
     char *prompt_prefix;
+    char *prompt_prefix_auto;     /* NULL = built-in automatic source instruction */
+    char *prompt_prefix_auto_file; /* Optional, relative to config file */
     char *system_role;       /* Content from ROLS.txt */
     bool debug;
     double temperature;      /* Default: 0 */

@@ -121,7 +121,8 @@ int trans_cache_add(TransCache *cache,
                    const char *to_lang,
                    const char *source_text,
                    const char *translated_text) {
-    if (!cache || !cache->ops || !cache->ops->add) {
+    if (!cache || !cache->ops || !cache->ops->add || !from_lang || !to_lang ||
+        (strlen(from_lang) != 3 && strcmp(from_lang, "auto") != 0) || strlen(to_lang) != 3) {
         return -1;
     }
 

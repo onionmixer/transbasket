@@ -78,8 +78,8 @@ TranslationRequest *parse_translation_request(const char *json_str) {
         return NULL;
     }
 
-    /* Normalize language code/name to ISO 639-2 code */
-    const char *from_code = normalize_language_code(from->valuestring);
+    /* Check auto before general language normalization. */
+    const char *from_code = normalize_source_language(from->valuestring);
     if (!from_code) {
         fprintf(stderr, "Error: Invalid 'from' language code or name: %s\n", from->valuestring);
         free(req);

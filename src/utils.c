@@ -339,6 +339,15 @@ static const char *normalize_chinese_tag(const char *folded) {
     return NULL;  /* "zh" with only unknown subtags */
 }
 
+bool is_auto_source_language(const char *lang_input) {
+    return lang_input && strcasecmp(lang_input, "auto") == 0;
+}
+
+const char *normalize_source_language(const char *lang_input) {
+    if (is_auto_source_language(lang_input)) return "auto";
+    return normalize_language_code(lang_input);
+}
+
 /* Normalize language code or name to a supported 3-letter code */
 const char *normalize_language_code(const char *lang_input) {
     if (!lang_input) {

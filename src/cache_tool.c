@@ -137,10 +137,12 @@ static int cmd_clear(TransCache *cache, const char *from_lang, const char *to_la
     }
 
     /* Validate language codes */
-    if (!validate_language_code(from_lang) || !validate_language_code(to_lang)) {
-        fprintf(stderr, "Error: Invalid language code (3-letter ISO 639-2, or zhs/zht)\n");
+    if (!normalize_source_language(from_lang) || !normalize_language_code(to_lang)) {
+        fprintf(stderr, "Error: Invalid language (auto is allowed only as source)\n");
         return -1;
     }
+    from_lang = normalize_source_language(from_lang);
+    to_lang = normalize_language_code(to_lang);
 
     TextBackendContext *ctx = GET_TEXT_CTX(cache);
 
@@ -236,7 +238,7 @@ static int cmd_stats(TransCache *cache) {
 
     /* Count entries by language pair */
     typedef struct {
-        char from_lang[4];
+        char from_lang[SOURCE_LANGUAGE_SIZE];
         char to_lang[4];
         int count;
         time_t last_used;
@@ -298,8 +300,8 @@ static int cmd_stats(TransCache *cache) {
                 pairs = new_pairs;
             }
 
-            strncpy(pairs[pairs_count].from_lang, entry->from_lang, 4);
-            strncpy(pairs[pairs_count].to_lang, entry->to_lang, 4);
+            memcpy(pairs[pairs_count].from_lang, entry->from_lang, sizeof(entry->from_lang));
+            memcpy(pairs[pairs_count].to_lang, entry->to_lang, sizeof(entry->to_lang));
             pairs[pairs_count].count = 1;
             pairs[pairs_count].last_used = entry->last_used;
             pairs_count++;
@@ -772,7 +774,7 @@ int main(int argc, char *argv[]) {
     int opt;
 
     /* Parse global options */
-    while ((opt = getopt(argc, argv, "f:hv")) != -1) {
+    while ((opt = getopt(argc, argv, "+f:hv")) != -1) {
         switch (opt) {
             case 'f':
                 cache_file = optarg;
@@ -806,6 +808,20 @@ int main(int argc, char *argv[]) {
         return cmd_migrate(argc - optind, &argv[optind]);
     }
 
+    /* Normalize language filters once, before opening or changing the cache. */
+    const char *from_filter = NULL, *to_filter = NULL;
+    if (strcmp(command, "list") == 0 || strcmp(command, "export") == 0 ||
+        strcmp(command, "search") == 0 || strcmp(command, "clear") == 0) {
+        if (optind + 1 < argc) {
+            from_filter = normalize_source_language(argv[optind + 1]);
+            if (!from_filter) { fprintf(stderr, "Error: Invalid source language\n"); return 1; }
+        }
+        if (optind + 2 < argc) {
+            to_filter = normalize_language_code(argv[optind + 2]);
+            if (!to_filter) { fprintf(stderr, "Error: Invalid target language\n"); return 1; }
+        }
+    }
+
     /* Load cache for other commands */
     TransCache *cache = trans_cache_init(cache_file);
     if (!cache) {
@@ -814,9 +830,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (strcmp(command, "list") == 0) {
-        const char *from_lang = (optind + 1 < argc) ? argv[optind + 1] : NULL;
-        const char *to_lang = (optind + 2 < argc) ? argv[optind + 2] : NULL;
-        result = cmd_list(cache, from_lang, to_lang);
+        result = cmd_list(cache, from_filter, to_filter);
 
     } else if (strcmp(command, "clear") == 0) {
         if (optind + 2 >= argc) {
@@ -824,7 +838,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Usage: %s clear <from_lang> <to_lang>\n", argv[0]);
             result = 1;
         } else {
-            result = cmd_clear(cache, argv[optind + 1], argv[optind + 2]);
+            result = cmd_clear(cache, from_filter, to_filter);
         }
 
     } else if (strcmp(command, "clear-all") == 0) {
@@ -849,7 +863,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Usage: %s search <from_lang> <to_lang> <text>\n", argv[0]);
             result = 1;
         } else {
-            result = cmd_search(cache, argv[optind + 1], argv[optind + 2], argv[optind + 3]);
+            result = cmd_search(cache, from_filter, to_filter, argv[optind + 3]);
         }
 
     } else if (strcmp(command, "delete") == 0) {
@@ -863,9 +877,7 @@ int main(int argc, char *argv[]) {
         }
 
     } else if (strcmp(command, "export") == 0) {
-        const char *from_lang = (optind + 1 < argc) ? argv[optind + 1] : NULL;
-        const char *to_lang = (optind + 2 < argc) ? argv[optind + 2] : NULL;
-        result = cmd_export(cache, from_lang, to_lang);
+        result = cmd_export(cache, from_filter, to_filter);
 
     } else {
         fprintf(stderr, "Error: Unknown command '%s'\n\n", command);

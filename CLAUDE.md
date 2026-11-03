@@ -188,14 +188,17 @@ Text-backend `add()` skips insertion when the hash is already stored (two thread
 - UUIDs: RFC 4122 UUID v4 with regex validation
 - Language codes: ISO 639-2 3-letter codes (e.g., `kor`, `eng`, `jpn`), English language names,
   and Chinese BCP-47 tags (`zh-Hans`/`zh-Hant`, see "Chinese Script Codes")
+- Source-only mode: case-insensitive `auto`, canonicalized before general language validation;
+  target `auto`, omitted source and surrounding whitespace are rejected with 422
 
-These validations occur in `utils.c` using POSIX regex.
+Timestamp/UUID validation uses POSIX regex in `utils.c`. Language validation uses
+the supported-code/name lists and Chinese tag parser, with a separate source-mode check.
 
 ### Error Handling Strategy
 
 **HTTP Status Code Mapping:**
-- 400: Malformed JSON
-- 422: Validation errors (invalid UUID, language code, timestamp)
+- 422: JSON parsing failures and validation errors (invalid UUID, language code, timestamp or text);
+  `handle_translate()` maps every failed `parse_translation_request()` to this status
 - 500: Unexpected internal errors
 - 502: OpenAI API 4xx errors (non-retryable)
 - 503: OpenAI API 5xx/timeout (retryable, includes `Retry-After: 5` header)
@@ -210,6 +213,22 @@ These validations occur in `utils.c` using POSIX regex.
 ## Critical Implementation Details
 
 ### Language Code Handling
+
+`from=auto` is a source mode, handled by `normalize_source_language()` BEFORE
+general normalization or language table lookup. Do not add it to the table or
+`validate_language_code()`; `to=auto` must stay invalid. Source buffers use
+`SOURCE_LANGUAGE_SIZE` (5, including NUL); target buffers remain 4 bytes.
+The auto branch in `build_instruction_message()` resolves only the target and
+uses its own built-in policy plus optional `PROMPT_PREFIX_AUTO_FILE` content.
+Source placeholders in that override are rejected at startup. Explicit-language
+requests retain the existing template path. Auto cache keys use literal `auto`,
+separate from detected/explicit languages. SQLite startup migrates known version
+0/1 schemas atomically to version 2, preserving rows and auxiliary objects.
+Never reuse an auto cache with an old binary (it truncates source codes to 3 chars).
+Run `make test-auto` for offline API, prompt, cache and migration coverage.
+The 2026-11-03 run passed 9 tests using fake HTTP/exec/MCP endpoints. The live
+TranslateGemma attempt returned 503; live auto translation quality (including
+real codex) remains unverified. See `TEST_RESULTS.md` for scope and results.
 
 ISO 639-2 3-letter codes are converted to human-readable names in prompts:
 - `kor` → "Korean"
@@ -284,7 +303,7 @@ Audited 2026-08-21; none of these can put another request's translation into a r
 - `get_log_timestamp()` uses `localtime()` for the same reason — affects log line timestamps only.
 - Debug traces are named `<timestamp>_<uuid>.txt`; two in-flight requests sharing a uuid+timestamp overwrite each other's trace file.
 - The cache key is `SHA-256("from|to|text")` and does **not** include model, prompt, or backend — instances with different `MODEL_TYPE`/prompt must not share a cache DB.
-- Translation output is not reproducible: codex is non-deterministic, and prompt rules can change the result kind (see `PROMPT_PREFIX_translategemma.txt`'s ASCII echo rule, which was observed returning long pure-ASCII input verbatim instead of translating it).
+- Translation output is not reproducible: codex is non-deterministic, and explicit-language prompt rules can change the result kind (see `PROMPT_PREFIX_translategemma.txt`'s ASCII echo rule). Source `auto` uses its separate policy and optional override, not that template. Both still use the existing backend-specific output processing.
 
 ## Library Dependencies
 
@@ -323,10 +342,11 @@ the raw code in the prompt, which the model cannot interpret.
 
 ### Chinese Script Codes (`zhs` / `zht`)
 
-Clients send BCP-47 tags (`zh-Hans`, `zh-Hant`, `zh-CN`, `zh-TW`, …), but the cache stores 3-character
-codes — `CacheEntry.from_lang[4]` and the SQLite `CHECK(length(from_lang) = 3)` constraint baked into
-existing databases. `normalize_language_code()` therefore folds Chinese tags into two transbasket
-specific codes before anything else sees them:
+Clients send BCP-47 tags (`zh-Hans`, `zh-Hant`, `zh-CN`, `zh-TW`, …), and
+`normalize_language_code()` folds Chinese tags into three-character transbasket codes.
+Targets still use 4-byte buffers and `CHECK(length(to_lang) = 3)`. Since the auto change,
+source buffers use `SOURCE_LANGUAGE_SIZE` (5 bytes), and SQLite version 2 accepts
+`length(from_lang) = 3 OR from_lang = 'auto'`. Chinese tags keep the same codes and hashes:
 
 | Input | Internal code | Prompt language name |
 |---|---|---|

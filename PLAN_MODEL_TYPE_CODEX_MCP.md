@@ -5,6 +5,12 @@
 상태: **구현 완료(IMPLEMENTED) & 검증됨** — codex↔claude 교차검토 10회(§10) 후 구현. normal/codex 양 백엔드 end-to-end 동작 확인. 신규 모듈 `mcp_client.[ch]` 추가.
 재검증: 2026-08-21 (codex-cli 0.148.0) — kor↔eng/jpn→kor 번역, 델리미터 인젝션 방어, 동시 6요청(제한 4), 프로세스·임시디렉터리 누수 0 확인. 캐시 임계값 이슈 발견 및 조치(§3.2).
 
+> 2026-11-03 후속 변경: `from=auto`는 원문 언어 조회 전에 분기하며, 내장 자동 감지 지시와
+> 선택적인 `PROMPT_PREFIX_AUTO_FILE`을 사용한다. exec·MCP는 같은 지시 생성 경로를 사용하고
+> 원문 구분자 격리를 유지한다. 가짜 exec·MCP를 포함한 오프라인 9개 테스트는 통과했으며,
+> 실제 codex 모델의 auto 품질은 미검증이다. [auto 구현 기록](PLAN_SOURCE_LANGUAGE_AUTO.md)과
+> [최신 검증 결과](TEST_RESULTS.md)를 참고한다.
+
 > **2026-10-31 갱신 — 이 문서의 MCP 경로는 이제 레거시다.** codex-cli 0.154.0 에서 `codex mcp-server`
 > 서브커맨드가 제거되었다(0.166.0 바이너리에도 문자열 0건). 신버전에서는 그 인자가 대화형 프롬프트로
 > 해석되어 `Error: stdin is not a terminal` 로 즉시 종료하고, 모든 번역 요청이 `502 codex MCP initialize
