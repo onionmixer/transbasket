@@ -1143,14 +1143,16 @@ static char *parse_structured_output(const char *buf, size_t len, const char *so
     if (!cJSON_IsString(sl) || !sl->valuestring || !cJSON_IsBool(mx)) {
         LOG_INFO("[%s] codex returned no usable source_language/mixed; using the script hint", request_uuid);
     } else {
-        /* trim + lowercase, bounded; then canonicalize (names and aliases accepted) */
-        const char *v = sl->valuestring;
-        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+        /* trim both ends, then bound and lowercase; then canonicalize (names and
+         * aliases accepted). The value has no NUL: strict_json_validate() ran. */
+        const char *v = sl->valuestring, *e = v + strlen(v);
+        while (v < e && (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r')) v++;
+        while (e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) e--;
         char code[32];
-        size_t n = 0;
-        while (v[n] && n < sizeof(code) - 1) { code[n] = (char)tolower((unsigned char)v[n]); n++; }
-        bool too_long = v[n] != '\0';
-        while (n > 0 && (code[n - 1] == ' ' || code[n - 1] == '\t' || code[n - 1] == '\n' || code[n - 1] == '\r')) n--;
+        size_t n = (size_t)(e - v);
+        bool too_long = n >= sizeof(code);
+        if (too_long) n = 0;
+        for (size_t k = 0; k < n; k++) code[k] = (char)tolower((unsigned char)v[k]);
         code[n] = '\0';
         const char *canon = too_long ? NULL : strcmp(code, "und") == 0 ? "und" : normalize_language_code(code);
         if (!canon || !source_hint_lang_canonical(canon)) {

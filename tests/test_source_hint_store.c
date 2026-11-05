@@ -269,6 +269,60 @@ static void test_hint_failure_paths(void) {
     sqlite3_close(db);
 }
 
+/* Stored values outside what the program writes (older/weaker table, manual
+ * edits) must read as "no hint", never be narrowed into a valid one. */
+static void test_out_of_range_columns(void) {
+    char path[256];
+    snprintf(path, sizeof path, "%s/range.db", dir);
+    TransCache *c = open_sqlite(path);
+    SourceHint h = H("kor", SOURCE_HINT_ORIGIN_MODEL, 1, false);
+    trans_cache_store_result(c, "auto", "eng", "r", "R", NULL, &h, NULL);
+    sqlite3 *db = raw_open(path);
+    const char *bad[] = { "UPDATE trans_cache_source_hint SET hint_version = 4294967297",
+                          "UPDATE trans_cache_source_hint SET hint_version = 2147483648" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        CHECK(sqlite3_exec(db, bad[i], 0, 0, 0) == SQLITE_OK, "%s", sqlite3_errmsg(db));
+        CacheEntry *e = trans_cache_lookup(c, "auto", "eng", "r");
+        CHECK(e && e->hint.origin == SOURCE_HINT_ORIGIN_NONE, "out-of-range version %zu read as no hint (got %d)",
+              i, e ? e->hint.version : -1);
+        trans_cache_entry_free(e);
+    }
+    sqlite3_exec(db, "UPDATE trans_cache_source_hint SET hint_version = 2147483647", 0, 0, 0);
+    CacheEntry *e = trans_cache_lookup(c, "auto", "eng", "r");
+    CHECK(e && e->hint.version == 2147483647, "INT_MAX version accepted");
+    trans_cache_entry_free(e);
+    sqlite3_close(db);
+    trans_cache_free(c);
+
+    /* text backend: the same range, INT_MAX survives a save/reload, larger is dropped */
+    snprintf(path, sizeof path, "%s/range.jsonl", dir);
+    SourceHint big = H("kor", SOURCE_HINT_ORIGIN_MODEL, 2147483647, false);
+    TransCache *t = trans_cache_init_with_backend(CACHE_BACKEND_TEXT, path, NULL);
+    trans_cache_store_result(t, "auto", "eng", "b", "B", NULL, &big, NULL);
+    trans_cache_save(t);
+    trans_cache_free(t);
+    t = trans_cache_init_with_backend(CACHE_BACKEND_TEXT, path, NULL);
+    e = trans_cache_lookup(t, "auto", "eng", "b");
+    CHECK(e && e->hint.version == 2147483647, "text INT_MAX version survives reload (got %d)", e ? e->hint.version : -1);
+    trans_cache_entry_free(e);
+    trans_cache_free(t);
+    char hash[65];
+    trans_cache_calculate_hash("auto", "eng", "x", hash);
+    const char *versions[] = { "2147483648", "1e10", "0" };
+    for (size_t i = 0; i < 3; i++) {
+        FILE *fp = fopen(path, "w");
+        fprintf(fp, "{\"id\":1,\"hash\":\"%s\",\"from\":\"auto\",\"to\":\"eng\",\"source\":\"x\",\"target\":\"y\","
+                    "\"count\":1,\"last_used\":1,\"created_at\":1,\"source_hint\":\"kor\",\"hint_mixed\":false,"
+                    "\"hint_origin\":\"model\",\"hint_version\":%s}\n", hash, versions[i]);
+        fclose(fp);
+        t = trans_cache_init_with_backend(CACHE_BACKEND_TEXT, path, NULL);
+        e = trans_cache_lookup(t, "auto", "eng", "x");
+        CHECK(e && e->hint.origin == SOURCE_HINT_ORIGIN_NONE, "text version %s dropped", versions[i]);
+        trans_cache_entry_free(e);
+        trans_cache_free(t);
+    }
+}
+
 static int refuse_commit(void *arg) { (void)arg; return 1; }   /* turns COMMIT into ROLLBACK */
 
 /* A failure at COMMIT, after the parent statement succeeded: nothing may be
@@ -411,6 +465,7 @@ int main(void) {
     test_full_aborts_then_parent_retry();
     test_hint_failure_paths();
     test_commit_failure_keeps_copy();
+    test_out_of_range_columns();
     test_migration_and_owned_definitions();
     test_text_backend();
     char cmd[512];

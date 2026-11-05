@@ -130,6 +130,7 @@ class StructuredHint(unittest.TestCase):
             ("오늘 회의 자료", obj(" Korean "), ("kor", 0, "model")),                   # name, trimmed
             ("明天的會議下午三點", obj("zh-Hant"), ("zht", 0, "model")),                 # alias
             ("2026-11-06 12:00 | 42", obj("und"), ("und", 0, "model")),
+            ("The meeting starts at three", obj("eng" + " " * 29), ("eng", 0, "model")),   # padded to 32 chars
             ("회의 일정. Meeting at 3pm.", obj("kor", True), ("kor", 1, "model")),
             ("첫 줄", obj("xx"), None),                                               # unknown code
             ("둘째 줄", obj("auto"), None),

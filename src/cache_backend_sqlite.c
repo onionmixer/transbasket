@@ -9,6 +9,7 @@
 #include <time.h>
 #include <sqlite3.h>
 #include <regex.h>
+#include <limits.h>
 #include "cache_backend_sqlite.h"
 #include "trans_cache.h"
 #include "utils.h"
@@ -494,12 +495,18 @@ TransCache *sqlite_backend_init(const char *db_path) {
  * NULL or anything invalid means "no hint". Also used by cache_tool. */
 void sqlite_backend_read_hint(sqlite3_stmt *stmt, int col, CacheEntry *entry) {
     memset(&entry->hint, 0, sizeof(entry->hint));
-    if (strcmp(entry->from_lang, "auto") != 0 || sqlite3_column_type(stmt, col) != SQLITE_TEXT) return;
+    if (strcmp(entry->from_lang, "auto") != 0 || sqlite3_column_type(stmt, col) != SQLITE_TEXT ||
+        sqlite3_column_type(stmt, col + 1) != SQLITE_INTEGER || sqlite3_column_type(stmt, col + 2) != SQLITE_TEXT ||
+        sqlite3_column_type(stmt, col + 3) != SQLITE_INTEGER) return;
+    /* Read as 64-bit and range-check before narrowing: sqlite3_column_int()
+     * would turn 4294967297 into a "valid" 1. */
+    sqlite3_int64 mixed = sqlite3_column_int64(stmt, col + 1);
+    sqlite3_int64 version = sqlite3_column_int64(stmt, col + 3);
+    if ((mixed != 0 && mixed != 1) || version < 1 || version > INT_MAX) return;
     const char *lang = (const char *)sqlite3_column_text(stmt, col);
     const char *origin = (const char *)sqlite3_column_text(stmt, col + 2);
     if (!lang || !origin || strlen(lang) != 3) return;
-    SourceHint h = { .mixed = sqlite3_column_int(stmt, col + 1) != 0,
-                     .version = sqlite3_column_int(stmt, col + 3) };
+    SourceHint h = { .mixed = mixed == 1, .version = (int)version };
     memcpy(h.lang, lang, 4);
     if (strcmp(origin, "model") == 0) h.origin = SOURCE_HINT_ORIGIN_MODEL;
     else if (strcmp(origin, "script") == 0) h.origin = SOURCE_HINT_ORIGIN_SCRIPT;
@@ -757,6 +764,17 @@ static int upsert_hint(SqliteBackendContext *ctx, const char *hash, const Source
     return sqlite3_changes(ctx->db) > 0 ? 1 : 0;
 }
 
+/* End any open transaction. A failed ROLLBACK (e.g. out of memory) would leave
+ * the shared connection inside a transaction holding the write lock, so it is
+ * retried; if it still cannot finish, that is logged as an error. */
+static void rollback_all(SqliteBackendContext *ctx) {
+    for (int attempt = 0; attempt < 3 && !sqlite3_get_autocommit(ctx->db); attempt++)
+        sqlite3_exec(ctx->db, "ROLLBACK", NULL, NULL, NULL);
+    if (!sqlite3_get_autocommit(ctx->db))
+        LOG_INFO("Error: cache connection is stuck in a transaction (%s); cache writes will fail",
+                 sqlite3_errmsg(ctx->db));
+}
+
 /* BEGIN IMMEDIATE -> parent -> SAVEPOINT hint -> hint -> RELEASE -> COMMIT.
  * - A hint statement error that leaves the transaction open is undone with
  *   ROLLBACK TO; the parent still commits.
@@ -789,7 +807,7 @@ static int sqlite_backend_store_result(void *backend_ctx, const char *from_lang,
         }
         if (mutate_parent(ctx, hash, from_lang, to_lang, source_text, translated_text, cached, &staged) != 0) {
             LOG_DEBUG("Cache parent write failed: %s\n", sqlite3_errmsg(ctx->db));
-            if (!sqlite3_get_autocommit(ctx->db)) sqlite3_exec(ctx->db, "ROLLBACK", NULL, NULL, NULL);
+            rollback_all(ctx);
             break;
         }
         if (want_hint) {
@@ -804,8 +822,14 @@ static int sqlite_backend_store_result(void *backend_ctx, const char *from_lang,
                     continue;
                 }
                 LOG_INFO("Cache hint write failed (%s); keeping the translation", sqlite3_errmsg(ctx->db));
-                sqlite3_exec(ctx->db, "ROLLBACK TO hint", NULL, NULL, NULL);
-                sqlite3_exec(ctx->db, "RELEASE hint", NULL, NULL, NULL);
+                if (sqlite3_exec(ctx->db, "ROLLBACK TO hint", NULL, NULL, NULL) != SQLITE_OK ||
+                    sqlite3_exec(ctx->db, "RELEASE hint", NULL, NULL, NULL) != SQLITE_OK) {
+                    /* The failed hint could not be undone alone: never COMMIT it,
+                     * end everything and retry the parent only. */
+                    rollback_all(ctx);
+                    want_hint = NULL;
+                    continue;
+                }
             } else {
                 hint_written = rc;
                 sqlite3_exec(ctx->db, "RELEASE hint", NULL, NULL, NULL);
@@ -813,7 +837,7 @@ static int sqlite_backend_store_result(void *backend_ctx, const char *from_lang,
         }
         if (!translation_remaining_ms(control) ||
             sqlite3_exec(ctx->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-            if (!sqlite3_get_autocommit(ctx->db)) sqlite3_exec(ctx->db, "ROLLBACK", NULL, NULL, NULL);
+            rollback_all(ctx);
             break;
         }
         if (cached) {   /* committed: mirror the staged result into the caller's copy */

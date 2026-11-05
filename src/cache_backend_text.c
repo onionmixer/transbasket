@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <time.h>
 #include <cjson/cJSON.h>
 #include "cache_backend_text.h"
@@ -45,7 +46,9 @@ static void load_hint(cJSON *json, CacheEntry *entry) {
     cJSON *version = cJSON_GetObjectItemCaseSensitive(json, "hint_version");
     if (!cJSON_IsString(lang) || !cJSON_IsBool(mixed) || !cJSON_IsString(origin) || !cJSON_IsNumber(version))
         return;
-    if (version->valuedouble < 1 || version->valuedouble > 1e9 || version->valuedouble != (double)version->valueint)
+    /* the same range source_hint_valid() and the SQLite reader accept */
+    if (version->valuedouble < 1 || version->valuedouble > (double)INT_MAX ||
+        version->valuedouble != (double)(long long)version->valuedouble)
         return;
     SourceHint h = { .mixed = cJSON_IsTrue(mixed), .version = version->valueint };
     if (strcmp(origin->valuestring, "model") == 0) h.origin = SOURCE_HINT_ORIGIN_MODEL;
@@ -453,7 +456,6 @@ static int text_backend_store_result(void *backend_ctx, const char *from_lang, c
                                      const char *source_text, const char *translated_text,
                                      CacheEntry *cached, const SourceHint *hint,
                                      const TranslationControl *control) {
-    (void)control;
     if (!backend_ctx) return -1;
     TextBackendContext *ctx = (TextBackendContext *)backend_ctx;
 
@@ -465,6 +467,19 @@ static int text_backend_store_result(void *backend_ctx, const char *from_lang, c
     if (cached && strcmp(cached->translated_text, translated_text) != 0) {
         caller_copy = strdup(translated_text);
         if (!caller_copy) return -1;
+    }
+
+    /* Lookup and allocations are done; check the deadline right before the
+     * first mutation (with a large cache the scans above take real time). */
+    char *stored_copy = NULL;
+    if (stored && cached && caller_copy && !(stored_copy = strdup(translated_text))) {
+        free(caller_copy);
+        return -1;
+    }
+    if (!translation_remaining_ms(control)) {
+        free(caller_copy);
+        free(stored_copy);
+        return -1;
     }
 
     if (!stored) {
@@ -480,11 +495,6 @@ static int text_backend_store_result(void *backend_ctx, const char *from_lang, c
         stored->count++;
         stored->last_used = time(NULL);
     } else {
-        char *stored_copy = strdup(translated_text);
-        if (!stored_copy) {
-            free(caller_copy);
-            return -1;
-        }
         free(stored->translated_text);
         stored->translated_text = stored_copy;
         stored->count = 1;
