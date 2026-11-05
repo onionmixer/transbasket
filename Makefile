@@ -102,4 +102,13 @@ test-inflight-unit: directories
 test-coalescing: all test-inflight-unit
 	python3 tests/test_request_coalescing.py $(COALESCING_TESTS)
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing
+# source_hint.c includes the generated table from src/, which HEADERS does not cover.
+$(OBJ_DIR)/source_hint.o: $(SRC_DIR)/source_hint_table.h
+
+# Differential test of the script classifier against tests/source_hint_ref.py.
+SOURCE_HINT_TEST_BIN ?= $(OBJ_DIR)/test_source_hint
+test-source-hint: directories
+	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(SOURCE_HINT_TEST_BIN) tests/test_source_hint.c src/source_hint.c
+	python3 -I tests/test_source_hint.py $(SOURCE_HINT_TEST_BIN) $(SOURCE_HINT_TEST_ARGS)
+
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint
