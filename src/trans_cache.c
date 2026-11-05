@@ -186,6 +186,51 @@ bool source_hint_replaces(const SourceHint *incoming, const SourceHint *stored) 
     return incoming->version >= stored->version;
 }
 
+int trans_cache_merge_hint(TransCache *cache, const char *hash, const SourceHint *hint) {
+    if (!cache || !cache->ops || !cache->ops->merge_hint || !hash || !source_hint_valid(hint)) return -1;
+    pthread_rwlock_wrlock(&cache->lock);
+    int result = cache->ops->merge_hint(cache->backend_ctx, hash, hint);
+    pthread_rwlock_unlock(&cache->lock);
+    return result;
+}
+
+int trans_cache_import_entry(TransCache *cache, const CacheEntry *src, bool *existed, int *hint_replaced) {
+    if (existed) *existed = false;
+    if (hint_replaced) *hint_replaced = 0;
+    if (!cache || !cache->ops || !cache->ops->lookup || !cache->ops->store_result || !cache->ops->merge_hint ||
+        !src || !src->source_text || !src->translated_text ||
+        (strlen(src->from_lang) != 3 && strcmp(src->from_lang, "auto") != 0) || strlen(src->to_lang) != 3) {
+        return -1;
+    }
+    const SourceHint *hint = strcmp(src->from_lang, "auto") == 0 && source_hint_valid(&src->hint) ? &src->hint : NULL;
+
+    pthread_rwlock_wrlock(&cache->lock);
+    int result;
+    /* The destination is looked up here, inside the lock: the source entry is
+     * never used as the destination's copy. */
+    CacheEntry *dest = cache->ops->lookup(cache->backend_ctx, src->from_lang, src->to_lang, src->source_text);
+    if (!dest) {
+        result = cache->ops->store_result(cache->backend_ctx, src->from_lang, src->to_lang, src->source_text,
+                                          src->translated_text, NULL, hint, NULL);
+        if (result == 0 && hint && hint_replaced) {
+            CacheEntry *check = cache->ops->lookup(cache->backend_ctx, src->from_lang, src->to_lang, src->source_text);
+            *hint_replaced = check && source_hint_valid(&check->hint) ? 1 : 0;
+            trans_cache_entry_free(check);
+        }
+    } else {
+        if (existed) *existed = true;
+        result = 0;
+        if (hint) {
+            int merged = cache->ops->merge_hint(cache->backend_ctx, dest->hash, hint);
+            if (merged < 0) result = -1;
+            else if (hint_replaced) *hint_replaced = merged;
+        }
+        trans_cache_entry_free(dest);
+    }
+    pthread_rwlock_unlock(&cache->lock);
+    return result;
+}
+
 int trans_cache_store_result(TransCache *cache,
                              const char *from_lang,
                              const char *to_lang,

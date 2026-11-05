@@ -75,6 +75,11 @@ typedef struct {
                         const char *source_text, const char *translated_text,
                         CacheEntry *cached, const SourceHint *hint,
                         const TranslationControl *control);
+
+    /* Merge a hint into the existing auto row `hash` by priority, leaving the
+     * row itself untouched. 1 = replaced, 0 = kept / no such auto row,
+     * -1 = error. Called with the cache write lock held. */
+    int (*merge_hint)(void *backend_ctx, const char *hash, const SourceHint *hint);
 } CacheBackendOps;
 
 /* Translation cache structure (backend-agnostic) */
@@ -157,6 +162,17 @@ int trans_cache_store_result(TransCache *cache,
                              CacheEntry *cached,
                              const SourceHint *hint,
                              const TranslationControl *control);
+
+/* Merge `hint` into the existing auto row `hash` (see the merge_hint op).
+ * Invalid hints are rejected (-1). */
+int trans_cache_merge_hint(TransCache *cache, const char *hash, const SourceHint *hint);
+
+/* Import one entry (cache_tool migrate) under one lock: if the destination has
+ * no row for the entry's key, its translation and hint are added; otherwise
+ * the DESTINATION translation is kept and only the hint is merged by priority.
+ * *existed tells which case applied; *hint_replaced is 1 when a hint was
+ * written. Returns 0 on success, -1 on failure. */
+int trans_cache_import_entry(TransCache *cache, const CacheEntry *src, bool *existed, int *hint_replaced);
 
 /* true if lang is a canonical stored code: a lowercase entry of
  * ISO_639_2_CODES or "und". */

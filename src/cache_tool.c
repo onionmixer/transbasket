@@ -14,6 +14,7 @@
 #include "cache_backend_text.h"
 #include "cache_backend_sqlite.h"
 #include "utils.h"
+#include "source_hint.h"
 
 #define VERSION "1.0.0"
 #define DEFAULT_CACHE_FILE "trans_dictionary.txt"
@@ -37,6 +38,9 @@ static void print_usage(const char *prog_name) {
     printf("  delete <id>                      Delete entry by ID\n");
     printf("  export [from_lang] [to_lang]     Export cache entries to stdout\n");
     printf("                                    Optional: filter by language pair\n");
+    printf("  backfill-hints --backend <text|sqlite> --config <path> [--dry-run]\n");
+    printf("                                   Fill missing/outdated script hints of from=auto rows\n");
+    printf("                                   (model hints are never replaced)\n");
     printf("  migrate --from <backend> --from-config <path>\n");
     printf("          --to <backend> --to-config <path>\n");
     printf("                                   Migrate cache between backends\n");
@@ -80,8 +84,22 @@ static void truncate_for_display(const char *text, char *buffer, size_t max_len)
     if (len <= max_len) {
         strncpy(buffer, text, max_len + 1);
     } else {
-        snprintf(buffer, max_len + 1, "%.*s...", (int)(max_len - 3), text);
+        /* Cut on a UTF-8 character boundary: never split a multi-byte
+         * sequence (that printed invalid UTF-8 for Korean text). */
+        size_t cut = max_len - 3;
+        while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80) cut--;
+        snprintf(buffer, max_len + 1, "%.*s...", (int)cut, text);
     }
+}
+
+/* "kor", "kor*" (mixed) plus origin letter m/s; "-" for no hint. */
+static void format_hint(const CacheEntry *entry, char *buf, size_t size) {
+    if (!source_hint_valid(&entry->hint)) {
+        snprintf(buf, size, "-");
+        return;
+    }
+    snprintf(buf, size, "%s%s/%c", entry->hint.lang, entry->hint.mixed ? "*" : "",
+             entry->hint.origin == SOURCE_HINT_ORIGIN_MODEL ? 'm' : 's');
 }
 
 /* List cache entries */
@@ -93,8 +111,8 @@ static int cmd_list(TransCache *cache, const char *from_lang, const char *to_lan
     TextBackendContext *ctx = GET_TEXT_CTX(cache);
 
     printf("\n");
-    printf("%-5s %-4s %-4s %-8s %-30s %-30s %-19s\n",
-           "ID", "From", "To", "Count", "Source", "Translation", "Last Used");
+    printf("%-5s %-4s %-4s %-7s %-8s %-30s %-30s %-19s\n",
+           "ID", "From", "To", "Hint", "Count", "Source", "Translation", "Last Used");
     printf("─────────────────────────────────────────────────────────────────────────────────────────────────────────────\n");
 
     int displayed_count = 0;
@@ -118,8 +136,10 @@ static int cmd_list(TransCache *cache, const char *from_lang, const char *to_lan
         truncate_for_display(entry->translated_text, trans_display, 30);
         format_timestamp(entry->last_used, last_used_str, sizeof(last_used_str));
 
-        printf("%-5d %-4s %-4s %-8d %-30s %-30s %s\n",
-               entry->id, entry->from_lang, entry->to_lang, entry->count,
+        char hint_display[16];
+        format_hint(entry, hint_display, sizeof(hint_display));
+        printf("%-5d %-4s %-4s %-7s %-8d %-30s %-30s %s\n",
+               entry->id, entry->from_lang, entry->to_lang, hint_display, entry->count,
                source_display, trans_display, last_used_str);
 
         displayed_count++;
@@ -343,6 +363,33 @@ static int cmd_stats(TransCache *cache) {
 
     printf("\n");
 
+    /* source_hint distribution of from=auto rows */
+    typedef struct { char label[16]; int count; } HintStat;
+    HintStat hints[64];
+    int hint_kinds = 0, auto_rows = 0;
+    for (size_t i = 0; i < ctx->size; i++) {
+        CacheEntry *entry = ctx->entries[i];
+        if (strcmp(entry->from_lang, "auto") != 0) continue;
+        auto_rows++;
+        char label[16];
+        format_hint(entry, label, sizeof(label));
+        int k = 0;
+        while (k < hint_kinds && strcmp(hints[k].label, label) != 0) k++;
+        if (k == hint_kinds) {
+            if (hint_kinds == (int)(sizeof(hints) / sizeof(hints[0]))) continue;
+            snprintf(hints[k].label, sizeof(hints[k].label), "%s", label);
+            hints[k].count = 0;
+            hint_kinds++;
+        }
+        hints[k].count++;
+    }
+    if (auto_rows > 0) {
+        printf("source_hint of from=auto rows (%d):\n", auto_rows);
+        printf("  (code, * = mixed, /m = model, /s = script, - = none)\n");
+        for (int k = 0; k < hint_kinds; k++) printf("  %-8s : %d\n", hints[k].label, hints[k].count);
+        printf("\n");
+    }
+
     free(pairs);
     return 0;
 }
@@ -532,8 +579,9 @@ static int iterate_text_backend(TextBackendContext *ctx, entry_iterator_fn callb
 static int iterate_sqlite_backend(SqliteBackendContext *ctx, entry_iterator_fn callback, void *user_data) {
     /* Prepare SELECT ALL query */
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "SELECT id, hash, from_lang, to_lang, source_text, translated_text, "
-                      "count, last_used, created_at FROM trans_cache ORDER BY id;";
+    const char *sql = "SELECT c.id, c.hash, c.from_lang, c.to_lang, c.source_text, c.translated_text, "
+                      "c.count, c.last_used, c.created_at, h.source_hint, h.mixed, h.origin, h.hint_version "
+                      "FROM trans_cache c LEFT JOIN trans_cache_source_hint h ON h.hash = c.hash ORDER BY c.id;";
 
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -555,6 +603,7 @@ static int iterate_sqlite_backend(SqliteBackendContext *ctx, entry_iterator_fn c
         entry.count = sqlite3_column_int(stmt, 6);
         entry.last_used = (time_t)sqlite3_column_int64(stmt, 7);
         entry.created_at = (time_t)sqlite3_column_int64(stmt, 8);
+        sqlite_backend_read_hint(stmt, 9, &entry);
 
         if (!entry.source_text || !entry.translated_text) {
             free(entry.source_text);
@@ -588,7 +637,9 @@ static int iterate_sqlite_backend(SqliteBackendContext *ctx, entry_iterator_fn c
 /* Migration callback context */
 typedef struct {
     TransCache *dest_cache;
-    int migrated_count;
+    int migrated_count;   /* new rows in the destination */
+    int kept_count;       /* key already in the destination: its translation kept */
+    int hint_count;       /* hints written (new rows and merges) */
     int failed_count;
     int show_progress;
 } MigrateContext;
@@ -598,18 +649,19 @@ static int migrate_entry_callback(void *ctx, CacheEntry *entry, void *user_data)
     (void)ctx;
     MigrateContext *mctx = (MigrateContext*)user_data;
 
-    /* Add to destination cache */
-    if (trans_cache_add(mctx->dest_cache,
-                        entry->from_lang,
-                        entry->to_lang,
-                        entry->source_text,
-                        entry->translated_text) != 0) {
+    /* New key: translation + hint. Existing key: destination translation kept,
+     * hint merged by priority. Same meaning for every destination backend. */
+    bool existed = false;
+    int hint_written = 0;
+    if (trans_cache_import_entry(mctx->dest_cache, entry, &existed, &hint_written) != 0) {
         mctx->failed_count++;
         fprintf(stderr, "Warning: Failed to migrate entry ID %d\n", entry->id);
         return 0;  /* Continue with next entry */
     }
 
-    mctx->migrated_count++;
+    if (existed) mctx->kept_count++;
+    else mctx->migrated_count++;
+    mctx->hint_count += hint_written;
 
     /* Show progress every 100 entries */
     if (mctx->show_progress && (mctx->migrated_count % 100 == 0)) {
@@ -756,6 +808,10 @@ static int cmd_migrate(int argc, char *argv[]) {
     printf("\n");
     printf("=== Migration Complete ===\n");
     printf("Total migrated: %d entries\n", mctx.migrated_count);
+    if (mctx.kept_count > 0) {
+        printf("Already in destination (translation kept): %d entries\n", mctx.kept_count);
+    }
+    printf("Hints written: %d\n", mctx.hint_count);
     if (mctx.failed_count > 0) {
         printf("Failed: %d entries\n", mctx.failed_count);
     }
@@ -766,6 +822,149 @@ static int cmd_migrate(int argc, char *argv[]) {
     trans_cache_free(dest_cache);
 
     return (mctx.failed_count > 0) ? 1 : 0;
+}
+
+/* backfill-hints: give from=auto rows without a valid hint, or with an older
+ * script hint, the current script classifier's hint. Model hints are never
+ * touched (merge priority). Rows are collected first and written afterwards,
+ * so no table is modified while it is being iterated. */
+typedef struct {
+    char hash[65];
+    char *text;
+    SourceHint hint;
+} BackfillRow;
+
+static int collect_backfill_rows(TransCache *cache, CacheBackendType type, BackfillRow **rows_out, size_t *n_out) {
+    BackfillRow *rows = NULL;
+    size_t n = 0, cap = 0;
+    int rc = 0;
+#define PUSH(hash_, text_, hint_) do { \
+        if (n == cap) { \
+            size_t nc = cap ? cap * 2 : 64; \
+            BackfillRow *nr = realloc(rows, nc * sizeof(*rows)); \
+            if (!nr) { rc = -1; break; } \
+            rows = nr; cap = nc; \
+        } \
+        memcpy(rows[n].hash, (hash_), sizeof(rows[n].hash)); \
+        rows[n].hint = (hint_); \
+        if (!(rows[n].text = strdup(text_))) { rc = -1; break; } \
+        n++; \
+    } while (0)
+    if (type == CACHE_BACKEND_TEXT) {
+        TextBackendContext *ctx = GET_TEXT_CTX(cache);
+        for (size_t i = 0; i < ctx->size && rc == 0; i++) {
+            CacheEntry *e = ctx->entries[i];
+            if (strcmp(e->from_lang, "auto") == 0) PUSH(e->hash, e->source_text, e->hint);
+        }
+    } else {
+        SqliteBackendContext *ctx = (SqliteBackendContext *)cache->backend_ctx;
+        sqlite3_stmt *st = NULL;
+        const char *sql = "SELECT c.hash, c.source_text, h.source_hint, h.mixed, h.origin, h.hint_version "
+                          "FROM trans_cache c LEFT JOIN trans_cache_source_hint h ON h.hash = c.hash "
+                          "WHERE c.from_lang = 'auto' ORDER BY c.id;";
+        if (sqlite3_prepare_v2(ctx->db, sql, -1, &st, NULL) != SQLITE_OK) {
+            fprintf(stderr, "Error preparing SELECT: %s\n", sqlite3_errmsg(ctx->db));
+            rc = -1;
+        }
+        int step = SQLITE_DONE;
+        while (rc == 0 && (step = sqlite3_step(st)) == SQLITE_ROW) {
+            CacheEntry tmp;
+            memset(&tmp, 0, sizeof(tmp));
+            memcpy(tmp.from_lang, "auto", 5);
+            sqlite_backend_read_hint(st, 2, &tmp);
+            const char *hash = (const char *)sqlite3_column_text(st, 0);
+            const char *text = (const char *)sqlite3_column_text(st, 1);
+            if (!hash || !text || strlen(hash) != 64) continue;
+            PUSH(hash, text, tmp.hint);
+        }
+        if (rc == 0 && step != SQLITE_DONE) {
+            fprintf(stderr, "Error reading entries: %s\n", sqlite3_errmsg(ctx->db));
+            rc = -1;
+        }
+        sqlite3_finalize(st);
+    }
+#undef PUSH
+    *rows_out = rows;
+    *n_out = n;
+    return rc;
+}
+
+static int cmd_backfill_hints(int argc, char *argv[]) {
+    const char *backend = NULL, *config = NULL;
+    int dry_run = 0, opt, option_index = 0;
+    static struct option long_options[] = {
+        {"backend", required_argument, 0, 'b'},
+        {"config", required_argument, 0, 'c'},
+        {"dry-run", no_argument, 0, 'n'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+    optind = 0;
+    while ((opt = getopt_long(argc, argv, "b:c:nh", long_options, &option_index)) != -1) {
+        switch (opt) {
+            case 'b': backend = optarg; break;
+            case 'c': config = optarg; break;
+            case 'n': dry_run = 1; break;
+            case 'h':
+                printf("Usage: cache_tool backfill-hints --backend <text|sqlite> --config <path> [--dry-run]\n");
+                return 0;
+            default:
+                fprintf(stderr, "Error: Invalid option\n");
+                return 1;
+        }
+    }
+    if (!backend || !config) {
+        fprintf(stderr, "Usage: cache_tool backfill-hints --backend <text|sqlite> --config <path> [--dry-run]\n");
+        return 1;
+    }
+    CacheBackendType type = parse_backend_type(backend);
+    if (type != CACHE_BACKEND_TEXT && type != CACHE_BACKEND_SQLITE) {
+        fprintf(stderr, "Error: backfill-hints supports text and sqlite\n");
+        return 1;
+    }
+    TransCache *cache = trans_cache_init_with_backend(type, config, NULL);
+    if (!cache) {
+        fprintf(stderr, "Error: Failed to initialize cache from %s\n", config);
+        return 1;
+    }
+
+    BackfillRow *rows = NULL;
+    size_t n = 0;
+    int rc = collect_backfill_rows(cache, type, &rows, &n);
+    int model = 0, current = 0, filled = 0, upgraded = 0, failed = 0;
+    for (size_t i = 0; rc == 0 && i < n; i++) {
+        const SourceHint *h = &rows[i].hint;
+        bool valid = source_hint_valid(h);
+        if (valid && h->origin == SOURCE_HINT_ORIGIN_MODEL) { model++; continue; }
+        if (valid && h->version >= SOURCE_HINT_VERSION) { current++; continue; }
+        SourceHintGuess guess;
+        if (source_hint_classify((const unsigned char *)rows[i].text, strlen(rows[i].text), &guess) != 0) {
+            failed++;   /* longer than the classifier accepts */
+            continue;
+        }
+        SourceHint hint = { .mixed = guess.mixed, .origin = SOURCE_HINT_ORIGIN_SCRIPT, .version = SOURCE_HINT_VERSION };
+        memcpy(hint.lang, guess.lang, sizeof(hint.lang));
+        if (!dry_run && trans_cache_merge_hint(cache, rows[i].hash, &hint) < 0) { failed++; continue; }
+        if (valid) upgraded++;
+        else filled++;
+    }
+    if (rc == 0 && !dry_run && trans_cache_save(cache) != 0) {
+        fprintf(stderr, "Error: Failed to save cache\n");
+        rc = -1;
+    }
+    for (size_t i = 0; i < n; i++) free(rows[i].text);
+    free(rows);
+    trans_cache_free(cache);
+    if (rc != 0) return 1;
+
+    printf("=== source_hint backfill%s ===\n", dry_run ? " (dry run, nothing written)" : "");
+    printf("from=auto rows: %zu\n", n);
+    printf("  %s (no or invalid hint): %d\n", dry_run ? "would fill" : "filled", filled);
+    printf("  %s (older script hint): %d\n", dry_run ? "would upgrade" : "upgraded", upgraded);
+    printf("  kept (model hint): %d\n", model);
+    printf("  kept (current script hint): %d\n", current);
+    if (failed) printf("  failed: %d\n", failed);
+    return failed ? 1 : 0;
 }
 
 /* Main function */
@@ -806,6 +1005,10 @@ int main(int argc, char *argv[]) {
     if (strcmp(command, "migrate") == 0) {
         /* Pass only migrate arguments (skip program name and commands before "migrate") */
         return cmd_migrate(argc - optind, &argv[optind]);
+    }
+    /* backfill-hints selects its own backend, so it also bypasses -f */
+    if (strcmp(command, "backfill-hints") == 0) {
+        return cmd_backfill_hints(argc - optind, &argv[optind]);
     }
 
     /* Normalize language filters once, before opening or changing the cache. */

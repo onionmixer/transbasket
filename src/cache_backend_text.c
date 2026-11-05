@@ -506,6 +506,15 @@ static int text_backend_store_result(void *backend_ctx, const char *from_lang, c
     return 0;
 }
 
+static int text_backend_merge_hint(void *backend_ctx, const char *hash, const SourceHint *hint) {
+    if (!backend_ctx || !hash) return -1;
+    CacheEntry *stored = text_find_stored((TextBackendContext *)backend_ctx, hash);
+    if (!stored || strcmp(stored->from_lang, "auto") != 0) return 0;
+    if (!source_hint_replaces(hint, &stored->hint)) return 0;
+    stored->hint = *hint;
+    return 1;
+}
+
 /* Save cache to file */
 static int text_backend_save(void *backend_ctx) {
     if (!backend_ctx) {
@@ -671,7 +680,8 @@ CacheBackendOps *text_backend_get_ops(void) {
         .cleanup = text_backend_cleanup,
         .stats = text_backend_stats,
         .free_backend = text_backend_free,
-        .store_result = text_backend_store_result
+        .store_result = text_backend_store_result,
+        .merge_hint = text_backend_merge_hint
     };
     return &ops;
 }

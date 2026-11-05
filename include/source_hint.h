@@ -16,7 +16,9 @@
  * below UINT64_MAX.
  */
 
+#ifndef SOURCE_HINT_VERSION      /* overridable only for tests of the upgrade path */
 #define SOURCE_HINT_VERSION 1
+#endif
 #define SOURCE_HINT_MAX_INPUT 10000   /* MAX_TEXT_LENGTH */
 
 /* Classes of the generated range table (src/source_hint_table.h). */

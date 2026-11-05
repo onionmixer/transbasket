@@ -491,8 +491,8 @@ TransCache *sqlite_backend_init(const char *db_path) {
 }
 
 /* Hint columns (source_hint, mixed, origin, hint_version) starting at `col`;
- * NULL or anything invalid means "no hint". */
-static void read_hint(sqlite3_stmt *stmt, int col, CacheEntry *entry) {
+ * NULL or anything invalid means "no hint". Also used by cache_tool. */
+void sqlite_backend_read_hint(sqlite3_stmt *stmt, int col, CacheEntry *entry) {
     memset(&entry->hint, 0, sizeof(entry->hint));
     if (strcmp(entry->from_lang, "auto") != 0 || sqlite3_column_type(stmt, col) != SQLITE_TEXT) return;
     const char *lang = (const char *)sqlite3_column_text(stmt, col);
@@ -550,7 +550,7 @@ static CacheEntry* sqlite_backend_lookup(void *backend_ctx,
     entry->count = sqlite3_column_int(ctx->stmt_lookup, 6);
     entry->last_used = (time_t)sqlite3_column_int64(ctx->stmt_lookup, 7);
     entry->created_at = (time_t)sqlite3_column_int64(ctx->stmt_lookup, 8);
-    read_hint(ctx->stmt_lookup, 9, entry);
+    sqlite_backend_read_hint(ctx->stmt_lookup, 9, entry);
 
     sqlite3_reset(ctx->stmt_lookup);
 
@@ -833,6 +833,11 @@ static int sqlite_backend_store_result(void *backend_ctx, const char *from_lang,
     return -1;
 }
 
+static int sqlite_backend_merge_hint(void *backend_ctx, const char *hash, const SourceHint *hint) {
+    if (!backend_ctx || !hash) return -1;
+    return upsert_hint((SqliteBackendContext *)backend_ctx, hash, hint);   /* one autocommit statement */
+}
+
 /* Save cache (no-op for SQLite - auto-commit) */
 static int sqlite_backend_save(void *backend_ctx) {
     (void)backend_ctx;
@@ -959,7 +964,8 @@ CacheBackendOps *sqlite_backend_get_ops(void) {
         .cleanup = sqlite_backend_cleanup,
         .stats = sqlite_backend_stats,
         .free_backend = sqlite_backend_free,
-        .store_result = sqlite_backend_store_result
+        .store_result = sqlite_backend_store_result,
+        .merge_hint = sqlite_backend_merge_hint
     };
     return &ops;
 }

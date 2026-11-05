@@ -23,7 +23,7 @@ SERVER_SRCS = $(filter-out $(SRC_DIR)/cache_tool.c, $(wildcard $(SRC_DIR)/*.c))
 SERVER_OBJS = $(SERVER_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Cache tool sources (needs trans_cache.c, cache backends and utils.c)
-CACHE_TOOL_SRCS = $(SRC_DIR)/cache_tool.c $(SRC_DIR)/trans_cache.c $(SRC_DIR)/cache_backend_text.c $(SRC_DIR)/cache_backend_sqlite.c $(SRC_DIR)/utils.c
+CACHE_TOOL_SRCS = $(SRC_DIR)/cache_tool.c $(SRC_DIR)/trans_cache.c $(SRC_DIR)/cache_backend_text.c $(SRC_DIR)/cache_backend_sqlite.c $(SRC_DIR)/utils.c $(SRC_DIR)/source_hint.c
 CACHE_TOOL_OBJS = $(CACHE_TOOL_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 # Header files
@@ -120,4 +120,10 @@ test-source-hint-store: directories
 test-source-hint-server: all
 	python3 tests/test_source_hint_server.py
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server
+# cache_tool hint commands; also builds a variant that believes the classifier is v2,
+# to exercise backfill's upgrade path (unreachable in v1).
+test-cache-tool-hints: all
+	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
+	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
+
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints

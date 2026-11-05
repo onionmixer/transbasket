@@ -36,6 +36,11 @@ typedef struct {
  */
 TransCache *sqlite_backend_init(const char *db_path);
 
+/* Fill entry->hint from the (source_hint, mixed, origin, hint_version) columns
+ * starting at `col` of a row that LEFT JOINs trans_cache_source_hint; invalid
+ * or NULL values mean "no hint". */
+void sqlite_backend_read_hint(sqlite3_stmt *stmt, int col, CacheEntry *entry);
+
 /**
  * Get SQLite backend operations table.
  *
