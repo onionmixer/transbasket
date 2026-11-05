@@ -246,3 +246,32 @@ const char *strict_json_reason(StrictJsonResult result) {
                                          "root", "duplicate", "translation" };
     return (unsigned)result < sizeof(names) / sizeof(names[0]) ? names[result] : "?";
 }
+
+/* Not a JSON parser: backslashes pair with the next byte, which is how cJSON
+ * finds the end of a string; inside the root value cJSON accepted they only
+ * occur in strings, and hex digits contain neither a backslash nor a quote, so
+ * the pairing agrees with cJSON's decoder up to the first escape that yields
+ * NUL. */
+bool json_decodes_nul(const unsigned char *data, size_t len) {
+    if (!data) return false;
+    const unsigned char *nul = memchr(data, 0, len);
+    if (nul) len = (size_t)(nul - data);
+    size_t i = 0;
+    while (i < len) {
+        if (data[i] != '\\') { i++; continue; }
+        if (i + 1 < len && data[i + 1] == 'u') {
+            if (len - i < 6) return true;          /* fewer than four bytes follow */
+            unsigned v = 0;
+            for (size_t k = 2; k < 6; k++) {
+                int h = hexval(data[i + k]);
+                if (h < 0) return true;            /* cJSON's parse_hex4 yields 0 */
+                v = v * 16 + (unsigned)h;
+            }
+            if (v == 0) return true;
+            i += 6;
+        } else {
+            i += 2;
+        }
+    }
+    return false;
+}

@@ -1,6 +1,7 @@
 #ifndef STRICT_JSON_H
 #define STRICT_JSON_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /*
@@ -31,5 +32,17 @@ StrictJsonResult strict_json_validate(const unsigned char *data, size_t len);
 
 /* "accept", "utf8", "syntax", ... (the reference's reason names). */
 const char *strict_json_reason(StrictJsonResult result);
+
+/*
+ * true when cJSON 1.7.15 would decode some string or key in data[0..len) to
+ * contain U+0000 (PLAN_CLEANUP_DAYS_AND_NUL.md section 4; tests/cjson_nul_ref.py
+ * is the specification). cJSON turns every backslash-u escape whose four
+ * following bytes are not all hex digits, or are 0000, into a NUL and the C
+ * string is then silently cut there. Call it on the bytes cJSON consumed:
+ * cJSON_ParseWithOpts(x, &end, 0) succeeded -> json_decodes_nul(x, end - x).
+ * Over that range the answer is exact. Scanning stops at a raw NUL byte (cJSON
+ * reads a C string).
+ */
+bool json_decodes_nul(const unsigned char *data, size_t len);
 
 #endif /* STRICT_JSON_H */
