@@ -156,7 +156,10 @@ static char *str_replace(const char *orig, const char *rep, const char *with) {
 }
 
 /* Parse SSE (Server-Sent Events) chunk and extract content from delta */
-static char *parse_sse_chunk(const char *chunk, const char *request_uuid) {
+/* NULL = nothing to append (no data, [DONE], unparsable or no content - all
+ * ignored as before). *nul_out = true additionally means the payload parsed but
+ * cJSON cut a string at a decoded NUL: the whole response must fail. */
+static char *parse_sse_chunk(const char *chunk, const char *request_uuid, bool *nul_out) {
     /* request_uuid is only referenced by LOG_DEBUG, which compiles out in
      * release builds - keep the parameter live for `make debug`. */
     (void)request_uuid;
@@ -204,12 +207,19 @@ static char *parse_sse_chunk(const char *chunk, const char *request_uuid) {
     strncpy(json_str, line_start, json_len);
     json_str[json_len] = '\0';
 
-    /* Parse JSON */
-    cJSON *json = cJSON_Parse(json_str);
+    /* Parse JSON (checked over the consumed bytes, before json_str is freed) */
+    const char *parse_end = NULL;
+    cJSON *json = cJSON_ParseWithOpts(json_str, &parse_end, 0);
+    bool nul = json && json_decodes_nul((const unsigned char *)json_str, (size_t)(parse_end - json_str));
     free(json_str);
 
     if (!json) {
         LOG_DEBUG("[%s] Failed to parse SSE JSON chunk\n", request_uuid);
+        return NULL;
+    }
+    if (nul) {
+        if (nul_out) *nul_out = true;
+        cJSON_Delete(json);
         return NULL;
     }
 
@@ -235,7 +245,8 @@ static char *parse_sse_chunk(const char *chunk, const char *request_uuid) {
 }
 
 /* Handle streaming response - accumulate delta content */
-static char *handle_streaming_response(const char *response_data, const char *request_uuid) {
+static char *handle_streaming_response(const char *response_data, const char *request_uuid, bool *nul_out) {
+    if (nul_out) *nul_out = false;
     if (!response_data || !request_uuid) {
         return NULL;
     }
@@ -279,8 +290,17 @@ static char *handle_streaming_response(const char *response_data, const char *re
         chunk_str[chunk_len] = '\0';
 
         /* Parse this chunk */
-        char *content = parse_sse_chunk(chunk_str, request_uuid);
+        bool chunk_nul = false;
+        char *content = parse_sse_chunk(chunk_str, request_uuid, &chunk_nul);
         free(chunk_str);
+
+        if (chunk_nul) {
+            /* Skipping only this chunk would return a translation with a hole. */
+            free(content);
+            free(accumulated_text);
+            if (nul_out) *nul_out = true;
+            return NULL;
+        }
 
         if (content) {
             size_t content_len = strlen(content);
@@ -317,14 +337,21 @@ static char *handle_streaming_response(const char *response_data, const char *re
 }
 
 /* Handle non-streaming response - extract from message.content */
-static char *handle_non_streaming_response(const char *response_data, const char *request_uuid) {
+static char *handle_non_streaming_response(const char *response_data, const char *request_uuid, bool *nul_out) {
+    if (nul_out) *nul_out = false;
     if (!response_data || !request_uuid) {
         return NULL;
     }
 
-    cJSON *response_json = cJSON_Parse(response_data);
+    const char *parse_end = NULL;
+    cJSON *response_json = cJSON_ParseWithOpts(response_data, &parse_end, 0);
     if (!response_json) {
         LOG_DEBUG("[%s] Failed to parse response JSON\n", request_uuid);
+        return NULL;
+    }
+    if (json_decodes_nul((const unsigned char *)response_data, (size_t)(parse_end - response_data))) {
+        if (nul_out) *nul_out = true;
+        cJSON_Delete(response_json);
         return NULL;
     }
 
@@ -901,16 +928,29 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
 
         /* Parse response based on streaming mode */
         char *raw_translation = NULL;
+        bool upstream_nul = false;
 
         if (translator->config->stream) {
             /* Handle streaming response */
-            raw_translation = handle_streaming_response(response.data, request_uuid);
+            raw_translation = handle_streaming_response(response.data, request_uuid, &upstream_nul);
         } else {
             /* Handle non-streaming response */
-            raw_translation = handle_non_streaming_response(response.data, request_uuid);
+            raw_translation = handle_non_streaming_response(response.data, request_uuid, &upstream_nul);
         }
 
         free(response.data);
+
+        if (upstream_nul) {
+            /* cJSON would have cut the reply at a decoded NUL; never cache that. */
+            free(raw_translation);
+            LOG_INFO("[%s] upstream response contains an escape that decodes to U+0000\n", request_uuid);
+            if (error) {
+                error->message = strdup("Upstream response contains U+0000");
+                error->retryable = false;
+                error->status_code = 502;
+            }
+            break;
+        }
 
         if (!raw_translation) {
             LOG_DEBUG("[%s] Failed to extract translation from response\n", request_uuid);
@@ -1388,6 +1428,16 @@ cleanup:
     }
     free(call_err);
     call_err = NULL;
+
+    /* 8a. Plain output is used as a C string from here on: a NUL byte would cut
+     *     it silently (structured output is rejected by strict_json_validate). */
+    if (!structured && memchr(result, '\0', result_len) != NULL) {
+        free(result);
+        if (hint_out) memset(hint_out, 0, sizeof(*hint_out));
+        LOG_INFO("[%s] codex translation failed: output contains a NUL byte\n", request_uuid);
+        if (error) { error->message = strdup("codex output contains a NUL byte"); error->retryable = false; error->status_code = 502; }
+        return NULL;
+    }
 
     /* 8. Structured mode: strict validation, translation + model hint. */
     if (structured) {

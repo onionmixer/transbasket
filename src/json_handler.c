@@ -9,6 +9,7 @@
 #include <cjson/cJSON.h>
 #include "json_handler.h"
 #include "utils.h"
+#include "strict_json.h"
 
 #define MAX_TEXT_LENGTH 10000
 #define MIN_TEXT_LENGTH 1
@@ -20,9 +21,18 @@ TranslationRequest *parse_translation_request(const char *json_str) {
         return NULL;
     }
 
-    cJSON *root = cJSON_Parse(json_str);
+    const char *parse_end = NULL;
+    cJSON *root = cJSON_ParseWithOpts(json_str, &parse_end, 0);   /* == cJSON_Parse, plus the end */
     if (!root) {
         fprintf(stderr, "Error: Failed to parse JSON: %s\n", cJSON_GetErrorPtr());
+        return NULL;
+    }
+
+    /* cJSON would have cut some field (text, uuid, a key, ...) at a decoded NUL:
+     * the request is not what the client sent, so reject it (422). */
+    if (json_decodes_nul((const unsigned char *)json_str, (size_t)(parse_end - json_str))) {
+        fprintf(stderr, "Error: request contains an escape that decodes to U+0000\n");
+        cJSON_Delete(root);
         return NULL;
     }
 

@@ -19,6 +19,7 @@
 
 #include "mcp_client.h"
 #include "utils.h"
+#include "strict_json.h"
 
 extern char **environ;
 
@@ -134,8 +135,9 @@ static void drain_stderr(MCPClient *c) {
  * deletes), or NULL on timeout / EOF / error.
  */
 static cJSON *wait_for_id(MCPClient *c, int want_id, int timeout_sec,
-                          bool *timed_out, char **err_out) {
+                          bool *timed_out, char **err_out, bool *nul_out) {
     if (timed_out) *timed_out = false;
+    if (nul_out) *nul_out = false;
     (void)timeout_sec;
     long deadline = c->io_deadline_ms;
 
@@ -188,10 +190,17 @@ static cJSON *wait_for_id(MCPClient *c, int want_id, int timeout_sec,
             while ((nl = memchr(start, '\n', c->rbuf_len - (size_t)(start - c->rbuf))) != NULL) {
                 *nl = '\0';
                 if (*start != '\0') {
-                    cJSON *msg = cJSON_Parse(start);
+                    const char *parse_end = NULL;
+                    cJSON *msg = cJSON_ParseWithOpts(start, &parse_end, 0);
                     if (msg) {
                         cJSON *id = cJSON_GetObjectItem(msg, "id");
                         if (cJSON_IsNumber(id) && id->valueint == want_id) {
+                            /* Before the memmove below: it overwrites this line.
+                             * parse_end cannot pass the '\0' written over '\n'. */
+                            if (nul_out) {
+                                *nul_out = json_decodes_nul((const unsigned char *)start,
+                                                            (size_t)(parse_end - start));
+                            }
                             /* matched: consume this line and keep the rest for
                              * the next wait. The '\n' is already '\0', so a
                              * stale line left in rbuf would swallow the next
@@ -394,7 +403,7 @@ int mcp_initialize(MCPClient *c, int timeout_sec) {
 
     bool timed_out = false;
     char *err = NULL;
-    cJSON *resp = wait_for_id(c, id, timeout_sec, &timed_out, &err);
+    cJSON *resp = wait_for_id(c, id, timeout_sec, &timed_out, &err, NULL);
     if (!resp) {
         LOG_INFO("Error: MCP initialize failed: %s", err ? err : "unknown");
         free(err);
@@ -448,13 +457,22 @@ char *mcp_call_tool(MCPClient *c,
     }
 
     char *werr = NULL;
-    cJSON *resp = wait_for_id(c, id, timeout_sec, timed_out, &werr);
+    bool nul = false;
+    cJSON *resp = wait_for_id(c, id, timeout_sec, timed_out, &werr, &nul);
     if (!resp) {
         if (err_out) *err_out = werr ? werr : strdup("MCP tool call failed");
         else free(werr);
         return NULL;
     }
     free(werr);
+
+    /* cJSON would have cut a string of this response at a decoded NUL: the
+     * translation (or error text) is not what the server sent. */
+    if (nul) {
+        if (err_out) *err_out = strdup("codex MCP response contains U+0000");
+        cJSON_Delete(resp);
+        return NULL;
+    }
 
     /* top-level error? */
     cJSON *jerr = cJSON_GetObjectItem(resp, "error");
