@@ -302,8 +302,9 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     if (admission == INFLIGHT_OWNER) {
         const TranslationControl *control = inflight_control(&handle);
         TranslationError error = {0};
+        SourceHint model_hint;
         char *translated = openai_translate(server->translator, req->from_lang, req->to_lang,
-            req->text, request_uuid, req->timestamp, &error, control);
+            req->text, request_uuid, req->timestamp, &error, control, &model_hint);
         int status = 200;
         if (!translated) {
             status = server->config->model_type == MODEL_TYPE_CODEX && error.status_code
@@ -312,7 +313,13 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
             /* One write for the result and its hint; the deadline is checked
              * again inside, after the cache lock is acquired. */
             SourceHint hint;
-            bool have_hint = script_source_hint(server->config, req, &hint);
+            bool have_hint;
+            if (server->config->source_hint_mode == SOURCE_HINT_MODEL && source_hint_valid(&model_hint)) {
+                hint = model_hint;                     /* structured codex output */
+                have_hint = true;
+            } else {
+                have_hint = script_source_hint(server->config, req, &hint);
+            }
             int rc = trans_cache_store_result(server->cache, req->from_lang, req->to_lang, req->text,
                                               translated, cached, have_hint ? &hint : NULL, control);
             if (rc != 0) LOG_INFO("[%s] Cache write failed; sharing translation without persistence", request_uuid);

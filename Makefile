@@ -123,6 +123,13 @@ test-strict-json: directories
 	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(STRICT_JSON_TEST_BIN) tests/test_strict_json.c src/strict_json.c src/source_hint.c
 	python3 -I tests/test_strict_json.py $(STRICT_JSON_TEST_BIN) $(STRICT_JSON_TEST_ARGS)
 
+# Structured mode through the real server; a TRANSBASKET_TEST_HOOKS build covers
+# the schema-write and prompt-construction failure paths (hooks never compiled into $(TARGET)).
+TEST_HOOKS_BIN ?= $(OBJ_DIR)/transbasket_test_hooks
+test-structured-hint: all
+	$(CC) $(CFLAGS) -DTRANSBASKET_TEST_HOOKS $(INCLUDES) $(LDFLAGS) -o $(TEST_HOOKS_BIN) $(SERVER_SRCS) $(LIBS)
+	TB_HOOKS_BIN=$(abspath $(TEST_HOOKS_BIN)) python3 -W ignore::ResourceWarning tests/test_structured_hint.py
+
 test-source-hint-server: all
 	python3 tests/test_source_hint_server.py
 
@@ -132,4 +139,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint

@@ -29,6 +29,8 @@ typedef struct {
     bool        ignore_user_config;/* pass --ignore-user-config (no MCP servers, plugins, ...) */
     int         timeout_sec;
     const TranslationControl *control;
+    const char *output_schema;     /* --output-schema <file>, NULL = plain output */
+    bool        require_output_file;/* the -o file is the only result: no stdout fallback */
 } CodexExecOptions;
 
 /* What the installed CLI offers, detected once at startup. */
@@ -38,6 +40,7 @@ typedef struct {
     bool has_exec;                 /* `<bin> exec --help` exits 0 */
     bool has_ephemeral;            /* exec help advertises --ephemeral */
     bool has_ignore_user_config;   /* exec help advertises --ignore-user-config */
+    bool has_output_schema;        /* exec help advertises --output-schema */
     int  mcp_enabled;              /* enabled servers in `<bin> mcp list --json`, -1 if unknown */
     char mcp_names[256];           /* their names, comma separated (truncated) */
 } CodexCliInfo;
@@ -52,9 +55,10 @@ bool codex_cli_has_mcp_server(const CodexCliInfo *info);
 /* Run one `codex exec` turn and return the final message (caller frees), or
  * NULL on failure with *err_out (caller frees) set to a short message that is
  * safe to show to clients - codex echoes the prompt on stderr, so raw stderr is
- * never put there. If stderr_out is non-NULL it receives the bounded stderr
- * tail for debug traces (caller frees). */
-char *codex_exec_run(const CodexExecOptions *opt, const char *prompt,
+ * never put there. *len_out (if non-NULL) receives the message's real byte
+ * length, which can exceed strlen() if it contains NUL bytes. If stderr_out is
+ * non-NULL it receives the bounded stderr tail for debug traces (caller frees). */
+char *codex_exec_run(const CodexExecOptions *opt, const char *prompt, size_t *len_out,
                      char **err_out, bool *timed_out, char **stderr_out);
 
 #endif /* CODEX_EXEC_H */

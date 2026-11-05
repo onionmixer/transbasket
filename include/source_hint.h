@@ -20,6 +20,7 @@
 #define SOURCE_HINT_VERSION 1
 #endif
 #define SOURCE_HINT_MAX_INPUT 10000   /* MAX_TEXT_LENGTH */
+#define SOURCE_HINT_MODEL_VERSION 1   /* structured-output protocol (schema + prompt) */
 
 /* Classes of the generated range table (src/source_hint_table.h). */
 typedef enum {

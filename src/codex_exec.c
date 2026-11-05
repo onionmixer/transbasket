@@ -315,8 +315,9 @@ static char *last_error_line(const char *err, const char *prompt) {
  * *failed=false when the file does not exist (codex wrote no message) and
  * *failed=true when it exists but is too large or could not be read - that
  * must fail the request rather than fall back to stdout. */
-static char *read_file_bounded(const char *path, size_t max, bool *failed) {
+static char *read_file_bounded(const char *path, size_t max, bool *failed, size_t *len_out) {
     *failed = false;
+    *len_out = 0;
     FILE *fp = fopen(path, "rb");
     if (!fp) {
         *failed = (errno != ENOENT);
@@ -338,6 +339,7 @@ static char *read_file_bounded(const char *path, size_t max, bool *failed) {
         free(buf);
         return NULL;
     }
+    *len_out = len;
     return buf ? buf : strdup("");
 }
 
@@ -371,6 +373,7 @@ void codex_cli_probe(const char *bin, CodexCliInfo *info) {
             info->has_exec = true;
             info->has_ephemeral = res.out && strstr(res.out, "--ephemeral") != NULL;
             info->has_ignore_user_config = res.out && strstr(res.out, "--ignore-user-config") != NULL;
+            info->has_output_schema = res.out && strstr(res.out, "--output-schema") != NULL;
         }
         free(res.out);
     }
@@ -407,8 +410,9 @@ bool codex_cli_has_mcp_server(const CodexCliInfo *info) {
     return info->minor < CODEX_MCP_REMOVED_MINOR;
 }
 
-char *codex_exec_run(const CodexExecOptions *opt, const char *prompt,
+char *codex_exec_run(const CodexExecOptions *opt, const char *prompt, size_t *len_out,
                      char **err_out, bool *timed_out, char **stderr_out) {
+    if (len_out) *len_out = 0;
     if (err_out) *err_out = NULL;
     if (timed_out) *timed_out = false;
     if (stderr_out) *stderr_out = NULL;
@@ -461,6 +465,10 @@ char *codex_exec_run(const CodexExecOptions *opt, const char *prompt,
         argv[a++] = "-o";
         argv[a++] = out_path;
     }
+    if (opt->output_schema && *opt->output_schema) {
+        argv[a++] = "--output-schema";
+        argv[a++] = opt->output_schema;
+    }
     argv[a++] = "-";                       /* prompt comes from stdin */
     argv[a] = NULL;
 
@@ -471,9 +479,10 @@ char *codex_exec_run(const CodexExecOptions *opt, const char *prompt,
     }
 
     char *text = NULL;
+    size_t text_len = 0;
     bool file_failed = false;
     if (out_path[0]) {
-        text = read_file_bounded(out_path, CODEX_OUT_MAX, &file_failed);
+        text = read_file_bounded(out_path, CODEX_OUT_MAX, &file_failed, &text_len);
         unlink(out_path);                  /* lets the caller rmdir the cwd */
     }
     if (file_failed) res.overflow = true;  /* too large or unreadable: fail, no stdout fallback */
@@ -509,19 +518,28 @@ char *codex_exec_run(const CodexExecOptions *opt, const char *prompt,
         return NULL;
     }
 
+    /* Structured mode: the -o file is the only result. */
+    if (opt->require_output_file && (!text || text_len == 0)) {
+        free(text);
+        free(res.out);
+        if (err_out) *err_out = strdup("codex structured output missing");
+        return NULL;
+    }
     /* Prefer --output-last-message; stdout carries the same final message in
      * non-TTY mode and covers runs without a cwd. */
-    if (!text || !*text) {
+    if (!text || text_len == 0) {
         free(text);
         text = res.out;
+        text_len = res.out_len;
         res.out = NULL;
     }
     free(res.out);
 
-    if (!text || !*text) {
+    if (!text || text_len == 0) {
         free(text);
         if (err_out) *err_out = strdup("codex exec returned no message");
         return NULL;
     }
+    if (len_out) *len_out = text_len;
     return text;
 }

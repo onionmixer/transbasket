@@ -6,6 +6,7 @@
 #include "config_loader.h"
 #include "language_table.h"
 #include "translation_control.h"
+#include "trans_cache.h"   /* SourceHint */
 
 /* OpenAI translator structure */
 typedef struct {
@@ -18,6 +19,7 @@ typedef struct {
     sem_t codex_sem;
     bool  codex_sem_inited;
     bool  codex_ephemeral;      /* installed `codex exec` supports --ephemeral */
+    bool  codex_output_schema;  /* installed `codex exec` supports --output-schema */
 } OpenAITranslator;
 
 /* Translation error structure */
@@ -44,7 +46,8 @@ char *openai_translate(
     const char *request_uuid,
     const char *timestamp,
     TranslationError *error,
-    const TranslationControl *control
+    const TranslationControl *control,
+    SourceHint *hint_out          /* may be NULL; set to the model's hint when one was obtained */
 );
 
 /* Free translated text */
