@@ -10,6 +10,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <errno.h>
+#include <limits.h>
 #include "trans_cache.h"
 #include "cache_backend_text.h"
 #include "cache_backend_sqlite.h"
@@ -21,6 +23,18 @@
 
 /* Helper macro to get text backend context */
 #define GET_TEXT_CTX(cache) ((TextBackendContext*)(cache)->backend_ctx)
+
+/* Arguments of destructive commands: decimal digits only, 1..INT_MAX, else -1.
+ * atoi() used to wrap them ("delete 4294967297" deleted id 1, "cleanup
+ * 99999999999" deleted every entry) and accepted trailing text ("1abc"). */
+static int strict_positive_int(const char *arg) {
+    if (!arg || !*arg) return -1;
+    for (const char *p = arg; *p; p++) if (*p < '0' || *p > '9') return -1;
+    errno = 0;
+    char *end = NULL;
+    long n = strtol(arg, &end, 10);
+    return (errno == 0 && *end == '\0' && n >= 1 && n <= INT_MAX) ? (int)n : -1;
+}
 
 /* Print usage information */
 static void print_usage(const char *prog_name) {
@@ -1056,8 +1070,14 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Usage: %s cleanup <days>\n", argv[0]);
             result = 1;
         } else {
-            int days = atoi(argv[optind + 1]);
-            result = cmd_cleanup(cache, days);
+            int days = strict_positive_int(argv[optind + 1]);
+            if (days < 0) {
+                fprintf(stderr, "Error: cleanup days must be a decimal integer in 1..%d, got '%s'\n",
+                        INT_MAX, argv[optind + 1]);
+                result = 1;
+            } else {
+                result = cmd_cleanup(cache, days);
+            }
         }
 
     } else if (strcmp(command, "search") == 0) {
@@ -1075,8 +1095,14 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Usage: %s delete <id>\n", argv[0]);
             result = 1;
         } else {
-            int id = atoi(argv[optind + 1]);
-            result = cmd_delete(cache, id);
+            int id = strict_positive_int(argv[optind + 1]);
+            if (id < 0) {
+                fprintf(stderr, "Error: ID must be a decimal integer in 1..%d, got '%s'\n",
+                        INT_MAX, argv[optind + 1]);
+                result = 1;
+            } else {
+                result = cmd_delete(cache, id);
+            }
         }
 
     } else if (strcmp(command, "export") == 0) {

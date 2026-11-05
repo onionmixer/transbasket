@@ -79,12 +79,9 @@ static void *cache_background_thread(void *arg) {
     int cleanup_check_interval = 0;
 
     if (cleanup_enabled) {
-        /* Cleanup interval: 1/10 of cleanup days or minimum 1 hour */
-        cleanup_check_interval = (cleanup_days * 24 * 60 * 60) / 10;
-        if (cleanup_check_interval < 3600) {
-            cleanup_check_interval = 3600;  /* Minimum 1 hour */
-        }
-        LOG_DEBUG("Cache background thread started (save every %d seconds, cleanup check every %d seconds, cleanup after %d days)",
+        /* Cleanup interval: 1/10 of cleanup days, at least 1 hour (64-bit math) */
+        cleanup_check_interval = trans_cache_cleanup_interval(cleanup_days);
+        LOG_INFO("Cache background thread started (save every %d seconds, cleanup check every %d seconds, cleanup after %d days)",
                 save_interval, cleanup_check_interval, cleanup_days);
     } else {
         LOG_DEBUG("Cache background thread started (save every %d seconds, cleanup disabled)",
@@ -95,7 +92,8 @@ static void *cache_background_thread(void *arg) {
 
     while (server->cache_bg_running) {
         sleep(save_interval);
-        elapsed += save_interval;
+        /* Only counted while cleanup is on: it is reset only by the cleanup branch. */
+        if (cleanup_enabled) elapsed += save_interval;
 
         if (!server->cache_bg_running) break;
 

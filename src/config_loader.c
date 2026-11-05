@@ -181,6 +181,21 @@ static bool is_codex_token(const char *s) {
     return true;
 }
 
+/* atoi() for every input where atoi is defined (glibc: (int)strtol(s, NULL, 10) -
+ * leading isspace, optional sign, digits, the rest ignored); a value outside the
+ * int range saturates instead of being undefined. *plain is false when there are
+ * no digits, characters follow them, or the value saturated. */
+static int atoi_saturating(const char *value, bool *plain) {
+    char *end = NULL;
+    errno = 0;
+    long n = strtol(value, &end, 10);
+    bool saturated = errno == ERANGE || n > INT_MAX || n < INT_MIN;
+    if (n > INT_MAX) n = INT_MAX;
+    if (n < INT_MIN) n = INT_MIN;
+    *plain = end != value && *end == '\0' && !saturated;
+    return (int)n;
+}
+
 /* Invalid values remain invalid instead of silently enabling unlimited work. */
 static int positive_integer(const char *value) {
     if (!value || !*value) return -1;
@@ -538,9 +553,17 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         } else if (strcmp(key, "TRANS_CACHE_CLEANUP_ENABLED") == 0) {
             config->cache_cleanup_enabled = (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
         } else if (strcmp(key, "TRANS_CACHE_CLEANUP_DAYS") == 0) {
-            config->cache_cleanup_days = atoi(value);
+            /* atoi-compatible (an existing "120days" keeps meaning 120); values
+             * too large for int saturate - they mean "never" rather than wrapping
+             * into a cutoff that deletes everything. */
+            bool plain = true;
+            config->cache_cleanup_days = atoi_saturating(value, &plain);
             if (config->cache_cleanup_days <= 0) {
                 config->cache_cleanup_days = 60;  /* Default */
+            }
+            if (!plain) {
+                LOG_INFO("Warning: TRANS_CACHE_CLEANUP_DAYS '%s' is not a plain integer in int range; using %d\n",
+                         value, config->cache_cleanup_days);
             }
         } else if (strcmp(key, "REASONING_EFFORT") == 0) {
             free(config->reasoning_effort);

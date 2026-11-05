@@ -2,6 +2,7 @@
 #define TRANS_CACHE_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <time.h>
 #include <pthread.h>
 #include "config_loader.h"  /* For CacheBackendType */
@@ -189,6 +190,15 @@ int trans_cache_save(TransCache *cache);
 
 /* Cleanup old cache entries (older than days_threshold) */
 int trans_cache_cleanup(TransCache *cache, int days_threshold);
+
+/* Cleanup arithmetic in 64 bits (PLAN_CLEANUP_DAYS_AND_NUL.md section 3); both are
+ * defined for every argument. An entry is expired when last_used < cutoff.
+ * The cutoff is now - days * 86400, saturated to the int64 range. */
+int64_t trans_cache_cutoff(int64_t now, int days);
+
+/* Background cleanup check interval in seconds: days * 86400 / 10, clamped to
+ * [3600, INT_MAX - 3600] so the caller's "elapsed += 5" counter cannot overflow. */
+int trans_cache_cleanup_interval(int days);
 
 /* Get cache statistics */
 void trans_cache_stats(TransCache *cache,

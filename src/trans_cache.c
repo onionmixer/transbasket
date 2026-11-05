@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <limits.h>
 #include <openssl/evp.h>
 #include "trans_cache.h"
 #include "cache_backend_text.h"
@@ -286,6 +287,22 @@ int trans_cache_cleanup(TransCache *cache, int days_threshold) {
     pthread_rwlock_unlock(&cache->lock);
 
     return result;
+}
+
+#define SECONDS_PER_DAY 86400
+
+int64_t trans_cache_cutoff(int64_t now, int days) {
+    int64_t span = (int64_t)days * SECONDS_PER_DAY;   /* |span| <= 1.86e14, cannot overflow */
+    if (span > 0 && now < INT64_MIN + span) return INT64_MIN;
+    if (span < 0 && now > INT64_MAX + span) return INT64_MAX;
+    return now - span;
+}
+
+int trans_cache_cleanup_interval(int days) {
+    int64_t interval = (int64_t)days * SECONDS_PER_DAY / 10;
+    if (interval < 3600) return 3600;
+    if (interval > INT_MAX - 3600) return INT_MAX - 3600;
+    return (int)interval;
 }
 
 /* Get cache statistics */

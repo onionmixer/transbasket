@@ -878,8 +878,7 @@ static int sqlite_backend_cleanup(void *backend_ctx, int days_threshold) {
     SqliteBackendContext *ctx = (SqliteBackendContext*)backend_ctx;
 
     /* Calculate threshold timestamp */
-    time_t now = time(NULL);
-    time_t threshold_time = now - (days_threshold * 24 * 60 * 60);
+    int64_t threshold_time = trans_cache_cutoff((int64_t)time(NULL), days_threshold);
 
     /* Bind threshold parameter */
     sqlite3_reset(ctx->stmt_delete_old);
@@ -935,8 +934,7 @@ static void sqlite_backend_stats(void *backend_ctx,
 
     /* Get expired entries (last_used < threshold) */
     if (expired_entries) {
-        time_t now = time(NULL);
-        time_t threshold_time = now - (days_threshold * 24 * 60 * 60);
+        int64_t threshold_time = trans_cache_cutoff((int64_t)time(NULL), days_threshold);
 
         sqlite3_stmt *stmt = NULL;
         const char *sql = "SELECT COUNT(*) FROM trans_cache WHERE last_used < ?;";

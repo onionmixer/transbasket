@@ -117,6 +117,13 @@ test-source-hint-store: directories
 	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $(TEST_SANITIZERS) -o $(SOURCE_HINT_STORE_BIN) tests/test_source_hint_store.c src/trans_cache.c src/cache_backend_text.c src/cache_backend_sqlite.c src/utils.c -lcjson -lcrypto -luuid -lsqlite3
 	$(SOURCE_HINT_STORE_BIN)
 
+# Cleanup-days arithmetic, both backends, cache_tool arguments and config parsing
+# (PLAN_CLEANUP_DAYS_AND_NUL.md section 5 V5); expected values come from python.
+CLEANUP_DAYS_BIN ?= $(OBJ_DIR)/test_cleanup_days
+test-cleanup-days: all
+	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $(TEST_SANITIZERS) -o $(CLEANUP_DAYS_BIN) tests/test_cleanup_days.c src/trans_cache.c src/cache_backend_text.c src/cache_backend_sqlite.c src/utils.c -lcjson -lcrypto -luuid -lsqlite3
+	python3 tests/test_cleanup_days.py $(CLEANUP_DAYS_BIN) ./$(CACHE_TOOL) ./$(TARGET)
+
 # Differential test of the strict structured-output validator against tests/strict_json_ref.py.
 STRICT_JSON_TEST_BIN ?= $(OBJ_DIR)/test_strict_json
 test-strict-json: directories
@@ -139,4 +146,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days

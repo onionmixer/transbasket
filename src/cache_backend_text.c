@@ -594,8 +594,7 @@ static int text_backend_cleanup(void *backend_ctx, int days_threshold) {
 
     TextBackendContext *ctx = (TextBackendContext*)backend_ctx;
 
-    time_t now = time(NULL);
-    time_t threshold_time = now - (days_threshold * 24 * 60 * 60);
+    int64_t threshold_time = trans_cache_cutoff((int64_t)time(NULL), days_threshold);
 
     int removed_count = 0;
     size_t write_idx = 0;
@@ -604,7 +603,7 @@ static int text_backend_cleanup(void *backend_ctx, int days_threshold) {
     for (size_t i = 0; i < ctx->size; i++) {
         CacheEntry *entry = ctx->entries[i];
 
-        if (entry->last_used < threshold_time) {
+        if ((int64_t)entry->last_used < threshold_time) {
             /* Expired entry - free memory */
             free(entry->source_text);
             free(entry->translated_text);
@@ -634,8 +633,7 @@ static void text_backend_stats(void *backend_ctx,
 
     TextBackendContext *ctx = (TextBackendContext*)backend_ctx;
 
-    time_t now = time(NULL);
-    time_t threshold_time = now - (days_threshold * 24 * 60 * 60);
+    int64_t threshold_time = trans_cache_cutoff((int64_t)time(NULL), days_threshold);
 
     size_t total = ctx->size;
     size_t active = 0;
@@ -648,7 +646,7 @@ static void text_backend_stats(void *backend_ctx,
             active++;
         }
 
-        if (entry->last_used < threshold_time) {
+        if ((int64_t)entry->last_used < threshold_time) {
             expired++;
         }
     }
