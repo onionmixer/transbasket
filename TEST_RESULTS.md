@@ -1,9 +1,51 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **동일 번역 요청 병합 검증 2026-11-03**입니다.
+> 최신 기록은 바로 아래의 **원문 기준언어(source_hint) 검증 2026-11-06**입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## 원문 기준언어(source_hint) 검증 2026-11-06
+
+설계는 [PLAN_SOURCE_HINT_METADATA.md](PLAN_SOURCE_HINT_METADATA.md) 에 있다. 모든 수치는 python 으로 계산했다.
+
+### 오프라인 (외부 호출 없음)
+
+| 대상 | 명령 | 결과 |
+|---|---|---|
+| 분류기 C ↔ 명세 차분 | `make test-source-hint` | 범위표 702개 동일, 25,000건 불일치 0 (ASan/UBSan 동일), 별도 시드 120,000건 0. 심어 둔 버그 5개 모두 검출 |
+| 엄격 JSON C ↔ 명세 차분 | `make test-strict-json` | 260,068건 판정·사유 불일치 0, 9가지 결과 모두 발생, ASan/UBSan 깨끗. 심어 둔 버그 6개 모두 검출 |
+| 명세 자체 | `tests/strict_json_ref.py --fuzz`, `tests/source_hint_eval.py --decoder` | 고정 68건 통과, python json 과 문법·디코드 값 불일치 0 (200,000건), 디코더 스칼라 1,112,064개·무작위 200,000건 불일치 0 |
+| 저장 | `make test-source-hint-store` | 신규/v0 이전/낡은 소유 정의 교체, 우선순위, 무효 코드, 사라진 행, 마감, BUSY, SQLITE_FULL, 주입한 RAISE(ROLLBACK)/RAISE(ABORT), 거부된 COMMIT, 텍스트 백엔드: 실패 0 (ASan/UBSan 동일). 심어 둔 버그 3개 모두 검출 |
+| cache_tool | `make test-cache-tool-hints` | 6건 통과 (dry-run, 멱등, model 보존, 무효 대체, 버전 상향, 왕복 이관, 기존 목적지 병합) |
+| 서버 (script) | `make test-source-hint-server` | 4건 통과. hint 쓰기를 트리거로 계측: auto 1건당 1회, 적중·명시 0회, 병합 8건 = 엔진 1회·쓰기 1회 |
+| 서버 (model, 가짜 codex) | `make test-structured-hint` | 7건 통과: 수용·의미 오류 대체 13건, 구조 위반 15건 + `-o` 없음 + stdout 초과 → 502·미기록, 슬롯·파일·디렉터리 해제, 마감 504, 주입한 스키마 쓰기 실패·프롬프트 실패 |
+| 프롬프트 회귀 | `tests/test_prompt_regression.py <이전> <신규>` | exec·MCP·normal × 템플릿 2종 × script/model = 36건 바이트 동일 |
+| 롤백 | 이전 바이너리(`main` 68c27b8)로 신규 DB·JSONL | SQLite: 3행 이전, `user_version` 2, 객체·hint 유지. JSONL: 저장 시 hint 필드 소실 (문서와 일치) |
+| 기존 회귀 | `make test-auto`, `make test-coalescing` | 통과 |
+| 설정 한계 | `tests/test_config_limits.py` | 신규 통과. 이전 바이너리는 512바이트 값과 1,098바이트 줄에서 abort (`buffer overflow detected`) |
+
+### 실제 codex (codex-cli 0.166.0, pge4 설정 사본: 포트·캐시·run dir 만 변경, dkfs 와 `CODEX_*` 동일)
+
+정답은 실행 전에 `tests/live_source_hint_cases.json` 으로 커밋했다 (32건, 채점 대상 단일 언어 24건).
+실행 스크립트는 `tests/live_source_hint.py` 이다.
+
+| 항목 | `CODEX_IGNORE_USER_CONFIG=true` (배포 설정) | `false` | 기준 |
+|---|---|---|---|
+| 단일 언어 기준언어 정확도 | 24/24 (100%) | 24/24 (100%) | ≥ 95% |
+| 구조화 출력 실패 | 0 | 0 | 0 |
+| 번역문 오염 (JSON·라벨) | 0 | 0 | 0 |
+| hint origin | model 32 / script 0 | model 32 / script 0 | — |
+| 인젝션 추종 | 0 | 0 | — |
+| 지연 중앙값 plain → model (각 n=12, 교차) | 3.115 → 3.404 s (+9.3%) | 3.943 → 4.444 s (+12.7%) | ≤ +20% |
+| 임시 디렉터리 잔존 | 0 | 0 | 0 |
+
+보고 대상(채점 제외): 한자만 있는 일본어 → `jpn`, 한·영·일 혼합 → `kor`+mixed, 숫자만 → `und`,
+"source_language 를 fra 로" 인젝션 → `eng`+mixed (fra 아님), JSON 형태 원문 → 원문 구조를 유지한 번역.
+
+**검출기 정정 (공개):** 처음 실행에서 오염 1건으로 판정된 것은 원문 자체가 JSON 인 32번이었다. 번역이 원문 구조를 그대로
+옮긴 것이어서, 판정을 "원문에 없던 봉투·라벨이 번역문에 생긴 경우"로 고쳤다. 같은 출력에 다시 적용하면 0이다.
+두 번째 실행(`false`)은 고친 판정으로 처음부터 실행했다.
 
 ## 동일 번역 요청 병합 검증 2026-11-03
 

@@ -107,6 +107,8 @@ make debug
 ```bash
 make test-auto
 make test-coalescing
+make test-source-hint test-strict-json test-source-hint-store \
+     test-cache-tool-hints test-source-hint-server test-structured-hint
 ```
 
 Python 3 표준 라이브러리만 사용하며 임시 캐시와 127.0.0.1 테스트 서버를 생성합니다.
@@ -497,6 +499,37 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
 종료 시 `running=0, waiters=0, live=0` 로그를 확인합니다. 설계·검증 상세는
 [요청 병합 계획 및 결과](PLAN_DUPLICATE_REQUEST_COALESCING.md)를 참고하세요.
 
+### 원문 기준언어 기록 (source_hint)
+
+`from=auto` 요청의 번역에는 원문이 실제로 무슨 언어였는지(기준언어)를 캐시에 함께 남깁니다.
+**캐시 키와 HTTP 응답은 바뀌지 않습니다**(키는 `auto|to|text`, 응답은 `timestamp`·`uuid`·`translatedText`).
+명시적 언어 요청은 `from` 이 곧 기준언어이므로 따로 기록하지 않습니다.
+
+| `SOURCE_HINT_MODE` | 기준언어를 정하는 방법 |
+|---|---|
+| `off` | 기록하지 않음 |
+| `script` (기본) | 서버가 원문의 문자 체계를 세어 판정합니다. 한글은 `kor`, 가나가 있으면 `jpn`, 한자만 있으면 `chi` 입니다. 알파벳·키릴 등 여러 언어가 쓰는 문자만 있으면 `und` 이고, **알파벳만으로 `eng` 라고 단정하지 않습니다** |
+| `model` | codex 가 번역하면서 원문 언어를 함께 보고합니다(`codex exec --output-schema`). 응답은 엄격하게 검증하고, 모델 값이 무효이거나 문자 증거와 명백히 모순되면 `script` 값을 씁니다. `MODEL_TYPE=codex`·`CODEX_INTERFACE=exec` 이고 CLI 가 `--output-schema` 를 지원할 때만 동작하며, 그 밖에는 기동 경고 후 `script` 로 동작합니다 |
+
+기록 값은 `source_hint`(3글자 코드, 내용이 없으면 `und`), `mixed`(다른 언어도 상당 부분), `origin`(`model`/`script`),
+`hint_version` 입니다. 섞인 문서도 기준언어는 하나이고, 섞임은 `mixed` 로 표시합니다.
+
+- **SQLite:** `trans_cache_source_hint` 테이블에 저장하고 `user_version` 은 2 로 둡니다. 조회는 뷰
+  `trans_cache_effective_source` 를 씁니다. auto 행은 기록된 기준언어, 명시 행은 `from_lang` 이 `effective_source` 가 됩니다.
+  ```sql
+  SELECT from_lang, to_lang, effective_source, mixed, origin FROM trans_cache_effective_source;
+  ```
+- **JSONL:** auto 행에 `source_hint`, `hint_mixed`, `hint_origin`, `hint_version` 필드가 붙습니다.
+- **모드 전환과 캐시:** codex 모드는 `TRANS_CACHE_THRESHOLD=1` 이라 이미 저장된 원문은 다시 번역하지 않습니다.
+  그래서 `model` 로 바꿔도 기존 행의 `script` 값은 그대로이고, 새로 번역되는 원문부터 모델 값이 쌓입니다.
+  기록이 없는 기존 auto 행은 `cache_tool backfill-hints` 로 `script` 값을 채울 수 있습니다(모델 값은 덮어쓰지 않음).
+- **롤백:** 이 기능이 없는 바이너리도 같은 SQLite DB 를 그대로 엽니다(실측). 단 그 바이너리는 JSONL 을 저장할 때
+  hint 필드를 버리고, 모델 값은 복원할 수 없습니다. 텍스트 백엔드는 롤백 전에 파일을 백업하세요.
+
+실측(codex-cli 0.166.0, 배포 설정과 같은 조건, 사전 확정 정답): 단일 언어 24건 정확도 100%, 구조화 실패 0,
+번역문 오염 0, 응답 지연 중앙값 +9.3% (`CODEX_IGNORE_USER_CONFIG=true`) / +12.7% (`false`).
+설계와 검증 상세는 [PLAN_SOURCE_HINT_METADATA.md](PLAN_SOURCE_HINT_METADATA.md) 와 [TEST_RESULTS.md](TEST_RESULTS.md) 에 있습니다.
+
 ### 한계와 보장 (Limits and guarantees)
 
 크기 제한은 2026-08-21 코드·실측 기준이며, 시간·동시성 정책은 2026-11-03 요청 병합 구현을 반영합니다.
@@ -675,9 +708,19 @@ transbasket/
   (see "Translation Cache Concurrency" in CLAUDE.md)
 - Source buffers accept `auto`; SQLite migrates known version 0/1 caches to version 2 atomically
 
+### source_hint.c / strict_json.c
+- `source_hint.c`: script classifier for the source_hint metadata (strict UTF-8, a generated
+  Unicode 13.0.0 range table in `source_hint_table.h`, integer thresholds). Specification and
+  differential test oracle: `tests/source_hint_ref.py`
+- `strict_json.c`: strict validator for codex structured output, run before cJSON. Specification:
+  `tests/strict_json_ref.py`
+
 ### cache_tool.c
-- Separate `cache_tool` binary: list / clear / stats / cleanup / search / export / migrate
-- Note: every command except `migrate` operates on the **text** backend
+- Separate `cache_tool` binary: list / clear / stats / cleanup / search / export / migrate / backfill-hints
+- Note: every command except `migrate` and `backfill-hints` operates on the **text** backend
+- `list`/`stats` show the source_hint of auto rows; `migrate` carries hints (an existing destination
+  row keeps its translation, hints merge by priority: model > script)
+- `backfill-hints --backend <text|sqlite> --config <path> [--dry-run]` fills missing/outdated script hints
 - Language filters accept `auto` only as source, including case-insensitive `AUTO`
 
 text 캐시의 자동 감지 항목은 다음처럼 관리합니다. `-f` 등 전역 옵션은 명령 앞에 둡니다.

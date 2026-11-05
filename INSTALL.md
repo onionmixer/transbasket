@@ -231,7 +231,32 @@ SIGTERM/SIGINT는 실행 취소와 대기 해제 후 종료하며, SIGHUP 캐시
 오프라인 검증은 `make test-coalescing`과 `make test-auto`입니다. 실제 모델 품질을 검사하는 명령은 아닙니다.
 새 normal 경로는 빈 번역문이나 content가 없는 응답을 502로 처리하므로 잘못된 결과가 캐시에 저장되지 않습니다.
 
-## 10. 문제 해결
+## 10. 원문 기준언어(source_hint) 기능으로 업그레이드
+
+1. **백업:** SQLite 캐시와 JSONL 캐시를 복사해 둡니다.
+2. 새 바이너리로 기동하면 SQLite 캐시에 `trans_cache_source_hint`·`trans_cache_hint_code` 테이블, 삭제 트리거, 뷰
+   `trans_cache_effective_source` 가 만들어집니다. `user_version` 은 2 그대로이고 기존 행은 바뀌지 않습니다.
+3. `SOURCE_HINT_MODE` 를 정합니다 (기본 `script`). `model` 은 `MODEL_TYPE="codex"`·`CODEX_INTERFACE="exec"` 와
+   `--output-schema` 를 지원하는 codex 가 필요합니다. 기동 로그에 `Warning: SOURCE_HINT_MODE="model" ...` 이 보이면
+   조건이 맞지 않아 `script` 로 동작 중인 것입니다.
+4. (선택) 기존 auto 행에 기준언어 채우기:
+   ```bash
+   ./cache_tool backfill-hints --backend sqlite --config <캐시 DB> --dry-run   # 건수만 확인
+   ./cache_tool backfill-hints --backend sqlite --config <캐시 DB>
+   ```
+5. 확인:
+   ```bash
+   sqlite3 <캐시 DB> "SELECT origin, effective_source, count(*) FROM trans_cache_effective_source WHERE from_lang='auto' GROUP BY 1,2;"
+   ```
+
+**롤백:** 이전 바이너리는 같은 SQLite DB 를 그대로 엽니다. 롤백 중 새로 쌓인 auto 행에는 기준언어가 없으므로,
+다시 올린 뒤 `backfill-hints` 로 채울 수 있습니다. **텍스트(JSONL) 캐시는 이전 바이너리가 저장할 때 hint 필드를 모두 버리고,
+모델 값은 복원할 수 없으므로** 롤백 전에 백업을 따로 보관합니다.
+
+**설정 줄 길이:** 값이 511바이트를 넘거나 한 줄이 1,023바이트를 넘으면 그 줄은 경고 후 무시됩니다
+(예전에는 스택 버퍼를 넘어 기동 시 abort 했습니다).
+
+## 11. 문제 해결
 
 **빌드 실패 (라이브러리 없음)**
 ```bash
