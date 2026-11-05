@@ -41,8 +41,10 @@ static char *trim_whitespace(char *str) {
     return str;
 }
 
-/* Parse a single configuration line */
-static int parse_config_line(const char *line, char *key, char *value) {
+/* Parse a single configuration line. Returns 1 for KEY=value, 0 for an empty
+ * line or comment, -1 if it does not parse, -2 if the key or the value does not
+ * fit its buffer (it used to be copied anyway: a stack buffer overflow). */
+static int parse_config_line(const char *line, char *key, size_t key_size, char *value, size_t value_size) {
     if (!line || !key || !value) {
         return -1;
     }
@@ -69,14 +71,18 @@ static int parse_config_line(const char *line, char *key, char *value) {
         return -1;
     }
 
+    size_t key_len = (size_t)(matches[1].rm_eo - matches[1].rm_so);
+    size_t value_len = (size_t)(matches[3].rm_eo - matches[3].rm_so);
+    if (key_len >= key_size || value_len >= value_size) {
+        return -2;
+    }
+
     /* Extract key */
-    int key_len = matches[1].rm_eo - matches[1].rm_so;
-    strncpy(key, trimmed + matches[1].rm_so, key_len);
+    memcpy(key, trimmed + matches[1].rm_so, key_len);
     key[key_len] = '\0';
 
     /* Extract value */
-    int value_len = matches[3].rm_eo - matches[3].rm_so;
-    strncpy(value, trimmed + matches[3].rm_so, value_len);
+    memcpy(value, trimmed + matches[3].rm_so, value_len);
     value[value_len] = '\0';
 
     return 1;
@@ -401,8 +407,20 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
 
     while (fgets(line, sizeof(line), fp)) {
         line_num++;
-        int parse_result = parse_config_line(line, key, value);
+        /* A physical line longer than the buffer would otherwise be split and its
+         * remainder parsed as a line of its own: skip the whole line instead. */
+        if (!strchr(line, '\n') && !feof(fp)) {
+            int ch;
+            while ((ch = fgetc(fp)) != EOF && ch != '\n') { /* discard the rest */ }
+            LOG_INFO("Warning: line %d is longer than %d bytes and was ignored\n", line_num, MAX_LINE_LENGTH - 1);
+            continue;
+        }
+        int parse_result = parse_config_line(line, key, sizeof(key), value, sizeof(value));
 
+        if (parse_result == -2) {
+            LOG_INFO("Warning: line %d: key or value longer than %d bytes, ignored\n", line_num, MAX_VALUE_LENGTH - 1);
+            continue;
+        }
         if (parse_result < 0) {
             LOG_INFO( "Warning: Failed to parse line %d: %s\n", line_num, line);
             continue;
