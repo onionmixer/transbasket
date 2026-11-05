@@ -13,6 +13,7 @@ Production-ready C implementation of the Transbasket translation server for opti
 - Translation cache (text / SQLite backends), keyed per language pair
 - Chinese script support: `zh-Hans` / `zh-Hant` translate and cache separately
 - Automatic source language: `from: "auto"` (normal and codex backends)
+- Concurrent duplicate requests share one translation and retain their own response IDs
 - Emoji and shortcode stripping (normal backend only - codex output is passed through)
 - RFC 3339 timestamp and UUID v4 validation
 - Graceful shutdown with signal handling
@@ -105,11 +106,12 @@ make debug
 
 ```bash
 make test-auto
+make test-coalescing
 ```
 
 Python 3 표준 라이브러리만 사용하며 임시 캐시와 127.0.0.1 테스트 서버를 생성합니다.
 외부 모델 호출 없이 API 계약, normal·codex 프롬프트, 캐시와 SQLite 이전을 검증합니다.
-2026-11-03 검증 결과는 9개 통과입니다. 실제 모델의 번역 품질 검증과는 별개이며,
+2026-11-03 검증 결과는 auto 9개, 요청 병합 통합 14개 및 C 모듈 검증 통과입니다. 실제 모델의 번역 품질 검증과는 별개이며,
 현재 설정의 TranslateGemma 호출은 503으로 실패했습니다.
 세부 범위와 남은 검증은 [TEST_RESULTS.md](TEST_RESULTS.md)를 참고하세요.
 
@@ -458,10 +460,47 @@ codex 호출 자체가 `CODEX_TIMEOUT` 을 넘기면 `504`, 그 밖의 codex 실
 
 ---
 
+### 동일 번역 요청 병합
+
+동일한 원문 언어·대상 언어·전처리 후 본문이 동시에 들어오면 번역 작업 하나만 실행합니다.
+먼저 `TRANS_CACHE_THRESHOLD`를 충족하는 캐시를 확인하고, 미달하거나 없으면 첫 요청이 번역하고
+후속 요청은 결과를 기다립니다. 성공·실패 결과를 모두에게 전달하고 대기 목록에서 작업을 제거합니다.
+각 응답은 자기 요청의 `uuid`·`timestamp`를 사용합니다(오류 응답의 timestamp는 현재 시각).
+
+캐시 횟수는 실제 번역 작업에서 한 번만 갱신합니다. 임계값이 3일 때 같은 요청 10개를 한 번에 받아
+번역 하나를 공유해도 최초 캐시 `count`는 1입니다. 이후 별도 작업에서도 같은 번역이 나오면 2, 3으로
+올라가며 다음 요청부터 캐시를 사용합니다. 결과가 달라지면 기존대로 1로 초기화합니다.
+완료 후에도 임계값이 미달이면 다음 요청은 새 번역 작업을 시작할 수 있습니다.
+
+`AUTO`·`auto`, 중국어 스크립트 별칭은 기존 정규화 결과에 따라 합쳐집니다. `auto`와 `eng`는 별개이며,
+UUID·timestamp는 병합 키에 포함하지 않습니다. 병합은 프로세스 하나 안에서만 동작합니다.
+캐시 저장에 실패해도 해당 작업의 결과는 참여 요청에 전달합니다. 실패 결과는 캐시에 저장하지 않습니다.
+엔진 재시도는 실행 작업 하나에서만 수행하므로, 재시도가 필요한 경우 upstream 시도는 여러 번일 수 있습니다.
+
+| 설정 | 기본값 | 의미 |
+|---|---|---|
+| `TRANSLATION_TOTAL_TIMEOUT` | `110` | 등록부터 번역까지 공유하는 전체 예산(초), 1~110 |
+| `INFLIGHT_MAX_KEYS` | `MAX_WORKERS` 값, 기본 30 | 동시에 실행하는 서로 다른 번역 키 수 |
+| `INFLIGHT_MAX_WAITERS` | `256` | 전체 대기 요청 수, 실행 요청 제외 |
+| `INFLIGHT_MAX_WAITERS_PER_KEY` | `64` | 한 작업의 대기 요청 수, 실행 요청 제외 |
+
+대기 수·키 수 제한 설정은 양의 정수여야 합니다. 상한 초과 요청은 503과 `Retry-After: 5`로 반환하며,
+캐시 적중·헬스체크는 번역 대기 한도에 넣지 않습니다. 키 수가 가득 차도 기존 작업의 대기 한도가 남으면 합류할 수 있습니다.
+대기는 연결별 스레드를 사용하므로 연결 수 자체를 줄이지는 않습니다.
+
+전체 예산은 재시도·백오프·codex 슬롯 대기·초기화·호출에 공통 적용하고, 후속 요청이 와도 연장하지 않습니다.
+normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 codex 슬롯 대기 실패는 기존대로 503입니다.
+서버 종료는 대기를 깨우고 엔진을 취소한 뒤 자원을 정리합니다. 첫 연결이 끊겨도 다른 참여 요청의 번역은 계속합니다.
+소켓 단절을 대기 중 즉시 감지하지 못할 수 있어 대기 자원은 완료·마감·종료 시 정리됩니다.
+
+로그의 `Translation group ... started/joined/flushed`와 요청별 `role`, `elapsed_ms`로 공유 실행을 확인할 수 있습니다.
+종료 시 `running=0, waiters=0, live=0` 로그를 확인합니다. 설계·검증 상세는
+[요청 병합 계획 및 결과](PLAN_DUPLICATE_REQUEST_COALESCING.md)를 참고하세요.
+
 ### 한계와 보장 (Limits and guarantees)
 
-아래 값은 2026-08-21 기준으로 코드와 실측으로 확인된 값입니다. 상수는 `src/http_client.c`,
-`src/json_handler.c`, `src/http_server.c` 에 하드코딩되어 있으며 설정으로 바꿀 수 없습니다.
+크기 제한은 2026-08-21 코드·실측 기준이며, 시간·동시성 정책은 2026-11-03 요청 병합 구현을 반영합니다.
+크기 상수는 `src/http_client.c`, `src/json_handler.c`에 있고, 전체 번역 시간과 병합 한도는 위 설정으로 조정합니다.
 
 #### 크기 한계
 
@@ -487,18 +526,20 @@ codex 호출 자체가 `CODEX_TIMEOUT` 을 넘기면 `504`, 그 밖의 codex 실
 
 | 항목 | 값 | 비고 |
 |------|-----|------|
-| HTTP 연결 타임아웃 | 120초 (MHD) | 설정 불가 |
-| `normal` upstream 호출 타임아웃 | 60초/시도 | 최대 3회 시도, 백오프 `2^attempt` 초 (5xx·타임아웃만 재시도) |
+| HTTP 연결 타임아웃 | 비활성 120초 (MHD) | 애플리케이션의 전체 작업 마감과 별개 |
+| 전체 번역 예산 | `TRANSLATION_TOTAL_TIMEOUT`, 기본 110초 | 슬롯 대기·초기화·재시도·백오프·호출에서 공유 |
+| `normal` upstream 호출 타임아웃 | 최대 60초/시도와 남은 전체 예산 중 작은 값 | 최대 3회 시도, 백오프 `2^attempt` 초, 전체 마감 후 추가 시도 없음 |
 | `codex` 호출 타임아웃 | `CODEX_TIMEOUT` (기본 100초) | 반드시 120초보다 작아야 함. 초과 시 `504` |
-| `codex` 동시 실행 슬롯 대기 | `CODEX_TIMEOUT` 까지 대기 | 대기 실패 시 `503` |
+| `codex` 동시 실행 슬롯 대기 | `CODEX_TIMEOUT`과 남은 전체 예산 이내 | 슬롯 대기 실패 `503`, 전체 작업 마감 `504` |
 
 #### 동시성
 
 - 연결마다 전용 스레드가 생성됩니다(`MHD_USE_THREAD_PER_CONNECTION`).
 - **`MAX_WORKERS` 는 동시 연결 수를 제한하지 않습니다.** MHD 에 `CONNECTION_LIMIT`/`THREAD_POOL_SIZE` 를
-  전달하지 않기 때문이며, 이 값은 `CODEX_MAX_CONCURRENCY` 미설정 시의 codex 동시 실행 수 기본값으로만 쓰입니다.
+  전달하지 않기 때문입니다. 이 값은 `INFLIGHT_MAX_KEYS`와 `CODEX_MAX_CONCURRENCY` 미설정 시의 기본값입니다.
+- 서로 다른 활성 번역 키는 `INFLIGHT_MAX_KEYS`로 제한하며, 같은 키의 요청은 한 작업을 공유합니다.
 - codex 백엔드에서 **실제로 동시에 번역되는 요청 수는 `CODEX_MAX_CONCURRENCY`** 입니다. 초과분은 즉시 거부되지 않고
-  슬롯을 기다리며, `CODEX_TIMEOUT` 을 넘기면 `503` 입니다.
+  슬롯을 기다립니다. 병합 대기 한도와 전체 작업 마감도 함께 적용됩니다.
 - **요청 간 격리는 보장됩니다.** 응답의 `uuid`/`timestamp` 는 그 요청의 값이며, 다른 요청의 번역문이 섞이지 않습니다.
   (실측: 서로 다른 12개 원문을 동시 200 스레드로 1,200건 호출 시 불일치 0건, keep-alive 연결 재사용 240건 불일치 0건,
   codex 실호출 동시 8건 8/8 일치)
@@ -541,18 +582,22 @@ transbasket/
 ├── include/                    # Header files
 │   ├── utils.h  config_loader.h  json_handler.h
 │   ├── http_client.h  http_server.h  codex_exec.h  mcp_client.h
+│   ├── inflight_translation.h  translation_control.h
 │   ├── language_table.h
 │   └── trans_cache.h  cache_backend_text.h  cache_backend_sqlite.h
 ├── src/                        # Source files
 │   ├── main.c  utils.c  config_loader.c  json_handler.c
 │   ├── http_client.c  http_server.c  codex_exec.c  mcp_client.c
+│   ├── inflight_translation.c   # Shared running translations and waiter lifetime
 │   ├── language_table.c
 │   ├── trans_cache.c  cache_backend_text.c  cache_backend_sqlite.c
 │   └── cache_tool.c            # Cache management tool (separate binary)
 ├── tests/
 │   ├── test_client.py          # Manual client (uses the configured real server)
 │   ├── test_source_auto.py     # Offline integration tests (make test-auto)
-│   └── fake_codex_auto.py      # exec/MCP fixture; no external model calls
+│   ├── fake_codex_auto.py      # exec/MCP fixture; no external model calls
+│   ├── test_request_coalescing.py # Concurrent HTTP/codex integration tests
+│   └── test_inflight_translation.c # Lifecycle, limits, failure and race checks
 ├── obj/                        # Object files (generated)
 ├── transbasket                 # Server binary (generated)
 └── cache_tool                  # Cache tool binary (generated)
@@ -591,6 +636,7 @@ transbasket/
 - Prompt building: `{TEXT}`-style templates (TranslateGemma) and the legacy
   `[TARGET LANGUAGE]` / `{{LANGUAGE_TO}}` form
 - `auto` branch bypasses source language lookup and resolves only the target
+- Shared monotonic deadline/cancellation across retries, codex slot waits and I/O
 - Error handling and status code mapping
 
 ### codex_exec.c
@@ -612,6 +658,11 @@ transbasket/
 - Health check endpoint
 - Translation endpoint
 - Error response handling
+
+### inflight_translation.c
+- One owner per normalized language pair and cleaned source text, with cache recheck
+- Immutable result/error shared by all waiters, independent request UUID/timestamp responses
+- Bounded admission, monotonic waiting, shutdown wakeup and reference-counted cleanup
 
 ### language_table.c
 - Loads `language_tables.conf` (code→name entries and ISO 639-2↔639-1 mappings)

@@ -25,7 +25,7 @@ extern char **environ;
 #define MCP_RBUF_INIT     8192
 #define MCP_RBUF_MAX      (4 * 1024 * 1024)   /* hard cap on stdout assembly */
 #define MCP_ERRBUF_MAX    4096
-#define MCP_POLL_SLICE_MS 1000
+#define MCP_POLL_SLICE_MS 100
 
 /* ---- small helpers -------------------------------------------------------- */
 
@@ -52,11 +52,12 @@ static int set_nonblock(int fd) {
 static int write_all(MCPClient *c, const char *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
+        if (!translation_remaining_ms(c->control) || now_ms() >= c->io_deadline_ms) return -1;
         ssize_t n = write(c->fd_in, buf + off, len - off);
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* fd_in is blocking; EAGAIN is unexpected, but spin briefly */
+                /* Nonblocking stdin: never let a child that stops reading pin us. */
                 struct pollfd p = { .fd = c->fd_in, .events = POLLOUT };
                 poll(&p, 1, 100);
                 continue;
@@ -108,7 +109,7 @@ static int rbuf_append(MCPClient *c, const char *data, size_t len) {
  * child blocking on a full stderr pipe. */
 static void drain_stderr(MCPClient *c) {
     char tmp[4096];
-    for (;;) {
+    for (int i = 0; i < 16; i++) {
         ssize_t n = read(c->fd_err, tmp, sizeof(tmp));
         if (n > 0) {
             size_t room = (c->errbuf_len < MCP_ERRBUF_MAX)
@@ -135,11 +136,12 @@ static void drain_stderr(MCPClient *c) {
 static cJSON *wait_for_id(MCPClient *c, int want_id, int timeout_sec,
                           bool *timed_out, char **err_out) {
     if (timed_out) *timed_out = false;
-    long deadline = now_ms() + (long)timeout_sec * 1000;
+    (void)timeout_sec;
+    long deadline = c->io_deadline_ms;
 
     for (;;) {
         long remaining = deadline - now_ms();
-        if (remaining <= 0) {
+        if (remaining <= 0 || !translation_remaining_ms(c->control)) {
             if (timed_out) *timed_out = true;
             if (err_out) *err_out = strdup("codex MCP call timed out");
             return NULL;
@@ -165,7 +167,7 @@ static cJSON *wait_for_id(MCPClient *c, int want_id, int timeout_sec,
         if (pfd[0].revents & POLLIN) {
             char tmp[8192];
             bool got_eof = false;
-            for (;;) {
+            for (int reads = 0; reads < 16; reads++) {
                 ssize_t n = read(c->fd_out, tmp, sizeof(tmp));
                 if (n > 0) {
                     c->bytes_read += (size_t)n;
@@ -347,6 +349,7 @@ MCPClient *mcp_client_start(const char *bin) {
     set_cloexec(c->fd_in);
     set_cloexec(c->fd_out);
     set_cloexec(c->fd_err);
+    set_nonblock(c->fd_in);
     set_nonblock(c->fd_out);
     set_nonblock(c->fd_err);
 
@@ -366,6 +369,7 @@ fail:
 
 int mcp_initialize(MCPClient *c, int timeout_sec) {
     if (!c) return -1;
+    c->io_deadline_ms = now_ms() + (long)timeout_sec * 1000;
 
     int id = c->next_id++;
     cJSON *req = cJSON_CreateObject();
@@ -422,6 +426,7 @@ char *mcp_call_tool(MCPClient *c,
         if (err_out) *err_out = strdup("invalid arguments");
         return NULL;
     }
+    c->io_deadline_ms = now_ms() + (long)timeout_sec * 1000;
     if (!arguments) arguments = cJSON_CreateObject();
 
     int id = c->next_id++;
@@ -542,22 +547,20 @@ void mcp_client_stop(MCPClient *c) {
          * grandchild codex binary spawned by the `codex` node wrapper is also
          * terminated and not orphaned. waitpid loops tolerate EINTR. */
         kill(-c->pid, SIGTERM);
-        int reaped = 0;
-        for (int i = 0; i < 40 && !reaped; i++) {  /* ~2s */
-            int status;
-            pid_t r = waitpid(c->pid, &status, WNOHANG);
-            if (r == c->pid) { c->last_exit_status = status; reaped = 1; break; }
-            if (r < 0 && errno == EINTR) continue;
-            if (r < 0) break;  /* already reaped / error */
-            struct timespec ts = { 0, 50 * 1000 * 1000 };  /* 50ms */
-            nanosleep(&ts, NULL);
+        long grace = now_ms() + 2000;
+        long left = translation_remaining_ms(c->control);
+        if (grace > now_ms() + left) grace = now_ms() + left;
+        for (;;) {
+            siginfo_t info = {0};
+            int rc = waitid(P_PID, (id_t)c->pid, &info, WEXITED | WNOHANG | WNOWAIT);
+            if ((rc == 0 && info.si_pid == c->pid) || (rc < 0 && errno != EINTR) || now_ms() >= grace) break;
+            struct timespec delay = {0, 20 * 1000000};
+            nanosleep(&delay, NULL);
         }
-        if (!reaped) {
-            kill(-c->pid, SIGKILL);
-            int status;
-            while (waitpid(c->pid, &status, 0) < 0 && errno == EINTR) { /* retry */ }
-            c->last_exit_status = status;
-        }
+        kill(-c->pid, SIGKILL);
+        int status = -1;
+        while (waitpid(c->pid, &status, 0) < 0 && errno == EINTR) { /* retry */ }
+        c->last_exit_status = status;
     }
 
     free(c->rbuf);

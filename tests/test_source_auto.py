@@ -128,7 +128,7 @@ class AutoTests(unittest.TestCase):
                         time.sleep(0.02)
                 else:
                     self.fail("server startup timeout")
-                yield
+                yield process
             finally:
                 if process.poll() is None:
                     process.terminate()

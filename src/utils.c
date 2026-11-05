@@ -26,7 +26,8 @@ void get_log_timestamp(char *buffer, size_t size) {
     }
 
     time_t now = time(NULL);
-    struct tm *tm_local = localtime(&now);
+    struct tm local_storage;
+    struct tm *tm_local = localtime_r(&now, &local_storage);
 
     if (!tm_local) {
         snprintf(buffer, size, "[INVALID TIMESTAMP]");
@@ -415,7 +416,8 @@ int get_current_timestamp(char *timestamp_buf, size_t buf_size) {
     }
 
     time_t now = time(NULL);
-    struct tm *tm_utc = gmtime(&now);
+    struct tm utc_storage;
+    struct tm *tm_utc = gmtime_r(&now, &utc_storage);
 
     if (!tm_utc) {
         return -1;

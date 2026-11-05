@@ -94,4 +94,12 @@ check-deps:
 test-auto: all
 	python3 tests/test_source_auto.py
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto
+INFLIGHT_TEST_BIN ?= $(OBJ_DIR)/test_inflight
+test-inflight-unit: directories
+	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $(TEST_SANITIZERS) -o $(INFLIGHT_TEST_BIN) tests/test_inflight_translation.c src/inflight_translation.c src/trans_cache.c src/cache_backend_text.c src/cache_backend_sqlite.c src/utils.c -Wl,--wrap=strdup -lcjson -lcrypto -luuid -lsqlite3
+	$(INFLIGHT_TEST_BIN)
+
+test-coalescing: all test-inflight-unit
+	python3 tests/test_request_coalescing.py $(COALESCING_TESTS)
+
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing

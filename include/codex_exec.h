@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include "translation_control.h"
 
 /*
  * `codex exec` driver - the codex backend's default interface.
@@ -27,6 +28,7 @@ typedef struct {
     bool        ephemeral;         /* pass --ephemeral (no session files on disk) */
     bool        ignore_user_config;/* pass --ignore-user-config (no MCP servers, plugins, ...) */
     int         timeout_sec;
+    const TranslationControl *control;
 } CodexExecOptions;
 
 /* What the installed CLI offers, detected once at startup. */

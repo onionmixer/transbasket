@@ -35,6 +35,13 @@ typedef struct {
     size_t size;
 } CurlResponse;
 
+/* Curl calls this during transfer and while waiting for network progress. */
+static int translation_progress(void *context, curl_off_t total_down, curl_off_t down,
+                                curl_off_t total_up, curl_off_t up) {
+    (void)total_down; (void)down; (void)total_up; (void)up;
+    return translation_remaining_ms(context) == 0;
+}
+
 /* Curl write callback */
 static size_t transbasket_curl_write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
@@ -327,7 +334,6 @@ static char *handle_non_streaming_response(const char *response_data, const char
         /* Check if message object exists */
         if (!message_obj) {
             LOG_DEBUG("[%s] No message object in response\n", request_uuid);
-            result = strdup("nothing contents");
             cJSON_Delete(response_json);
             return result;
         }
@@ -337,7 +343,6 @@ static char *handle_non_streaming_response(const char *response_data, const char
         /* Check if content exists and is a string */
         if (!cJSON_IsString(content) || !content->valuestring) {
             LOG_DEBUG("[%s] No content in message object\n", request_uuid);
-            result = strdup("nothing contents");
             cJSON_Delete(response_json);
             return result;
         }
@@ -345,7 +350,6 @@ static char *handle_non_streaming_response(const char *response_data, const char
         result = strdup(content->valuestring);
     } else {
         LOG_DEBUG("[%s] No choices in response\n", request_uuid);
-        result = strdup("nothing contents");
     }
 
     cJSON_Delete(response_json);
@@ -638,7 +642,7 @@ void openai_translator_free(OpenAITranslator *translator) {
 static char *translate_via_openai(OpenAITranslator *translator, const char *from_lang,
                       const char *to_lang, const char *text,
                       const char *request_uuid, const char *timestamp,
-                      TranslationError *error) {
+                      TranslationError *error, const TranslationControl *control) {
     if (!translator || !from_lang || !to_lang || !text || !request_uuid || !timestamp) {
         if (error) {
             error->message = strdup("Invalid parameters");
@@ -668,6 +672,7 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
     int attempt;
 
     for (attempt = 1; attempt <= translator->max_retries; attempt++) {
+        if (!translation_remaining_ms(control)) break;
         CURL *curl = curl_easy_init();
         if (!curl) {
             LOG_DEBUG( "[%s] Failed to initialize curl\n", request_uuid);
@@ -792,7 +797,13 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_request);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, transbasket_curl_write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, translator->timeout);
+        long timeout_ms = translation_remaining_ms(control);
+        if (timeout_ms > translator->timeout * 1000L) timeout_ms = translator->timeout * 1000L;
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms > 0 ? timeout_ms : 1L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, translation_progress);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, control);
 
         /* Perform request */
         CURLcode res = curl_easy_perform(curl);
@@ -811,7 +822,7 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
             if (attempt < translator->max_retries) {
                 int backoff = (int)pow(2, attempt);
                 LOG_DEBUG( "[%s] Retrying in %d seconds...\n", request_uuid, backoff);
-                sleep(backoff);
+                if (!translation_pause(control, backoff * 1000L)) break;
                 continue;
             }
 
@@ -832,7 +843,7 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
             if (attempt < translator->max_retries) {
                 int backoff = (int)pow(2, attempt);
                 LOG_DEBUG( "[%s] Retrying in %d seconds...\n", request_uuid, backoff);
-                sleep(backoff);
+                if (!translation_pause(control, backoff * 1000L)) break;
                 continue;
             }
 
@@ -928,6 +939,17 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
         free(unescaped_text);
         free(cleaned_text);
         free(raw_translation);
+
+        if (result && !*result) {
+            free(result);
+            result = NULL;
+            if (error) {
+                error->message = strdup("Translation returned empty content");
+                error->retryable = false;
+                error->status_code = 0;
+            }
+            break;
+        }
 
         LOG_INFO("[%s] Translation completed (attempt %d/%d, mode: %s)\n",
                request_uuid, attempt, translator->max_retries,
@@ -1034,7 +1056,7 @@ static void save_debug_codex(const char *timestamp, const char *uuid,
 static char *translate_via_codex(OpenAITranslator *translator, const char *from_lang,
                                  const char *to_lang, const char *text,
                                  const char *request_uuid, const char *timestamp,
-                                 TranslationError *error) {
+                                 TranslationError *error, const TranslationControl *control) {
     Config *cfg = translator->config;
 
     /* 1. Instruction with language placeholders resolved, but WITHOUT injecting
@@ -1090,14 +1112,17 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
 
     LOG_INFO("[%s] Starting codex translation: %s -> %s\n", request_uuid, from_lang, to_lang);
 
-    /* 6. Acquire a concurrency slot (sem_timedwait, absolute CLOCK_REALTIME). */
+    /* 6. Acquire a slot with a monotonic budget and prompt shutdown checks. */
     bool sem_held = false;
     if (translator->codex_sem_inited) {
-        struct timespec deadline;
-        clock_gettime(CLOCK_REALTIME, &deadline);
-        deadline.tv_sec += cfg->codex_timeout;
+        int64_t slot_deadline = translation_now_ms() + cfg->codex_timeout * 1000L;
         int acq;
-        while ((acq = sem_timedwait(&translator->codex_sem, &deadline)) != 0 && errno == EINTR) { /* retry */ }
+        for (;;) {
+            acq = sem_trywait(&translator->codex_sem);
+            if (acq == 0) break;
+            if ((errno != EAGAIN && errno != EINTR) ||
+                translation_now_ms() >= slot_deadline || !translation_pause(control, 20)) break;
+        }
         if (acq != 0) {
             LOG_INFO("[%s] codex concurrency limit reached (slot wait timed out)\n", request_uuid);
             free(prompt);
@@ -1138,6 +1163,7 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
             .ephemeral = translator->codex_ephemeral,
             .ignore_user_config = cfg->codex_ignore_user_config,
             .timeout_sec = cfg->codex_timeout,
+            .control = control,
         };
         result = codex_exec_run(&opt, prompt, &call_err, &timed_out,
                                 cfg->debug ? &codex_stderr : NULL);
@@ -1148,7 +1174,7 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
     }
 
     for (int attempt = 1;
-         cfg->codex_interface == CODEX_INTERFACE_MCP && attempt <= 2 && !result;
+         cfg->codex_interface == CODEX_INTERFACE_MCP && attempt <= 2 && !result && translation_remaining_ms(control);
          attempt++) {
         MCPClient *cli = mcp_client_start(cfg->codex_bin);
         if (!cli) {
@@ -1157,6 +1183,7 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
             retryable = (attempt < 2);
             continue;  /* transient: retry */
         }
+        cli->control = control;
         if (mcp_initialize(cli, cfg->codex_timeout) != 0) {
             mcp_client_stop(cli);
             free(call_err);
@@ -1228,7 +1255,7 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
  * add a ModelType enum value, and add one row here. No other dispatch edits. */
 typedef char *(*TranslateFn)(OpenAITranslator *, const char *, const char *,
                              const char *, const char *, const char *,
-                             TranslationError *);
+                             TranslationError *, const TranslationControl *);
 
 typedef struct {
     ModelType   type;
@@ -1245,23 +1272,32 @@ static const TranslationBackend TRANSLATION_BACKENDS[] = {
 char *openai_translate(OpenAITranslator *translator, const char *from_lang,
                        const char *to_lang, const char *text,
                        const char *request_uuid, const char *timestamp,
-                       TranslationError *error) {
+                       TranslationError *error, const TranslationControl *control) {
     if (!translator || !translator->config) {
         if (error) { error->message = strdup("Invalid translator"); error->retryable = false; error->status_code = 0; }
         return NULL;
     }
 
     ModelType mt = translator->config->model_type;
+    TranslateFn translate = translate_via_openai;
     for (size_t i = 0; i < sizeof(TRANSLATION_BACKENDS) / sizeof(TRANSLATION_BACKENDS[0]); i++) {
-        if (TRANSLATION_BACKENDS[i].type == mt) {
-            return TRANSLATION_BACKENDS[i].translate(translator, from_lang, to_lang,
-                                                     text, request_uuid, timestamp, error);
+        if (TRANSLATION_BACKENDS[i].type == mt) { translate = TRANSLATION_BACKENDS[i].translate; break; }
+    }
+    char *result = NULL;
+    if (translation_remaining_ms(control))
+        result = translate(translator, from_lang, to_lang, text, request_uuid, timestamp, error, control);
+    if (!translation_remaining_ms(control)) {
+        free(result);
+        result = NULL;
+        if (error) {
+            free(error->message);
+            bool cancelled = translation_cancelled(control);
+            error->message = strdup(cancelled ? "Server shutting down" : "Translation deadline exceeded");
+            error->retryable = true;
+            error->status_code = cancelled || mt == MODEL_TYPE_NORMAL ? 503 : 504;
         }
     }
-
-    /* Unknown backend (config validation should prevent this): fall back to normal. */
-    LOG_INFO("[%s] Unknown MODEL_TYPE (%d), falling back to normal backend\n", request_uuid, (int)mt);
-    return translate_via_openai(translator, from_lang, to_lang, text, request_uuid, timestamp, error);
+    return result;
 }
 
 /* Free translated text */

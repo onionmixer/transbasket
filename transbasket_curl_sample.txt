@@ -382,3 +382,19 @@ curl --max-time 30 \
    SQLite version 0/1 caches migrate to version 2 on initialization. Back up before
    upgrading; an old binary must use the pre-upgrade backup or a separate cache.
    See INSTALL.md for the complete upgrade and rollback procedure.
+
+10. **Concurrent Duplicate Requests**:
+    Requests with the same normalized from/to and cleaned text share one running
+    translation, independent of UUID/timestamp. Eligible cache entries are checked
+    first using TRANS_CACHE_THRESHOLD. Followers receive the owner's result/error
+    with their own request IDs and do not raise the cache verification count.
+    Groups are flushed on success/failure; a new request may translate again if
+    the cache remains below threshold. Coalescing applies within one process.
+
+11. **Translation Budgets and Capacity**:
+    TRANSLATION_TOTAL_TIMEOUT defaults to 110 seconds (1..110), shared across
+    retries, backoff, codex slot wait, initialization and I/O. Normal total timeout
+    returns 503; codex total timeout returns 504. Capacity overflow returns 503
+    with Retry-After: 5. Configure INFLIGHT_MAX_KEYS, INFLIGHT_MAX_WAITERS and
+    INFLIGHT_MAX_WAITERS_PER_KEY as described in README.md. Missing or empty
+    normal upstream content returns 502 and is not cached.

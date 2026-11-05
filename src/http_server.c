@@ -163,6 +163,7 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
 
         if (!new_buffer) {
             free(buffer);
+            *con_cls = NULL;
             return MHD_NO;
         }
 
@@ -192,6 +193,11 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     }
 
     request_uuid = strdup(req->uuid);
+    if (!request_uuid) {
+        char *response = create_error_response("INTERNAL_ERROR", "Memory allocation failed", req->uuid);
+        free_translation_request(req);
+        return send_json_response(connection, response, MHD_HTTP_INTERNAL_SERVER_ERROR, false);
+    }
 
     /* Strip ANSI escape codes and control characters from text */
     size_t text_len = strlen(req->text);
@@ -252,116 +258,77 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     LOG_INFO("[%s] Translation request received: %s -> %s, text: %s",
             request_uuid, req->from_lang, req->to_lang, truncated_text);
 
-    /* Check cache first if enabled */
-    CacheEntry *cached = NULL;
-    if (server->cache) {
-        cached = trans_cache_lookup(server->cache, req->from_lang, req->to_lang, req->text);
-
-        if (cached && cached->count >= server->config->cache_threshold) {
-            /* Cache hit - use cached translation */
-            LOG_DEBUG("[%s] Cache hit (count: %d >= threshold: %d)",
-                    request_uuid, cached->count, server->config->cache_threshold);
-
-            /* Increment count */
-            trans_cache_update_count(server->cache, cached);
-
-            /* Create response with cached translation */
-            char *response_json = create_translation_response(req, cached->translated_text);
-
-            char truncated_result[TRUNCATE_BUFFER_SIZE];
-            truncate_text(cached->translated_text, truncated_result, TRUNCATE_DISPLAY_LENGTH, "...");
-            LOG_INFO("[%s] Translation from cache, result: %s", request_uuid, truncated_result);
-
-            trans_cache_entry_free(cached);
-            free(request_uuid);
-            free_translation_request(req);
-
-            return send_json_response(connection, response_json, MHD_HTTP_OK, false);
-        }
-
-        if (cached) {
-            LOG_DEBUG("[%s] Cache found but count insufficient (%d < %d), requesting API",
-                    request_uuid, cached->count, server->config->cache_threshold);
-        }
-    }
-
-    /* Perform translation via OpenAI API */
-    TranslationError trans_error = {0};
-    char *translated_text = openai_translate(
-        server->translator,
-        req->from_lang,
-        req->to_lang,
-        req->text,
-        request_uuid,
-        req->timestamp,
-        &trans_error
-    );
-
-    if (!translated_text) {
-        LOG_INFO("[%s] Translation error: %s", request_uuid,
-                trans_error.message ? trans_error.message : "Unknown error");
-
-        /* codex backend can express precise codes (e.g. 504 timeout) via
-         * status_code; normal backend keeps its existing retryable-based map. */
-        int status_code;
-        if (server->config->model_type == MODEL_TYPE_CODEX && trans_error.status_code != 0) {
-            status_code = trans_error.status_code;
-        } else {
-            status_code = trans_error.retryable ? MHD_HTTP_SERVICE_UNAVAILABLE : MHD_HTTP_BAD_GATEWAY;
-        }
-
-        char *error_json = create_error_response("TRANSLATION_ERROR",
-                                                 trans_error.message ? trans_error.message : "Translation failed",
-                                                 request_uuid);
-
-        trans_cache_entry_free(cached);
-        free(trans_error.message);
-        free(request_uuid);
-        free_translation_request(req);
-
-        return send_json_response(connection, error_json, status_code, trans_error.retryable);
-    }
-
-    /* Update cache with translation result */
-    if (server->cache) {
-        if (cached) {
-            /* Existing cache entry - check if translation matches */
-            if (strcmp(cached->translated_text, translated_text) == 0) {
-                /* Same translation - increment count */
-                trans_cache_update_count(server->cache, cached);
-                LOG_DEBUG("[%s] Cache updated (same translation, count: %d)",
-                        request_uuid, cached->count);
-            } else {
-                /* Different translation - update translation and reset count */
-                trans_cache_update_translation(server->cache, cached, translated_text);
-                LOG_DEBUG("[%s] Cache updated (different translation, count reset to 1)",
-                        request_uuid);
-            }
-        } else {
-            /* New cache entry */
-            if (trans_cache_add(server->cache, req->from_lang, req->to_lang,
-                               req->text, translated_text) == 0) {
-                LOG_DEBUG("[%s] Added to cache (count: 1)", request_uuid);
-            }
-        }
-    }
-
-    /* Lookup result is a caller-owned copy - release it (NULL-safe). */
+    /* Fast cache hits do not consume admission or waiter capacity. */
+    CacheEntry *cached = server->cache
+        ? trans_cache_lookup(server->cache, req->from_lang, req->to_lang, req->text) : NULL;
+    if (cached && cached->count >= server->config->cache_threshold) goto cache_hit;
     trans_cache_entry_free(cached);
     cached = NULL;
 
-    /* Create success response */
-    char *response_json = create_translation_response(req, translated_text);
+    InflightHandle handle;
+    InflightAdmission admission = inflight_acquire(server->inflight, server->cache,
+        server->config->cache_threshold, req->from_lang, req->to_lang, req->text, &handle, &cached);
+    if (admission == INFLIGHT_CACHE) goto cache_hit;
+    if (admission != INFLIGHT_OWNER && admission != INFLIGHT_FOLLOWER) {
+        trans_cache_entry_free(cached);
+        int status = admission == INFLIGHT_ERROR ? 500 : 503;
+        const char *message = admission == INFLIGHT_ERROR ? "Cannot allocate translation job" :
+            admission == INFLIGHT_STOPPED ? "Server shutting down" : "Translation capacity reached";
+        char *response = create_error_response(status == 500 ? "INTERNAL_ERROR" : "TRANSLATION_ERROR",
+                                               message, request_uuid);
+        free(request_uuid);
+        free_translation_request(req);
+        return send_json_response(connection, response, status, status == 503);
+    }
 
-    char truncated_result[TRUNCATE_BUFFER_SIZE];
-    truncate_text(translated_text, truncated_result, TRUNCATE_DISPLAY_LENGTH, "...");
-    LOG_INFO("[%s] Translation completed, result: %s", request_uuid, truncated_result);
+    int64_t wait_started = translation_now_ms();
+    LOG_INFO("[%s] Translation group %lu role=%s", request_uuid, inflight_id(&handle),
+             handle.owner ? "owner" : "waiter");
+    if (admission == INFLIGHT_OWNER) {
+        const TranslationControl *control = inflight_control(&handle);
+        TranslationError error = {0};
+        char *translated = openai_translate(server->translator, req->from_lang, req->to_lang,
+            req->text, request_uuid, req->timestamp, &error, control);
+        int status = 200;
+        if (!translated) {
+            status = server->config->model_type == MODEL_TYPE_CODEX && error.status_code
+                ? error.status_code : error.retryable ? 503 : 502;
+        } else if (server->cache && translation_remaining_ms(control)) {
+            int rc;
+            if (!cached) {
+                rc = trans_cache_add(server->cache, req->from_lang, req->to_lang, req->text, translated);
+            } else if (strcmp(cached->translated_text, translated) == 0) {
+                rc = trans_cache_update_count(server->cache, cached);
+            } else {
+                rc = trans_cache_update_translation(server->cache, cached, translated);
+            }
+            if (rc != 0) LOG_INFO("[%s] Cache write failed; sharing translation without persistence", request_uuid);
+        }
+        /* Publication owns the strings and happens even if this client went away. */
+        trans_cache_entry_free(cached);
+        cached = NULL;
+        inflight_publish(server->inflight, &handle, translated, error.message, status, error.retryable);
+    }
 
-    free_translated_text(translated_text);
+    InflightResult result = inflight_wait(server->inflight, &handle);
+    LOG_INFO("[%s] Translation group %lu response status=%d elapsed_ms=%lld", request_uuid,
+             inflight_id(&handle), result.status, (long long)(translation_now_ms() - wait_started));
+    char *response = result.text ? create_translation_response(req, result.text) :
+        create_error_response("TRANSLATION_ERROR", result.message, request_uuid);
+    int status = result.status;
+    bool retryable = result.retryable;
+    inflight_release(server->inflight, &handle);
     free(request_uuid);
     free_translation_request(req);
+    return send_json_response(connection, response, status, retryable);
 
-    return send_json_response(connection, response_json, MHD_HTTP_OK, false);
+cache_hit:
+    trans_cache_update_count(server->cache, cached);
+    response = create_translation_response(req, cached->translated_text);
+    trans_cache_entry_free(cached);
+    free(request_uuid);
+    free_translation_request(req);
+    return send_json_response(connection, response, MHD_HTTP_OK, false);
 }
 
 /* Main request handler */
@@ -471,6 +438,23 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
         return NULL;
     }
 
+    server->inflight = inflight_create(
+        config->inflight_max_keys > 0 ? config->inflight_max_keys : server->max_workers,
+        config->inflight_max_waiters, config->inflight_max_waiters_per_key,
+        config->translation_total_timeout, config->model_type == MODEL_TYPE_CODEX ? 504 : 503);
+    if (!server->inflight) {
+        LOG_INFO("Error: Could not initialize translation groups");
+        openai_translator_free(server->translator);
+        language_table_free(server->lang_table);
+        free(server);
+        return NULL;
+    }
+    LOG_INFO("Translation groups initialized: keys=%d, waiters=%d, per_key=%d, total_timeout=%ds",
+             config->inflight_max_keys > 0 ? config->inflight_max_keys : server->max_workers,
+             config->inflight_max_waiters, config->inflight_max_waiters_per_key,
+             config->translation_total_timeout);
+    atomic_init(&server->cache_bg_running, false);
+
     /* Initialize cache */
     server->cache = NULL;
     server->cache_bg_running = false;
@@ -552,6 +536,7 @@ void translation_server_stop(TranslationServer *server) {
 
     LOG_INFO("Stopping HTTP server...");
 
+    inflight_shutdown(server->inflight);
     if (server->daemon) {
         MHD_stop_daemon(server->daemon);
         server->daemon = NULL;
@@ -575,6 +560,9 @@ void translation_server_free(TranslationServer *server) {
         pthread_join(server->cache_bg_thread, NULL);
         LOG_DEBUG("Cache background thread stopped");
     }
+
+    inflight_destroy(server->inflight);
+    server->inflight = NULL;
 
     /* Save and free cache */
     if (server->cache) {

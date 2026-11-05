@@ -92,28 +92,57 @@ This approach is efficient because:
 
 ⚠ **`MAX_WORKERS` does not limit concurrent connections.** `MHD_start_daemon()` is called without
 `MHD_OPTION_CONNECTION_LIMIT` or `MHD_OPTION_THREAD_POOL_SIZE` (`http_server.c`), so the connection
-count is bounded by libmicrohttpd's own default, not by this setting. `MAX_WORKERS` is only used as
-the default for `CODEX_MAX_CONCURRENCY`. In codex mode that semaphore is the real limit on concurrent
-translations; in normal mode there is no server-side cap. Measured: 100 concurrent `/health` requests
-and 500 concurrent `/translate` requests are all served with `MAX_WORKERS=30`.
+count is bounded by libmicrohttpd's own default, not by this setting. Since request coalescing,
+`MAX_WORKERS` supplies the defaults for both `INFLIGHT_MAX_KEYS` and `CODEX_MAX_CONCURRENCY`.
+Distinct active translations are limited by `INFLIGHT_MAX_KEYS`; same-key followers consume separate
+waiter slots and connection threads. The earlier 500-request measurements predate these limits.
 
 Implementation in `http_server.c`:
 - `MHD_USE_THREAD_PER_CONNECTION` flag creates dedicated threads
 - `openai_translate()` called directly (no executor needed)
 
-For the `codex` backend the same blocking thread spawns a `codex exec` (or legacy `codex mcp-server`) child per request, so the model still maps cleanly: one blocked thread = one outstanding codex process (capped by a semaphore).
+Only a group's owner invokes the engine and, in codex mode, obtains a semaphore slot and spawns a child.
+Followers block on a monotonic condition variable without starting their own engine invocation.
 
 ### Request Flow
 
 1. Client → libmicrohttpd creates new thread
 2. Thread → Validates JSON with cJSON (invalid → 422)
 3. Thread → Cache lookup; on hit above threshold, returns cached translation
-4. Thread → `openai_translate()` dispatches on `MODEL_TYPE`:
+4. Cache miss or below threshold → join/register a shared translation group, rechecking cache before registration
+5. Owner → `openai_translate()` dispatches on `MODEL_TYPE` with a shared deadline/cancellation context:
    - **normal**: builds prompt, calls OpenAI API via libcurl (retry: max 3, exponential backoff), unescapes + strips emoji/shortcodes
    - **codex**: builds a delimiter-isolated prompt, acquires a concurrency slot, then either runs `codex exec` with the prompt on stdin and reads `--output-last-message` (default), or spawns `codex mcp-server` and runs initialize + `tools/call` (legacy); trim + whole-fence unwrap only
-5. Thread → Updates cache
-6. Thread → Sends JSON response preserving original UUID/timestamp
-7. Connection closes, thread terminates
+6. Owner → updates cache once, publishes result/error, broadcasts and detaches group
+7. Each participant → creates its own response preserving its UUID/timestamp, then releases its reference
+8. Last reference → frees the detached group and result; connection thread returns
+
+### Shared translation lifetime
+
+`inflight_translation.c` owns the registry, mutex, monotonic conditions and reference counts.
+`RUNNING` entries have registry/owner/follower references. Only the owner publishes and removes a key;
+timed-out followers never promote themselves. Detached results remain immutable until the last reference drops.
+Manager -> cache is the only nested lock order. Engine I/O, backoff and response creation hold neither lock.
+The manager is shut down before `MHD_stop_daemon()` and destroyed only after all MHD handlers return.
+Signal handlers set `sig_atomic_t` flags only; logging, SIGHUP cache saving and shutdown run in the main loop.
+
+`TRANS_CACHE_THRESHOLD` still controls cache reuse. Followers do not update the cache count, so sharing
+one model result among ten requests is one verification toward the threshold. Cache-hit usage counting remains.
+Same-key matching uses normalized from/to and cleaned text, excluding UUID/timestamp, within one process only.
+
+Configuration: `TRANSLATION_TOTAL_TIMEOUT=110` (1..110 seconds), `INFLIGHT_MAX_KEYS` defaults to
+`MAX_WORKERS`, `INFLIGHT_MAX_WAITERS=256`, `INFLIGHT_MAX_WAITERS_PER_KEY=64`. Explicit limits must
+be positive integers. Capacity rejection is 503 with Retry-After; cache hits bypass admission.
+The total budget spans retries, backoff, slots, MCP initialization and calls. Normal total timeout is 503;
+codex total timeout is 504, with shutdown mapped to 503. Non-streaming missing/empty normal replies now
+fail with 502 instead of being cached as an empty string or the old `nothing contents` sentinel.
+
+Run `make test-coalescing` for unit and local HTTP/exec/MCP checks. Sanitizer examples:
+
+```bash
+make test-inflight-unit INFLIGHT_TEST_BIN=obj/test_inflight_asan TEST_SANITIZERS='-fsanitize=address,undefined -fno-omit-frame-pointer -g'
+make test-inflight-unit INFLIGHT_TEST_BIN=obj/test_inflight_tsan TEST_SANITIZERS='-fsanitize=thread -fno-omit-frame-pointer -g'
+```
 
 ### Configuration System
 
@@ -275,9 +304,10 @@ Implementation in `utils.c:strip_emoji_and_shortcodes()`:
 - Codepoint range checking
 - Whitespace collapsing
 
-### Hard Limits (hardcoded, not configurable)
+### Size limits and request budgets
 
-Verified against the code and measured end-to-end on 2026-08-21. Public-facing copies of these numbers live in `README.md` → "한계와 보장"; keep both in sync when a constant changes.
+Size measurements date from 2026-08-21; request budgets reflect the 2026-11-03 coalescing change.
+Public-facing copies live in `README.md` → "한계와 보장"; keep both in sync.
 
 | Constant | File | Value | Behaviour at the limit |
 |---|---|---|---|
@@ -289,7 +319,8 @@ Verified against the code and measured end-to-end on 2026-08-21. Public-facing c
 | `CODEX_OUT_MAX` | `codex_exec.c` | 4 MB | exec path **errors** ("codex response too large" → 502) rather than truncating |
 | `MCP_RBUF_MAX` | `mcp_client.c` | 4 MB | legacy MCP path **errors** ("codex MCP response too large" → 502) rather than truncating |
 | MHD connection timeout | `http_server.c` | 120 s | connection closed |
-| curl timeout (`normal`) | `http_client.c` | 60 s/attempt, 3 attempts, `2^attempt` backoff | 503/504 |
+| curl timeout (`normal`) | `http_client.c` | min(60 s, remaining total budget), up to 3 attempts | 503 for timeout |
+| Total translation budget | `TRANSLATION_TOTAL_TIMEOUT` | default 110 s, configurable 1..110 | normal 503, codex 504; no follower deadline extension |
 
 The codex path deliberately bypasses `unescape_string()`/`strip_emoji_and_shortcodes()`, so it has **no 8 KB cap** — measured: a 10,533-byte translation came back whole while the same length would have been cut to 8,191 in `normal` mode.
 
@@ -299,8 +330,7 @@ There is **no cap on the accumulated HTTP request body** (`handle_translate()` r
 
 Audited 2026-08-21; none of these can put another request's translation into a response (per-request isolation was verified with 1,200 concurrent mixed-text requests, keep-alive reuse, and concurrent live codex calls — zero mismatches).
 
-- `get_current_timestamp()` (`utils.c`) uses non-reentrant `gmtime()`. It only feeds the `timestamp` field of **error** responses; successful responses echo the request's own timestamp. Concurrent errors can therefore carry a slightly-off timestamp. Fix would be `gmtime_r`.
-- `get_log_timestamp()` uses `localtime()` for the same reason — affects log line timestamps only.
+- Timestamp formatting uses `gmtime_r`/`localtime_r` to avoid shared calendar buffers under concurrent completions.
 - Debug traces are named `<timestamp>_<uuid>.txt`; two in-flight requests sharing a uuid+timestamp overwrite each other's trace file.
 - The cache key is `SHA-256("from|to|text")` and does **not** include model, prompt, or backend — instances with different `MODEL_TYPE`/prompt must not share a cache DB.
 - Translation output is not reproducible: codex is non-deterministic, and explicit-language prompt rules can change the result kind (see `PROMPT_PREFIX_translategemma.txt`'s ASCII echo rule). Source `auto` uses its separate policy and optional override, not that template. Both still use the existing backend-specific output processing.

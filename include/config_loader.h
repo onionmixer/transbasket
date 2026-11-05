@@ -58,6 +58,10 @@ typedef struct {
 
     /* Common cache settings (applies to all backends) */
     int cache_threshold;     /* Minimum count to use cache (default: 5) */
+    int translation_total_timeout; /* Monotonic total budget, default 110s */
+    int inflight_max_keys;         /* 0 (unset) = MAX_WORKERS */
+    int inflight_max_waiters;      /* default 256 */
+    int inflight_max_waiters_per_key; /* default 64 */
     bool cache_cleanup_enabled;  /* Enable automatic cleanup (default: true) */
     int cache_cleanup_days;  /* Cleanup entries older than N days (default: 60) */
 

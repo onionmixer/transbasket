@@ -5,6 +5,7 @@
 #include <semaphore.h>
 #include "config_loader.h"
 #include "language_table.h"
+#include "translation_control.h"
 
 /* OpenAI translator structure */
 typedef struct {
@@ -42,7 +43,8 @@ char *openai_translate(
     const char *text,
     const char *request_uuid,
     const char *timestamp,
-    TranslationError *error
+    TranslationError *error,
+    const TranslationControl *control
 );
 
 /* Free translated text */

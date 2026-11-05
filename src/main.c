@@ -16,59 +16,13 @@
 
 /* Global server instance for signal handler */
 static TranslationServer *g_server = NULL;
-static volatile bool g_shutdown = false;
+static volatile sig_atomic_t g_shutdown = 0;
+static volatile sig_atomic_t g_save_cache = 0;
 
-/* Signal handler for graceful shutdown */
+/* Never take locks, log, or stop MHD from a signal context. */
 static void signal_handler(int signum) {
-    const char *signame = "UNKNOWN";
-
-    switch (signum) {
-        case SIGINT:
-            signame = "SIGINT";
-            break;
-        case SIGTERM:
-            signame = "SIGTERM";
-            break;
-        case SIGHUP:
-            signame = "SIGHUP";
-            break;
-    }
-
-    /* Handle SIGHUP specially - save cache without shutdown */
-    if (signum == SIGHUP) {
-        LOG_INFO("Received signal %s (%d), saving translation cache...",
-                signame, signum);
-
-        if (g_server && g_server->cache) {
-            if (trans_cache_save(g_server->cache) == 0) {
-                LOG_INFO("Translation cache saved successfully");
-
-                /* Print cache statistics */
-                size_t total, active, expired;
-                trans_cache_stats(g_server->cache, &total, &active, &expired,
-                                g_server->config->cache_threshold,
-                                g_server->config->cache_cleanup_days);
-                LOG_INFO("Cache stats: total=%zu, active=%zu, expired=%zu",
-                        total, active, expired);
-            } else {
-                LOG_INFO("Warning: Failed to save translation cache");
-            }
-        } else {
-            LOG_INFO("Warning: Cache not available");
-        }
-
-        return;  /* Don't shutdown on SIGHUP */
-    }
-
-    /* For SIGINT/SIGTERM - shutdown gracefully */
-    LOG_INFO("Received signal %s (%d), shutting down gracefully...",
-            signame, signum);
-
-    g_shutdown = true;
-
-    if (g_server) {
-        translation_server_stop(g_server);
-    }
+    if (signum == SIGHUP) g_save_cache = 1;
+    else g_shutdown = 1;
 }
 
 /* Setup signal handlers */
@@ -266,6 +220,13 @@ int main(int argc, char *argv[]) {
 
     /* Main loop - wait for shutdown signal */
     while (!g_shutdown) {
+        if (g_save_cache) {
+            g_save_cache = 0;
+            if (g_server->cache) {
+                int rc = trans_cache_save(g_server->cache);
+                LOG_INFO("SIGHUP cache save %s", rc == 0 ? "completed" : "failed");
+            }
+        }
         sleep(1);
     }
 

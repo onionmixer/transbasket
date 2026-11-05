@@ -8,6 +8,7 @@
 #include "http_client.h"
 #include "language_table.h"
 #include "trans_cache.h"
+#include "inflight_translation.h"
 
 /* Translation server structure */
 typedef struct {
@@ -16,11 +17,12 @@ typedef struct {
     OpenAITranslator *translator;
     struct MHD_Daemon *daemon;
     int max_workers;
+    InflightManager *inflight;
 
     /* Cache components */
     TransCache *cache;
     pthread_t cache_bg_thread;
-    volatile bool cache_bg_running;
+    atomic_bool cache_bg_running;
 } TranslationServer;
 
 /* Initialize translation server */

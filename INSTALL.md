@@ -205,7 +205,33 @@ auto는 내장 자동 감지 지시를 사용합니다. 선택 설정 `PROMPT_PR
 
 오프라인 검증: `make test-auto`. 외부 모델 호출 없이 임시 DB와 127.0.0.1 서버로 동작합니다.
 
-## 9. 문제 해결
+## 9. 동일 요청 병합 설정
+
+같은 번역 키의 동시 요청은 서버 프로세스 안에서 결과를 공유합니다. `TRANS_CACHE_THRESHOLD`는
+계속 적용하며, 대기 요청 수만큼 캐시 횟수를 올리지 않습니다. 스키마는 기존 버전 2 그대로입니다.
+
+```conf
+TRANSLATION_TOTAL_TIMEOUT="110"
+#INFLIGHT_MAX_KEYS="30"          # 생략하면 MAX_WORKERS 사용
+INFLIGHT_MAX_WAITERS="256"
+INFLIGHT_MAX_WAITERS_PER_KEY="64"
+```
+
+전체 예산은 1~110초이며 슬롯 대기·MCP 초기화·재시도·백오프·호출에 함께 적용합니다.
+기존 normal의 60초×3회 호출이 110초 이상 지속되던 경우 이제 전체 마감으로 503이 될 수 있습니다.
+codex의 전체 마감은 504입니다. 대기 한도 초과는 503·Retry-After로 반환합니다.
+`MAX_WORKERS`는 연결 수 제한이 아니지만, 이제 미설정 `INFLIGHT_MAX_KEYS`의 기본값도 결정합니다.
+프록시·클라이언트 타임아웃은 번역 예산과 종료 정리 시간을 고려해 설정하세요.
+
+기동 로그의 `Translation groups initialized`에서 실제 한도를 확인합니다.
+요청별 그룹 ID·owner/waiter·elapsed_ms와 `flushed` 로그로 공유 실행을 추적할 수 있습니다.
+종료 후 `Translation groups drained (running=0, waiters=0, live=0, ...)`를 확인합니다.
+SIGTERM/SIGINT는 실행 취소와 대기 해제 후 종료하며, SIGHUP 캐시 저장은 메인 루프에서 처리합니다.
+
+오프라인 검증은 `make test-coalescing`과 `make test-auto`입니다. 실제 모델 품질을 검사하는 명령은 아닙니다.
+새 normal 경로는 빈 번역문이나 content가 없는 응답을 502로 처리하므로 잘못된 결과가 캐시에 저장되지 않습니다.
+
+## 10. 문제 해결
 
 **빌드 실패 (라이브러리 없음)**
 ```bash

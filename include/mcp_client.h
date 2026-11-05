@@ -5,6 +5,7 @@
 #include <stddef.h>      /* size_t */
 #include <stdbool.h>     /* bool */
 #include <cjson/cJSON.h> /* cJSON (mcp_call_tool arguments) */
+#include "translation_control.h"
 
 /*
  * Minimal MCP (Model Context Protocol) stdio JSON-RPC 2.0 client.
@@ -28,6 +29,8 @@ typedef struct {
     size_t errbuf_len;
 
     int    next_id;        /* next JSON-RPC request id */
+    const TranslationControl *control; /* borrowed, set before initialize */
+    long io_deadline_ms;              /* per-phase limit including stdin write */
 
     /* diagnostics / observability */
     int    last_exit_status;  /* waitpid status, -1 if not reaped */

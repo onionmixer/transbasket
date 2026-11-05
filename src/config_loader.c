@@ -13,6 +13,7 @@
 #include <libgen.h>
 #include <unistd.h>
 #include <limits.h>
+#include <errno.h>
 #include "config_loader.h"
 #include "utils.h"
 
@@ -174,6 +175,16 @@ static bool is_codex_token(const char *s) {
     return true;
 }
 
+/* Invalid values remain invalid instead of silently enabling unlimited work. */
+static int positive_integer(const char *value) {
+    if (!value || !*value) return -1;
+    for (const char *p = value; *p; p++) if (*p < '0' || *p > '9') return -1;
+    char *end;
+    errno = 0;
+    long n = strtol(value, &end, 10);
+    return !errno && !*end && n > 0 && n <= INT_MAX ? (int)n : -1;
+}
+
 /* Validate configuration */
 int validate_config(const Config *config) {
     if (!config) {
@@ -250,6 +261,13 @@ int validate_config(const Config *config) {
          strstr(config->prompt_prefix_auto, "{SOURCE_LANG}") ||
          strstr(config->prompt_prefix_auto, "{SOURCE_CODE}"))) {
         LOG_INFO("Error: PROMPT_PREFIX_AUTO_FILE must be nonempty and must not contain source language placeholders");
+        return -1;
+    }
+
+    if (config->translation_total_timeout < 1 || config->translation_total_timeout > 110 ||
+        config->inflight_max_keys < 0 || config->inflight_max_waiters < 1 ||
+        config->inflight_max_waiters_per_key < 1) {
+        LOG_INFO("Error: TRANSLATION_TOTAL_TIMEOUT must be 1..110; INFLIGHT limits must be positive integers");
         return -1;
     }
 
@@ -348,6 +366,9 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->cache_sqlite_journal_mode = strdup("WAL");
     config->cache_sqlite_sync = strdup("NORMAL");
     config->cache_threshold = 5;
+    config->translation_total_timeout = 110;
+    config->inflight_max_waiters = 256;
+    config->inflight_max_waiters_per_key = 64;
     config->cache_cleanup_enabled = true;
     config->cache_cleanup_days = 60;
 
@@ -471,6 +492,14 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
                 LOG_INFO("Warning: Invalid TRANS_CACHE_SQLITE_SYNC '%s', using 'NORMAL'\n", value);
                 config->cache_sqlite_sync = strdup("NORMAL");
             }
+        } else if (strcmp(key, "TRANSLATION_TOTAL_TIMEOUT") == 0) {
+            config->translation_total_timeout = positive_integer(value);
+        } else if (strcmp(key, "INFLIGHT_MAX_KEYS") == 0) {
+            config->inflight_max_keys = positive_integer(value);
+        } else if (strcmp(key, "INFLIGHT_MAX_WAITERS") == 0) {
+            config->inflight_max_waiters = positive_integer(value);
+        } else if (strcmp(key, "INFLIGHT_MAX_WAITERS_PER_KEY") == 0) {
+            config->inflight_max_waiters_per_key = positive_integer(value);
         } else if (strcmp(key, "TRANS_CACHE_THRESHOLD") == 0) {
             config->cache_threshold = atoi(value);
             if (config->cache_threshold < 1) {

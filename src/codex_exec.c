@@ -26,7 +26,7 @@ extern char **environ;
 
 #define CODEX_OUT_MAX        (4 * 1024 * 1024)  /* same cap as MCP_RBUF_MAX */
 #define CODEX_ERR_TAIL_MAX   16384              /* stderr kept for diagnostics */
-#define CODEX_POLL_SLICE_MS  1000
+#define CODEX_POLL_SLICE_MS  100
 #define CODEX_DRAIN_READS    16   /* reads per fd per poll round, so a chatty child
                                      cannot keep us away from the deadline check */
 #define CODEX_TOKEN_MAX      64   /* see config_loader.c:is_codex_token() */
@@ -147,7 +147,7 @@ fail:
 /* Wait until the group leader has exited, WITHOUT reaping it (WNOWAIT): while
  * it is a zombie its pid - which is also our pgid - cannot be reused, so
  * signalling the group stays safe. Returns 1 exited, 0 deadline, -1 error. */
-static int wait_leader_exit(pid_t pid, long deadline) {
+static int wait_leader_exit(pid_t pid, long deadline, const TranslationControl *control) {
     for (;;) {
         siginfo_t si;
         memset(&si, 0, sizeof(si));
@@ -156,7 +156,7 @@ static int wait_leader_exit(pid_t pid, long deadline) {
         } else if (errno != EINTR) {
             return -1;
         }
-        if (now_ms() >= deadline) return 0;
+        if (now_ms() >= deadline || !translation_remaining_ms(control)) return 0;
         struct timespec ts = { 0, 20 * 1000 * 1000 };
         nanosleep(&ts, NULL);
     }
@@ -168,14 +168,16 @@ static int wait_leader_exit(pid_t pid, long deadline) {
  * the leader is reaped, so a descendant that ignored SIGTERM, or outlived a
  * leader that exited, does not survive the request. Returns the waitpid status
  * (-1 if it could not be collected). */
-static int reap_child(pid_t pid, long deadline, bool abort_now, bool *expired) {
-    if (!abort_now && wait_leader_exit(pid, deadline) == 0) {
+static int reap_child(pid_t pid, long deadline, bool abort_now, bool *expired, const TranslationControl *control) {
+    if (!abort_now && wait_leader_exit(pid, deadline, control) == 0) {
         *expired = true;
         abort_now = true;
     }
     if (abort_now) {
         kill(-pid, SIGTERM);
-        wait_leader_exit(pid, now_ms() + 2000);
+        long grace = now_ms() + 2000;
+        if (grace > deadline) grace = deadline;
+        wait_leader_exit(pid, grace, NULL);
     }
     kill(-pid, SIGKILL);
 
@@ -199,7 +201,7 @@ typedef struct {
 /* Spawn argv, feed `input` on stdin, collect stdout (bounded) and the stderr
  * tail until both close or the deadline passes, then reap. Returns -1 only if
  * the child could not be started. */
-static int run_child(char *const argv[], const char *input, int timeout_sec, ChildResult *res) {
+static int run_child(char *const argv[], const char *input, int timeout_sec, ChildResult *res, const TranslationControl *control) {
     memset(res, 0, sizeof(*res));
     res->status = -1;
 
@@ -211,9 +213,11 @@ static int run_child(char *const argv[], const char *input, int timeout_sec, Chi
     if (in_len == 0) { close(fd_in); fd_in = -1; }
 
     long deadline = now_ms() + (long)timeout_sec * 1000;
+    long total_left = translation_remaining_ms(control);
+    if (deadline > now_ms() + total_left) deadline = now_ms() + total_left;
     while (fd_out >= 0 || fd_err >= 0) {
         long remaining = deadline - now_ms();
-        if (remaining <= 0) { res->timed_out = true; break; }
+        if (remaining <= 0 || !translation_remaining_ms(control)) { res->timed_out = true; break; }
 
         struct pollfd pfd[3];
         int n = 0, i_in = -1, i_out = -1, i_err = -1;
@@ -278,7 +282,7 @@ static int run_child(char *const argv[], const char *input, int timeout_sec, Chi
      * before the request deadline. On timeout/overflow it is still running, so
      * terminate the group right away. */
     bool abort_child = res->timed_out || res->overflow;
-    res->status = reap_child(pid, deadline, abort_child, &res->timed_out);
+    res->status = reap_child(pid, deadline, abort_child, &res->timed_out, control);
     return 0;
 }
 
@@ -346,7 +350,7 @@ void codex_cli_probe(const char *bin, CodexCliInfo *info) {
 
     ChildResult res;
     char *const ver_argv[] = { (char *)bin, (char *)"--version", NULL };
-    if (run_child(ver_argv, NULL, CODEX_PROBE_TIMEOUT, &res) == 0) {
+    if (run_child(ver_argv, NULL, CODEX_PROBE_TIMEOUT, &res, NULL) == 0) {
         if (res.out && WIFEXITED(res.status) && WEXITSTATUS(res.status) == 0) {
             size_t l = strcspn(res.out, "\r\n");
             if (l >= sizeof(info->version)) l = sizeof(info->version) - 1;
@@ -362,7 +366,7 @@ void codex_cli_probe(const char *bin, CodexCliInfo *info) {
     }
 
     char *const help_argv[] = { (char *)bin, (char *)"exec", (char *)"--help", NULL };
-    if (run_child(help_argv, NULL, CODEX_PROBE_TIMEOUT, &res) == 0) {
+    if (run_child(help_argv, NULL, CODEX_PROBE_TIMEOUT, &res, NULL) == 0) {
         if (WIFEXITED(res.status) && WEXITSTATUS(res.status) == 0) {
             info->has_exec = true;
             info->has_ephemeral = res.out && strstr(res.out, "--ephemeral") != NULL;
@@ -375,7 +379,7 @@ void codex_cli_probe(const char *bin, CodexCliInfo *info) {
      * their tools sit outside the read-only sandbox. Count them for a warning. */
     info->mcp_enabled = -1;
     char *const mcp_argv[] = { (char *)bin, (char *)"mcp", (char *)"list", (char *)"--json", NULL };
-    if (run_child(mcp_argv, NULL, CODEX_PROBE_TIMEOUT, &res) == 0) {
+    if (run_child(mcp_argv, NULL, CODEX_PROBE_TIMEOUT, &res, NULL) == 0) {
         cJSON *list = (res.out && WIFEXITED(res.status) && WEXITSTATUS(res.status) == 0)
                           ? cJSON_Parse(res.out) : NULL;
         if (cJSON_IsArray(list)) {
@@ -461,7 +465,7 @@ char *codex_exec_run(const CodexExecOptions *opt, const char *prompt,
     argv[a] = NULL;
 
     ChildResult res;
-    if (run_child((char *const *)argv, prompt, opt->timeout_sec, &res) != 0) {
+    if (run_child((char *const *)argv, prompt, opt->timeout_sec, &res, opt->control) != 0) {
         if (err_out) *err_out = strdup("failed to start codex exec");
         return NULL;
     }

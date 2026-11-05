@@ -1,9 +1,50 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **원문 언어 auto 검증 2026-11-03**입니다.
+> 최신 기록은 바로 아래의 **동일 번역 요청 병합 검증 2026-11-03**입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## 동일 번역 요청 병합 검증 2026-11-03
+
+기존 `TRANS_CACHE_THRESHOLD` 기준을 유지하며 동일 키의 활성 번역을 하나로 묶었다.
+대기 요청은 결과를 공유하지만 임계값 횟수를 추가로 올리지 않는다.
+설계와 구현 범위는 [PLAN_DUPLICATE_REQUEST_COALESCING.md](PLAN_DUPLICATE_REQUEST_COALESCING.md),
+운영 한도·전체 시간 제한은 [README.md](README.md)와 [INSTALL.md](INSTALL.md)를 참고한다.
+
+| 검증 | 결과 |
+|---|---|
+| `make -j4` | 경고 없이 서버·관리 도구 빌드 |
+| `make test-coalescing` | C 모듈 검증 및 HTTP·exec·MCP 통합 테스트 14개 통과(107.094초) |
+| `make test-auto` | 기존 auto 회귀 9개 통과(최종 실행 41.256초) |
+| `make test-coalescing COALESCING_TESTS=test_codex_deadlines_cover_call_initialize_and_stdin` | exec 호출·MCP 초기화·exec stdin·MCP stdin 정체 4개 경로 추가 확인(21.020초) |
+| C 모듈 AddressSanitizer·UndefinedBehaviorSanitizer·LeakSanitizer | 통과, 오류·누수 보고 없음 |
+| C 모듈 ThreadSanitizer | 통과, 데이터 경쟁 보고 없음 |
+
+검증은 임시 서버·캐시·가짜 upstream·가짜 codex로 수행했다. 실제 모델 번역 품질은 이번 검증 범위에 포함하지 않았다.
+LeakSanitizer는 샌드박스의 ptrace 제한으로 중단되어 샌드박스 밖에서 다시 실행해 통과했다.
+메모리·경쟁 검사는 병합 C 모듈과 그 테스트 대상에 적용했으며 전체 HTTP 서버의 sanitizer 실행 결과로 해석하지 않는다.
+
+### 확인한 동작
+
+- text·SQLite에서 동시 10요청당 엔진 작업 1개, 캐시 횟수 1회 갱신. 임계값 3에 도달한 뒤 추가 엔진 호출 없음.
+- 번역 결과가 바뀌면 횟수 1로 초기화. 요청별 UUID와 성공 응답 timestamp 보존.
+- 정규화 별칭 병합과 서로 다른 키의 병렬 실행, 전체·키별 대기 수 및 활성 키 수 제한.
+- 가짜 upstream 401·503 오류를 공유하고, 503 재시도는 한 작업의 3회 시도로만 수행. 실패 이후 새 작업으로 복구.
+- normal의 content 누락·빈 번역을 502로 공유하고 캐시에 저장하지 않음. 기존 `nothing contents` 성공 대체 문자열 제거.
+- 실행 요청의 연결 종료, 캐시 초기화·쓰기 실패에도 나머지 참여자의 번역 결과 전달.
+- codex exec·MCP의 결과·오류 공유, 호출·MCP 초기화·stdin 쓰기 정체에서 전체 마감 준수와 직접 자식 회수.
+- SIGHUP·SIGTERM 처리와 정상 종료에서 `running=0, waiters=0, live=0` 확인.
+- C 모듈의 동시 대기 32개, 오류 메시지 없는 실패 게시, 할당 실패 복구, 캐시 재확인, 시간 초과 후 실행자 승격 방지.
+
+재현:
+
+```bash
+make test-coalescing
+make test-auto
+make test-inflight-unit INFLIGHT_TEST_BIN=obj/test_inflight_asan TEST_SANITIZERS='-fsanitize=address,undefined -fno-omit-frame-pointer -g'
+make test-inflight-unit INFLIGHT_TEST_BIN=obj/test_inflight_tsan TEST_SANITIZERS='-fsanitize=thread -fno-omit-frame-pointer -g'
+```
 
 ## 원문 언어 auto 검증 2026-11-03
 
