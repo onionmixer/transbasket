@@ -27,6 +27,10 @@ static void sqlite_backend_stats(void *ctx, size_t *total_entries,
                                   size_t *active_entries, size_t *expired_entries,
                                   int cache_threshold, int days_threshold);
 static void sqlite_backend_free(void *ctx);
+static int sqlite_backend_store_result(void *ctx, const char *from_lang, const char *to_lang,
+                                       const char *source_text, const char *translated_text,
+                                       CacheEntry *cached, const SourceHint *hint,
+                                       const TranslationControl *control);
 
 /* SQL schema and statements */
 static const char *SQL_CREATE_TABLE =
@@ -149,6 +153,62 @@ static int migrate_source_constraint(sqlite3 *db, const char *ddl, regmatch_t ma
     return result;
 }
 
+/* source_hint objects (PLAN_SOURCE_HINT_METADATA.md section 6.1). They live
+ * beside trans_cache so user_version stays 2 and a binary without hint support
+ * keeps opening the database. The trigger and the view are owned by this
+ * program and replaced on every start; CREATE ... IF NOT EXISTS would keep an
+ * older definition. Runs after any v0/v1 migration: that migration's DROP
+ * TABLE removes triggers on trans_cache without firing them. */
+static const char *SQL_HINT_SCHEMA =
+    "CREATE TABLE IF NOT EXISTS trans_cache_source_hint ("
+    "  hash TEXT PRIMARY KEY NOT NULL CHECK(length(hash)=64),"
+    "  source_hint TEXT NOT NULL CHECK(length(source_hint)=3 AND source_hint GLOB '[a-z][a-z][a-z]'),"
+    "  mixed INTEGER NOT NULL CHECK(typeof(mixed)='integer' AND mixed IN (0,1)),"
+    "  origin TEXT NOT NULL CHECK(origin IN ('model','script')),"
+    "  hint_version INTEGER NOT NULL CHECK(typeof(hint_version)='integer' AND hint_version >= 1),"
+    "  updated_at INTEGER NOT NULL CHECK(typeof(updated_at)='integer'));"
+    "DROP TRIGGER IF EXISTS trans_cache_source_hint_delete;"
+    "CREATE TRIGGER trans_cache_source_hint_delete AFTER DELETE ON trans_cache"
+    "  BEGIN DELETE FROM trans_cache_source_hint WHERE hash = OLD.hash; END;"
+    "CREATE TABLE IF NOT EXISTS trans_cache_hint_code (code TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;"
+    "DELETE FROM trans_cache_hint_code;";
+
+static const char *SQL_HINT_VIEW =
+    "DROP VIEW IF EXISTS trans_cache_effective_source;"
+    "CREATE VIEW trans_cache_effective_source AS"
+    "  SELECT c.id, c.hash, c.from_lang, c.to_lang,"
+    "         CASE WHEN c.from_lang = 'auto' THEN h.source_hint ELSE c.from_lang END AS effective_source,"
+    "         h.mixed, h.origin, h.hint_version"
+    "  FROM trans_cache c"
+    "  LEFT JOIN trans_cache_source_hint h"
+    "    ON h.hash = c.hash AND h.source_hint IN (SELECT code FROM trans_cache_hint_code);";
+
+static int apply_hint_schema(sqlite3 *db) {
+    if (schema_exec(db, SQL_HINT_SCHEMA) != 0) return -1;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "INSERT INTO trans_cache_hint_code(code) VALUES (?)", -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    int rc = SQLITE_DONE;
+    for (size_t i = 0; rc == SQLITE_DONE; i++) {
+        const char *code = iso_639_2_code_at(i);   /* the one canonical list */
+        if (!code) break;
+        sqlite3_reset(stmt);
+        sqlite3_bind_text(stmt, 1, code, -1, SQLITE_STATIC);
+        rc = sqlite3_step(stmt);
+    }
+    if (rc == SQLITE_DONE) {
+        sqlite3_reset(stmt);
+        sqlite3_bind_text(stmt, 1, "und", -1, SQLITE_STATIC);
+        rc = sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        LOG_INFO("Cache schema error: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    return schema_exec(db, SQL_HINT_VIEW);
+}
+
 /* Version 0 is used by the former runtime schema; version 1 by the SQL file. */
 static int apply_schema(sqlite3 *db) {
     sqlite3_int64 version = 0, legacy = 0;
@@ -186,6 +246,7 @@ static int apply_schema(sqlite3 *db) {
     for (size_t i = 0; i < sizeof(indexes) / sizeof(indexes[0]); i++) {
         if (schema_exec(db, indexes[i]) != 0) goto fail;
     }
+    if (apply_hint_schema(db) != 0) goto fail;
     if (schema_exec(db, "PRAGMA user_version=2; COMMIT;") != 0) goto fail;
     free(ddl);
     if (!legacy) schema_exec(db, "PRAGMA legacy_alter_table=OFF;");
@@ -250,8 +311,9 @@ static int prepare_statements(SqliteBackendContext *ctx) {
 
     /* Lookup by hash */
     const char *sql_lookup =
-        "SELECT id, hash, from_lang, to_lang, source_text, translated_text, "
-        "count, last_used, created_at FROM trans_cache WHERE hash = ?;";
+        "SELECT c.id, c.hash, c.from_lang, c.to_lang, c.source_text, c.translated_text, "
+        "c.count, c.last_used, c.created_at, h.source_hint, h.mixed, h.origin, h.hint_version "
+        "FROM trans_cache c LEFT JOIN trans_cache_source_hint h ON h.hash = c.hash WHERE c.hash = ?;";
     rc = sqlite3_prepare_v2(ctx->db, sql_lookup, -1, &ctx->stmt_lookup, NULL);
     if (rc != SQLITE_OK) {
         LOG_DEBUG("Error preparing lookup statement: %s\n", sqlite3_errmsg(ctx->db));
@@ -284,6 +346,27 @@ static int prepare_statements(SqliteBackendContext *ctx) {
     rc = sqlite3_prepare_v2(ctx->db, sql_update_trans, -1, &ctx->stmt_update_trans, NULL);
     if (rc != SQLITE_OK) {
         LOG_DEBUG("Error preparing update_translation statement: %s\n", sqlite3_errmsg(ctx->db));
+        return -1;
+    }
+
+    /* Upsert a hint for an existing auto row, never lowering its priority
+     * (model > script, then hint_version); a stored code outside the code
+     * table counts as no hint. ?1 is reused for the parent check. */
+    const char *sql_hint_upsert =
+        "INSERT INTO trans_cache_source_hint(hash, source_hint, mixed, origin, hint_version, updated_at) "
+        "SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE EXISTS "
+        "(SELECT 1 FROM trans_cache WHERE hash = ?1 AND from_lang = 'auto') "
+        "ON CONFLICT(hash) DO UPDATE SET source_hint = excluded.source_hint, mixed = excluded.mixed, "
+        "origin = excluded.origin, hint_version = excluded.hint_version, updated_at = excluded.updated_at "
+        "WHERE (CASE excluded.origin WHEN 'model' THEN 2 ELSE 1 END) > "
+        "      (CASE trans_cache_source_hint.origin WHEN 'model' THEN 2 ELSE 1 END) "
+        "   OR ((CASE excluded.origin WHEN 'model' THEN 2 ELSE 1 END) = "
+        "       (CASE trans_cache_source_hint.origin WHEN 'model' THEN 2 ELSE 1 END) "
+        "       AND excluded.hint_version >= trans_cache_source_hint.hint_version) "
+        "   OR trans_cache_source_hint.source_hint NOT IN (SELECT code FROM trans_cache_hint_code);";
+    rc = sqlite3_prepare_v2(ctx->db, sql_hint_upsert, -1, &ctx->stmt_hint_upsert, NULL);
+    if (rc != SQLITE_OK) {
+        LOG_DEBUG("Error preparing hint upsert statement: %s\n", sqlite3_errmsg(ctx->db));
         return -1;
     }
 
@@ -389,6 +472,7 @@ TransCache *sqlite_backend_init(const char *db_path) {
         sqlite3_finalize(ctx->stmt_update_trans);
         sqlite3_finalize(ctx->stmt_delete_old);
         sqlite3_finalize(ctx->stmt_count_all);
+        sqlite3_finalize(ctx->stmt_hint_upsert);
         sqlite3_close(ctx->db);
         free(ctx->db_path);
         free(ctx);
@@ -404,6 +488,22 @@ TransCache *sqlite_backend_init(const char *db_path) {
     LOG_INFO("SQLite cache initialized: %s\n", db_path);
 
     return cache;
+}
+
+/* Hint columns (source_hint, mixed, origin, hint_version) starting at `col`;
+ * NULL or anything invalid means "no hint". */
+static void read_hint(sqlite3_stmt *stmt, int col, CacheEntry *entry) {
+    memset(&entry->hint, 0, sizeof(entry->hint));
+    if (strcmp(entry->from_lang, "auto") != 0 || sqlite3_column_type(stmt, col) != SQLITE_TEXT) return;
+    const char *lang = (const char *)sqlite3_column_text(stmt, col);
+    const char *origin = (const char *)sqlite3_column_text(stmt, col + 2);
+    if (!lang || !origin || strlen(lang) != 3) return;
+    SourceHint h = { .mixed = sqlite3_column_int(stmt, col + 1) != 0,
+                     .version = sqlite3_column_int(stmt, col + 3) };
+    memcpy(h.lang, lang, 4);
+    if (strcmp(origin, "model") == 0) h.origin = SOURCE_HINT_ORIGIN_MODEL;
+    else if (strcmp(origin, "script") == 0) h.origin = SOURCE_HINT_ORIGIN_SCRIPT;
+    if (source_hint_valid(&h)) entry->hint = h;
 }
 
 /* Lookup cache entry */
@@ -450,6 +550,7 @@ static CacheEntry* sqlite_backend_lookup(void *backend_ctx,
     entry->count = sqlite3_column_int(ctx->stmt_lookup, 6);
     entry->last_used = (time_t)sqlite3_column_int64(ctx->stmt_lookup, 7);
     entry->created_at = (time_t)sqlite3_column_int64(ctx->stmt_lookup, 8);
+    read_hint(ctx->stmt_lookup, 9, entry);
 
     sqlite3_reset(ctx->stmt_lookup);
 
@@ -573,6 +674,165 @@ static int sqlite_backend_update_translation(void *backend_ctx,
     return 0;
 }
 
+/* Result of one parent mutation attempt, kept apart from the caller's copy
+ * until COMMIT succeeds (PLAN_SOURCE_HINT_METADATA.md section 6.3). */
+typedef struct {
+    int count;
+    time_t last_used;
+    bool translation_changed;
+} StagedParent;
+
+static int step_done(sqlite3_stmt *stmt) {
+    int rc = sqlite3_step(stmt);
+    sqlite3_reset(stmt);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+static int insert_parent(SqliteBackendContext *ctx, const char *hash, const char *from_lang,
+                         const char *to_lang, const char *source_text, const char *translated_text,
+                         time_t now) {
+    sqlite3_stmt *st = ctx->stmt_insert;
+    sqlite3_reset(st);
+    sqlite3_bind_text(st, 1, hash, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, from_lang, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 3, to_lang, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 4, source_text, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 5, translated_text, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 6, (sqlite3_int64)now);
+    sqlite3_bind_int64(st, 7, (sqlite3_int64)now);
+    return step_done(st);
+}
+
+/* The same mutation as add / update_count / update_translation, but nothing is
+ * written into `cached`. A row that vanished since the lookup (0 rows changed,
+ * read right after the parent statement) is inserted again. */
+static int mutate_parent(SqliteBackendContext *ctx, const char *hash, const char *from_lang,
+                         const char *to_lang, const char *source_text, const char *translated_text,
+                         const CacheEntry *cached, StagedParent *staged) {
+    time_t now = time(NULL);
+    staged->last_used = now;
+    staged->translation_changed = cached && strcmp(cached->translated_text, translated_text) != 0;
+    if (!cached) {
+        staged->count = 1;
+        return insert_parent(ctx, hash, from_lang, to_lang, source_text, translated_text, now);
+    }
+
+    sqlite3_stmt *st;
+    if (!staged->translation_changed) {
+        staged->count = cached->count + 1;            /* update_count semantics */
+        st = ctx->stmt_update_count;
+        sqlite3_reset(st);
+        sqlite3_bind_int(st, 1, staged->count);
+        sqlite3_bind_int64(st, 2, (sqlite3_int64)now);
+        sqlite3_bind_text(st, 3, hash, -1, SQLITE_STATIC);
+    } else {
+        staged->count = 1;                            /* update_translation semantics */
+        st = ctx->stmt_update_trans;
+        sqlite3_reset(st);
+        sqlite3_bind_text(st, 1, translated_text, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 2, (sqlite3_int64)now);
+        sqlite3_bind_text(st, 3, hash, -1, SQLITE_STATIC);
+    }
+    if (step_done(st) != 0) return -1;
+    if (sqlite3_changes(ctx->db) == 0) {
+        staged->count = 1;
+        staged->translation_changed = strcmp(cached->translated_text, translated_text) != 0;
+        return insert_parent(ctx, hash, from_lang, to_lang, source_text, translated_text, now);
+    }
+    return 0;
+}
+
+/* Returns 1 if the stored hint was replaced, 0 if priority kept the old one,
+ * -1 on error. */
+static int upsert_hint(SqliteBackendContext *ctx, const char *hash, const SourceHint *hint) {
+    sqlite3_stmt *st = ctx->stmt_hint_upsert;
+    sqlite3_reset(st);
+    sqlite3_bind_text(st, 1, hash, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, hint->lang, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(st, 3, hint->mixed ? 1 : 0);
+    sqlite3_bind_text(st, 4, hint->origin == SOURCE_HINT_ORIGIN_MODEL ? "model" : "script", -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 5, hint->version);
+    sqlite3_bind_int64(st, 6, (sqlite3_int64)time(NULL));
+    if (step_done(st) != 0) return -1;
+    return sqlite3_changes(ctx->db) > 0 ? 1 : 0;
+}
+
+/* BEGIN IMMEDIATE -> parent -> SAVEPOINT hint -> hint -> RELEASE -> COMMIT.
+ * - A hint statement error that leaves the transaction open is undone with
+ *   ROLLBACK TO; the parent still commits.
+ * - Some errors (e.g. SQLITE_FULL) abort the whole transaction, parent
+ *   included: then the parent alone is retried once, from fresh staging.
+ * - SQLITE_BUSY from another process is not waited for (best-effort cache).
+ * - The deadline is checked again right before COMMIT. */
+static int sqlite_backend_store_result(void *backend_ctx, const char *from_lang, const char *to_lang,
+                                       const char *source_text, const char *translated_text,
+                                       CacheEntry *cached, const SourceHint *hint,
+                                       const TranslationControl *control) {
+    if (!backend_ctx) return -1;
+    SqliteBackendContext *ctx = (SqliteBackendContext *)backend_ctx;
+    char hash[65];
+    trans_cache_calculate_hash(from_lang, to_lang, source_text, hash);
+
+    char *caller_copy = NULL;          /* allocated before anything is written */
+    if (cached && strcmp(cached->translated_text, translated_text) != 0) {
+        caller_copy = strdup(translated_text);
+        if (!caller_copy) return -1;
+    }
+
+    const SourceHint *want_hint = hint;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        StagedParent staged;
+        int hint_written = 0;
+        if (sqlite3_exec(ctx->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+            LOG_INFO("Cache write skipped: %s", sqlite3_errmsg(ctx->db));   /* BUSY: fail fast */
+            break;
+        }
+        if (mutate_parent(ctx, hash, from_lang, to_lang, source_text, translated_text, cached, &staged) != 0) {
+            LOG_DEBUG("Cache parent write failed: %s\n", sqlite3_errmsg(ctx->db));
+            if (!sqlite3_get_autocommit(ctx->db)) sqlite3_exec(ctx->db, "ROLLBACK", NULL, NULL, NULL);
+            break;
+        }
+        if (want_hint) {
+            int rc = sqlite3_exec(ctx->db, "SAVEPOINT hint", NULL, NULL, NULL) == SQLITE_OK
+                         ? upsert_hint(ctx, hash, want_hint) : -1;
+            if (rc < 0) {
+                if (sqlite3_get_autocommit(ctx->db)) {
+                    /* The error ended the whole transaction: retry the parent only. */
+                    LOG_INFO("Cache hint write aborted the transaction (%s); retrying without the hint",
+                             sqlite3_errmsg(ctx->db));
+                    want_hint = NULL;
+                    continue;
+                }
+                LOG_INFO("Cache hint write failed (%s); keeping the translation", sqlite3_errmsg(ctx->db));
+                sqlite3_exec(ctx->db, "ROLLBACK TO hint", NULL, NULL, NULL);
+                sqlite3_exec(ctx->db, "RELEASE hint", NULL, NULL, NULL);
+            } else {
+                hint_written = rc;
+                sqlite3_exec(ctx->db, "RELEASE hint", NULL, NULL, NULL);
+            }
+        }
+        if (!translation_remaining_ms(control) ||
+            sqlite3_exec(ctx->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+            if (!sqlite3_get_autocommit(ctx->db)) sqlite3_exec(ctx->db, "ROLLBACK", NULL, NULL, NULL);
+            break;
+        }
+        if (cached) {   /* committed: mirror the staged result into the caller's copy */
+            if (caller_copy) {
+                free(cached->translated_text);
+                cached->translated_text = caller_copy;
+                caller_copy = NULL;
+            }
+            cached->count = staged.count;
+            cached->last_used = staged.last_used;
+            if (hint_written) cached->hint = *want_hint;
+        }
+        free(caller_copy);
+        return 0;
+    }
+    free(caller_copy);
+    return -1;
+}
+
 /* Save cache (no-op for SQLite - auto-commit) */
 static int sqlite_backend_save(void *backend_ctx) {
     (void)backend_ctx;
@@ -676,6 +936,7 @@ static void sqlite_backend_free(void *backend_ctx) {
     if (ctx->stmt_update_trans) sqlite3_finalize(ctx->stmt_update_trans);
     if (ctx->stmt_delete_old) sqlite3_finalize(ctx->stmt_delete_old);
     if (ctx->stmt_count_all) sqlite3_finalize(ctx->stmt_count_all);
+    if (ctx->stmt_hint_upsert) sqlite3_finalize(ctx->stmt_hint_upsert);
 
     /* Close database */
     if (ctx->db) {
@@ -697,7 +958,8 @@ CacheBackendOps *sqlite_backend_get_ops(void) {
         .save = sqlite_backend_save,
         .cleanup = sqlite_backend_cleanup,
         .stats = sqlite_backend_stats,
-        .free_backend = sqlite_backend_free
+        .free_backend = sqlite_backend_free,
+        .store_result = sqlite_backend_store_result
     };
     return &ops;
 }

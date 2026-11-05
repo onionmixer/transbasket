@@ -18,6 +18,13 @@ typedef enum {
     MODEL_TYPE_CODEX           /* codex CLI (CODEX_INTERFACE: exec or legacy MCP) */
 } ModelType;
 
+/* How from=auto translations record the source text's base language (SOURCE_HINT_MODE) */
+typedef enum {
+    SOURCE_HINT_OFF = 0,       /* no hint */
+    SOURCE_HINT_SCRIPT,        /* script classifier (default) */
+    SOURCE_HINT_MODEL          /* codex exec structured output, classifier as fallback */
+} SourceHintMode;
+
 /* How the codex backend talks to the CLI (CODEX_INTERFACE) */
 typedef enum {
     CODEX_INTERFACE_EXEC = 0,  /* `codex exec` per request (default, current CLIs) */
@@ -62,6 +69,7 @@ typedef struct {
     int inflight_max_keys;         /* 0 (unset) = MAX_WORKERS */
     int inflight_max_waiters;      /* default 256 */
     int inflight_max_waiters_per_key; /* default 64 */
+    SourceHintMode source_hint_mode;  /* SOURCE_HINT_MODE, default script */
     bool cache_cleanup_enabled;  /* Enable automatic cleanup (default: true) */
     int cache_cleanup_days;  /* Cleanup entries older than N days (default: 60) */
 

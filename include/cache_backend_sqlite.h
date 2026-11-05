@@ -24,6 +24,7 @@ typedef struct {
     sqlite3_stmt *stmt_update_trans;/* UPDATE translation */
     sqlite3_stmt *stmt_delete_old;  /* DELETE old entries */
     sqlite3_stmt *stmt_count_all;   /* COUNT(*) */
+    sqlite3_stmt *stmt_hint_upsert; /* source_hint upsert (never lowers priority) */
 } SqliteBackendContext;
 
 /**

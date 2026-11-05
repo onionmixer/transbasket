@@ -6,9 +6,23 @@
 #include <pthread.h>
 #include "config_loader.h"  /* For CacheBackendType */
 #include "utils.h"
+#include "translation_control.h"
 
 /* Forward declaration */
 typedef struct TransCache TransCache;
+
+/* source_hint metadata of a from=auto entry (PLAN_SOURCE_HINT_METADATA.md).
+ * origin 0 means "no hint". */
+#define SOURCE_HINT_ORIGIN_NONE   0
+#define SOURCE_HINT_ORIGIN_SCRIPT 's'
+#define SOURCE_HINT_ORIGIN_MODEL  'm'
+
+typedef struct {
+    char lang[4];           /* canonical code (ISO_639_2_CODES) or "und" */
+    bool mixed;
+    char origin;            /* SOURCE_HINT_ORIGIN_* */
+    int  version;           /* version of the rule set that produced it, >= 1 */
+} SourceHint;
 
 /* Cache entry structure */
 typedef struct {
@@ -21,6 +35,7 @@ typedef struct {
     int count;              /* Number of times this translation was requested */
     time_t last_used;       /* Last access timestamp (Unix time) */
     time_t created_at;      /* Creation timestamp (Unix time) */
+    SourceHint hint;        /* from=auto only; origin 0 = none */
 } CacheEntry;
 
 /* Cache backend operations interface */
@@ -53,6 +68,13 @@ typedef struct {
 
     /* Free backend resources */
     void (*free_backend)(void *backend_ctx);
+
+    /* Persist an engine result and (optionally) its hint as one operation; see
+     * trans_cache_store_result(). Called with the cache write lock held. */
+    int (*store_result)(void *backend_ctx, const char *from_lang, const char *to_lang,
+                        const char *source_text, const char *translated_text,
+                        CacheEntry *cached, const SourceHint *hint,
+                        const TranslationControl *control);
 } CacheBackendOps;
 
 /* Translation cache structure (backend-agnostic) */
@@ -112,6 +134,39 @@ int trans_cache_update_count(TransCache *cache, CacheEntry *entry);
 int trans_cache_update_translation(TransCache *cache,
                                    CacheEntry *entry,
                                    const char *new_translation);
+
+/* Persist an engine result (the owner's only cache write) together with its
+ * source_hint, under ONE acquisition of the write lock.
+ *   - cached: the caller's lookup copy, or NULL. The parent mutation is the
+ *     same as before: NULL -> add; same translation -> update_count;
+ *     different -> update_translation. If the stored row vanished meanwhile
+ *     (the update matched 0 rows) the row is added again.
+ *   - hint: written only for from_lang "auto", only when valid, only after the
+ *     parent mutation succeeded, and only if it does not lower the stored
+ *     hint's priority (model > script; higher version wins; same-version model
+ *     replaces). A failed hint write never fails the call.
+ *   - control: checked after the lock is acquired and again before commit; an
+ *     expired deadline writes nothing. NULL means no deadline.
+ * The caller's copy is updated only after the write succeeded.
+ * Returns 0 when the parent row was persisted, -1 otherwise. */
+int trans_cache_store_result(TransCache *cache,
+                             const char *from_lang,
+                             const char *to_lang,
+                             const char *source_text,
+                             const char *translated_text,
+                             CacheEntry *cached,
+                             const SourceHint *hint,
+                             const TranslationControl *control);
+
+/* true if lang is a canonical stored code: a lowercase entry of
+ * ISO_639_2_CODES or "und". */
+bool source_hint_lang_canonical(const char *lang);
+
+/* true if hint is complete and valid for storage. */
+bool source_hint_valid(const SourceHint *hint);
+
+/* true if `incoming` may replace `stored` (stored may be "no hint"). */
+bool source_hint_replaces(const SourceHint *incoming, const SourceHint *stored);
 
 /* Save cache to storage */
 int trans_cache_save(TransCache *cache);

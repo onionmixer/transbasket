@@ -111,4 +111,13 @@ test-source-hint: directories
 	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(SOURCE_HINT_TEST_BIN) tests/test_source_hint.c src/source_hint.c
 	python3 -I tests/test_source_hint.py $(SOURCE_HINT_TEST_BIN) $(SOURCE_HINT_TEST_ARGS)
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint
+# Storage tests: hint side table, transactions, migration, text backend.
+SOURCE_HINT_STORE_BIN ?= $(OBJ_DIR)/test_source_hint_store
+test-source-hint-store: directories
+	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $(TEST_SANITIZERS) -o $(SOURCE_HINT_STORE_BIN) tests/test_source_hint_store.c src/trans_cache.c src/cache_backend_text.c src/cache_backend_sqlite.c src/utils.c -lcjson -lcrypto -luuid -lsqlite3
+	$(SOURCE_HINT_STORE_BIN)
+
+test-source-hint-server: all
+	python3 tests/test_source_hint_server.py
+
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server

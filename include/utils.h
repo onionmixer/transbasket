@@ -26,6 +26,10 @@ void get_log_timestamp(char *buffer, size_t size);
  * specific codes "zhs"/"zht" (Chinese Simplified/Traditional). */
 bool validate_language_code(const char *lang_code);
 
+/* i-th entry of the supported code list (ISO 639-2/B plus zhs/zht), NULL past the end.
+ * The single source of the canonical codes, e.g. for the SQLite hint code table. */
+const char *iso_639_2_code_at(size_t i);
+
 /* UUID v4 validation (RFC 4122) */
 bool validate_uuid(const char *uuid_str);
 

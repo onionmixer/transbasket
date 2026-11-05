@@ -16,6 +16,7 @@
 #include "language_table.h"
 #include "utils.h"
 #include "trans_cache.h"
+#include "source_hint.h"
 
 /* libmicrohttpd 0.9.74 renamed the 422 constant and deprecated the old name.
  * Define the new name ourselves on older releases so both versions build clean. */
@@ -138,6 +139,20 @@ static int handle_health_check(struct MHD_Connection *connection, TranslationSer
     MHD_destroy_response(response);
 
     return ret;
+}
+
+/* source_hint of a from=auto result (PLAN_SOURCE_HINT_METADATA.md): the
+ * script classifier's value. Returns false when no hint is to be stored. */
+static bool script_source_hint(const Config *config, const TranslationRequest *req, SourceHint *out) {
+    if (config->source_hint_mode == SOURCE_HINT_OFF || strcmp(req->from_lang, "auto") != 0) return false;
+    SourceHintGuess guess;
+    if (source_hint_classify((const unsigned char *)req->text, strlen(req->text), &guess) != 0) return false;
+    memset(out, 0, sizeof(*out));
+    memcpy(out->lang, guess.lang, sizeof(out->lang));
+    out->mixed = guess.mixed;
+    out->origin = SOURCE_HINT_ORIGIN_SCRIPT;
+    out->version = SOURCE_HINT_VERSION;
+    return true;
 }
 
 /* Translation endpoint handler */
@@ -294,14 +309,12 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
             status = server->config->model_type == MODEL_TYPE_CODEX && error.status_code
                 ? error.status_code : error.retryable ? 503 : 502;
         } else if (server->cache && translation_remaining_ms(control)) {
-            int rc;
-            if (!cached) {
-                rc = trans_cache_add(server->cache, req->from_lang, req->to_lang, req->text, translated);
-            } else if (strcmp(cached->translated_text, translated) == 0) {
-                rc = trans_cache_update_count(server->cache, cached);
-            } else {
-                rc = trans_cache_update_translation(server->cache, cached, translated);
-            }
+            /* One write for the result and its hint; the deadline is checked
+             * again inside, after the cache lock is acquired. */
+            SourceHint hint;
+            bool have_hint = script_source_hint(server->config, req, &hint);
+            int rc = trans_cache_store_result(server->cache, req->from_lang, req->to_lang, req->text,
+                                              translated, cached, have_hint ? &hint : NULL, control);
             if (rc != 0) LOG_INFO("[%s] Cache write failed; sharing translation without persistence", request_uuid);
         }
         /* Publication owns the strings and happens even if this client went away. */

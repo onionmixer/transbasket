@@ -124,6 +124,13 @@ static const LanguageMap LANGUAGE_NAMES[] = {
 };
 
 /* Validate ISO 639-2 language code */
+const char *iso_639_2_code_at(size_t i) {
+    for (size_t k = 0; ISO_639_2_CODES[k] != NULL; k++) {
+        if (k == i) return ISO_639_2_CODES[k];
+    }
+    return NULL;
+}
+
 bool validate_language_code(const char *lang_code) {
     if (!lang_code || strlen(lang_code) != 3) {
         return false;

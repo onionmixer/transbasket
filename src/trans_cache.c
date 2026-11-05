@@ -162,6 +162,59 @@ int trans_cache_update_translation(TransCache *cache,
     return result;
 }
 
+bool source_hint_lang_canonical(const char *lang) {
+    if (!lang || strlen(lang) != 3) return false;
+    for (int i = 0; i < 3; i++)
+        if (lang[i] < 'a' || lang[i] > 'z') return false;      /* stored codes are lowercase */
+    return strcmp(lang, "und") == 0 || validate_language_code(lang);
+}
+
+bool source_hint_valid(const SourceHint *hint) {
+    return hint && (hint->origin == SOURCE_HINT_ORIGIN_SCRIPT || hint->origin == SOURCE_HINT_ORIGIN_MODEL) &&
+           hint->version >= 1 && source_hint_lang_canonical(hint->lang);
+}
+
+/* model > script; within one origin the higher version wins and an equal
+ * version replaces (same-version model: the latest result wins; same-version
+ * script: identical value). */
+bool source_hint_replaces(const SourceHint *incoming, const SourceHint *stored) {
+    if (!source_hint_valid(incoming)) return false;
+    if (!stored || !source_hint_valid(stored)) return true;
+    int in_rank = incoming->origin == SOURCE_HINT_ORIGIN_MODEL ? 2 : 1;
+    int st_rank = stored->origin == SOURCE_HINT_ORIGIN_MODEL ? 2 : 1;
+    if (in_rank != st_rank) return in_rank > st_rank;
+    return incoming->version >= stored->version;
+}
+
+int trans_cache_store_result(TransCache *cache,
+                             const char *from_lang,
+                             const char *to_lang,
+                             const char *source_text,
+                             const char *translated_text,
+                             CacheEntry *cached,
+                             const SourceHint *hint,
+                             const TranslationControl *control) {
+    if (!cache || !cache->ops || !cache->ops->store_result || !from_lang || !to_lang ||
+        !source_text || !translated_text ||
+        (strlen(from_lang) != 3 && strcmp(from_lang, "auto") != 0) || strlen(to_lang) != 3) {
+        return -1;
+    }
+    /* Hints belong to from=auto entries only; an invalid one is dropped here
+     * so no backend ever stores it. */
+    if (strcmp(from_lang, "auto") != 0 || !source_hint_valid(hint)) hint = NULL;
+
+    pthread_rwlock_wrlock(&cache->lock);
+    int result = -1;
+    /* The deadline is checked after the lock is acquired: waiting for the lock
+     * can outlast the request budget. */
+    if (translation_remaining_ms(control)) {
+        result = cache->ops->store_result(cache->backend_ctx, from_lang, to_lang, source_text,
+                                          translated_text, cached, hint, control);
+    }
+    pthread_rwlock_unlock(&cache->lock);
+    return result;
+}
+
 /* Save cache to storage */
 int trans_cache_save(TransCache *cache) {
     if (!cache || !cache->ops || !cache->ops->save) {

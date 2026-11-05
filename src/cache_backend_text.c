@@ -29,6 +29,32 @@ static void text_backend_stats(void *ctx, size_t *total_entries,
                                size_t *active_entries, size_t *expired_entries,
                                int cache_threshold, int days_threshold);
 static void text_backend_free(void *ctx);
+static int text_backend_store_result(void *ctx, const char *from_lang, const char *to_lang,
+                                     const char *source_text, const char *translated_text,
+                                     CacheEntry *cached, const SourceHint *hint,
+                                     const TranslationControl *control);
+
+/* Optional hint fields of an auto row. Anything malformed means "no hint"; the
+ * row itself is still loaded (PLAN_SOURCE_HINT_METADATA.md section 6.2). */
+static void load_hint(cJSON *json, CacheEntry *entry) {
+    memset(&entry->hint, 0, sizeof(entry->hint));
+    if (strcmp(entry->from_lang, "auto") != 0) return;
+    cJSON *lang = cJSON_GetObjectItemCaseSensitive(json, "source_hint");
+    cJSON *mixed = cJSON_GetObjectItemCaseSensitive(json, "hint_mixed");
+    cJSON *origin = cJSON_GetObjectItemCaseSensitive(json, "hint_origin");
+    cJSON *version = cJSON_GetObjectItemCaseSensitive(json, "hint_version");
+    if (!cJSON_IsString(lang) || !cJSON_IsBool(mixed) || !cJSON_IsString(origin) || !cJSON_IsNumber(version))
+        return;
+    if (version->valuedouble < 1 || version->valuedouble > 1e9 || version->valuedouble != (double)version->valueint)
+        return;
+    SourceHint h = { .mixed = cJSON_IsTrue(mixed), .version = version->valueint };
+    if (strcmp(origin->valuestring, "model") == 0) h.origin = SOURCE_HINT_ORIGIN_MODEL;
+    else if (strcmp(origin->valuestring, "script") == 0) h.origin = SOURCE_HINT_ORIGIN_SCRIPT;
+    else return;
+    if (strlen(lang->valuestring) != 3) return;
+    memcpy(h.lang, lang->valuestring, 4);
+    if (source_hint_valid(&h)) entry->hint = h;
+}
 
 /* Load cache entries from JSONL file */
 static int load_cache_from_file(TextBackendContext *ctx, const char *file_path) {
@@ -99,6 +125,7 @@ static int load_cache_from_file(TextBackendContext *ctx, const char *file_path) 
         entry->count = count_json->valueint;
         entry->last_used = (time_t)last_used_json->valuedouble;
         entry->created_at = (time_t)created_at_json->valuedouble;
+        load_hint(json, entry);
 
         if (!entry->source_text || !entry->translated_text) {
             LOG_DEBUG("Error: Memory allocation failed\n");
@@ -236,6 +263,7 @@ static CacheEntry *text_entry_clone(const CacheEntry *src) {
     copy->count = src->count;
     copy->last_used = src->last_used;
     copy->created_at = src->created_at;
+    copy->hint = src->hint;
     copy->source_text = strdup(src->source_text ? src->source_text : "");
     copy->translated_text = strdup(src->translated_text ? src->translated_text : "");
 
@@ -417,6 +445,67 @@ static int text_backend_update_translation(void *backend_ctx,
     return 0;
 }
 
+/* Engine result + hint as one operation (see trans_cache_store_result()).
+ * In memory there is nothing between the caller's deadline check and the
+ * mutation that could block, so `control` needs no second check here. Every
+ * allocation happens before the first mutation. */
+static int text_backend_store_result(void *backend_ctx, const char *from_lang, const char *to_lang,
+                                     const char *source_text, const char *translated_text,
+                                     CacheEntry *cached, const SourceHint *hint,
+                                     const TranslationControl *control) {
+    (void)control;
+    if (!backend_ctx) return -1;
+    TextBackendContext *ctx = (TextBackendContext *)backend_ctx;
+
+    char hash[65];
+    trans_cache_calculate_hash(from_lang, to_lang, source_text, hash);
+    CacheEntry *stored = text_find_stored(ctx, hash);
+
+    char *caller_copy = NULL;
+    if (cached && strcmp(cached->translated_text, translated_text) != 0) {
+        caller_copy = strdup(translated_text);
+        if (!caller_copy) return -1;
+    }
+
+    if (!stored) {
+        /* New row, or the row vanished since the caller's lookup. */
+        if (text_backend_add(ctx, from_lang, to_lang, source_text, translated_text) != 0 ||
+            !(stored = text_find_stored(ctx, hash))) {
+            free(caller_copy);
+            return -1;
+        }
+    } else if (!cached) {
+        /* add() semantics: an existing row is kept as it is. */
+    } else if (!caller_copy) {
+        stored->count++;
+        stored->last_used = time(NULL);
+    } else {
+        char *stored_copy = strdup(translated_text);
+        if (!stored_copy) {
+            free(caller_copy);
+            return -1;
+        }
+        free(stored->translated_text);
+        stored->translated_text = stored_copy;
+        stored->count = 1;
+        stored->last_used = time(NULL);
+    }
+
+    if (hint && strcmp(stored->from_lang, "auto") == 0 && source_hint_replaces(hint, &stored->hint))
+        stored->hint = *hint;
+
+    if (cached) {   /* the write succeeded: mirror it into the caller's copy */
+        if (caller_copy) {
+            free(cached->translated_text);
+            cached->translated_text = caller_copy;
+        }
+        cached->count = stored->count;
+        cached->last_used = stored->last_used;
+        cached->hint = stored->hint;
+    }
+    return 0;
+}
+
 /* Save cache to file */
 static int text_backend_save(void *backend_ctx) {
     if (!backend_ctx) {
@@ -455,6 +544,13 @@ static int text_backend_save(void *backend_ctx) {
         cJSON_AddNumberToObject(json, "count", entry->count);
         cJSON_AddNumberToObject(json, "last_used", (double)entry->last_used);
         cJSON_AddNumberToObject(json, "created_at", (double)entry->created_at);
+        if (strcmp(entry->from_lang, "auto") == 0 && source_hint_valid(&entry->hint)) {
+            cJSON_AddStringToObject(json, "source_hint", entry->hint.lang);
+            cJSON_AddBoolToObject(json, "hint_mixed", entry->hint.mixed);
+            cJSON_AddStringToObject(json, "hint_origin",
+                                    entry->hint.origin == SOURCE_HINT_ORIGIN_MODEL ? "model" : "script");
+            cJSON_AddNumberToObject(json, "hint_version", entry->hint.version);
+        }
 
         /* Write to file */
         char *json_str = cJSON_PrintUnformatted(json);
@@ -574,7 +670,8 @@ CacheBackendOps *text_backend_get_ops(void) {
         .save = text_backend_save,
         .cleanup = text_backend_cleanup,
         .stats = text_backend_stats,
-        .free_backend = text_backend_free
+        .free_backend = text_backend_free,
+        .store_result = text_backend_store_result
     };
     return &ops;
 }

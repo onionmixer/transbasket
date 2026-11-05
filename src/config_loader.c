@@ -367,6 +367,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->cache_sqlite_sync = strdup("NORMAL");
     config->cache_threshold = 5;
     config->translation_total_timeout = 110;
+    config->source_hint_mode = SOURCE_HINT_SCRIPT;
     config->inflight_max_waiters = 256;
     config->inflight_max_waiters_per_key = 64;
     config->cache_cleanup_enabled = true;
@@ -491,6 +492,17 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             } else {
                 LOG_INFO("Warning: Invalid TRANS_CACHE_SQLITE_SYNC '%s', using 'NORMAL'\n", value);
                 config->cache_sqlite_sync = strdup("NORMAL");
+            }
+        } else if (strcmp(key, "SOURCE_HINT_MODE") == 0) {
+            if (strcasecmp(value, "off") == 0) {
+                config->source_hint_mode = SOURCE_HINT_OFF;
+            } else if (strcasecmp(value, "script") == 0) {
+                config->source_hint_mode = SOURCE_HINT_SCRIPT;
+            } else if (strcasecmp(value, "model") == 0) {
+                config->source_hint_mode = SOURCE_HINT_MODEL;
+            } else {
+                LOG_INFO("Warning: Invalid SOURCE_HINT_MODE '%s', using 'script'\n", value);
+                config->source_hint_mode = SOURCE_HINT_SCRIPT;
             }
         } else if (strcmp(key, "TRANSLATION_TOTAL_TIMEOUT") == 0) {
             config->translation_total_timeout = positive_integer(value);
