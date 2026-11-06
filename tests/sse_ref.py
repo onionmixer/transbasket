@@ -80,6 +80,8 @@ def parse(body):
         out += c
         return st
 
+    if body.startswith(b"\xef\xbb\xbf"):
+        body = body[3:]                      # SSE: a leading BOM is skipped
     for line in _LINE.split(body):
         if line == b"":
             st = dispatch()
@@ -89,14 +91,15 @@ def parse(body):
             continue
         if line.startswith(b":"):
             continue
-        if line.startswith(b"data:"):
-            v = line[5:]
-            ev.append(v[1:] if v.startswith(b" ") else v)
+        name, colon, value = line.partition(b":")   # no colon: the whole line is the name, value empty
+        if colon and value.startswith(b" "):
+            value = value[1:]
+        if name == b"data":
+            ev.append(value)
             has_data = True
-        elif line.startswith(b"event:"):
-            v = line[6:]
-            error_event = (v[1:] if v.startswith(b" ") else v) == b"error"
-    st = dispatch()
+        elif name == b"event":
+            error_event = value == b"error"
+    st = dispatch()                          # a last event without the blank line is still read (deliberate)
     if st != OK:
         return st, None
     return OK, (out or None)
@@ -126,9 +129,14 @@ CASES = [
     (b'data: {"error":null,"choices":[{"delta":{"content":"A"}}]}\n\n', OK, b"A"),
     (b"data: [DONE]\n\n", OK, None), (b"", OK, None), (b"data: \n\n", OK, None), (b"data:\ndata:\n\n", BAD_JSON, None),
     (b'data: {"choices":[{"delta":{"content":"a\\u0000b"}}]}\n\n', NUL_ESCAPE, None),
+    (b"\xef\xbb\xbfdata: " + delta("A") + b"\n\ndata: " + delta("B") + b"\n\n", OK, b"AB"),      # leading BOM
+    (b"data: " + delta("A") + b"\n\n\xef\xbb\xbfdata: " + delta("B") + b"\n\n", OK, b"A"),     # BOM only at the start
+    (b"event: error\nevent\ndata: " + delta("A") + b"\n\n", OK, b"A"),                     # colonless event resets
+    (b"data\ndata: " + delta("A") + b"\n\n", OK, b"A"),                                     # colonless data: "" + LF + JSON
+    (b"data: " + delta("A") + b"\n\ndata: " + delta("B"), OK, b"AB"),                        # last event without blank line
 ]
 
-TOKENS = [b"data: ", b"data:", b"event: error\n", b"event: x\n", b": c\n", b"\n", b"\r\n", b"\r", b"\n\n", b"\r\n\r\n",
+TOKENS = [b"data: ", b"data:", b"data\n", b"event\n", b"\xef\xbb\xbf", b"event: error\n", b"event: x\n", b": c\n", b"\n", b"\r\n", b"\r", b"\n\n", b"\r\n\r\n",
           b"[DONE]", b"BROKEN", b"\x00", b'{"error":{"m":1}}', b'{"error":null}', b'{"choices":[]}',
           b'{"choices":[{"delta":{}}]}', b'{"choices":[{"delta":{"content":null}}]}', b'{"choices":[{"delta":{"content":1}}]}',
           b'{"choices":[{"delta":{"content":"\\u0000"}}]}', b'{"choices":[{"delta":{"content":"\\u00e9"}}]}', b"{",

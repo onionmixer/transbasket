@@ -219,9 +219,10 @@ int main(int argc, char *argv[]) {
     }
 
     if (run_as_daemon) {
-        if (g_shutdown) {
+        int ready = g_shutdown ? 1 : daemon_ready(&g_shutdown);   /* checked again just before the report */
+        if (ready == 1) {
             LOG_INFO("Stop requested during startup; not reporting the daemon as started");
-        } else if (daemon_ready() != 0) {
+        } else if (ready != 0) {
             LOG_INFO("Error: could not switch the daemon's output; stopping");
             g_shutdown = 1;
         }

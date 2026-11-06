@@ -19,6 +19,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include "utils.h"
 
 void log_escape(const char *in, size_t max_in, char *out, size_t out_size) {
@@ -95,11 +96,13 @@ void get_log_timestamp(char *buffer, size_t size) {
 }
 
 /* Log message with timestamp and level */
-/* Daemon startup: every log line is also appended here (daemon.c), -1 = off. */
-static volatile int g_log_tee_fd = -1;
+/* Daemon startup: every log line is also appended here (daemon.c), -1 = off.
+ * Atomic because request threads already log while daemon_ready() turns it off;
+ * daemon.c never closes the fd, so a late write still lands in the log file. */
+static atomic_int g_log_tee_fd = -1;
 
 void log_set_tee(int fd) {
-    g_log_tee_fd = fd;
+    atomic_store(&g_log_tee_fd, fd);
 }
 
 /* The whole line is formatted first and written in one call, to stdout and to the
@@ -141,7 +144,7 @@ void log_message(const char *level, const char *format, ...) {
 
     fputs(line, stdout);
     fflush(stdout);
-    int tee = g_log_tee_fd;
+    int tee = atomic_load(&g_log_tee_fd);
     if (tee >= 0) {
         ssize_t w = write(tee, line, len + 1);
         (void)w;

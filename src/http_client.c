@@ -288,11 +288,35 @@ static SseStatus sse_event(const char *data, size_t len, bool error_event,
     return st;
 }
 
+/* One SSE field line (not blank, not a comment): the name runs to the first ':' or
+ * the end of the line, the value follows the colon minus one leading space; a line
+ * without a colon is a field with an empty value. Only data and event matter. */
+static void sse_field(const char *line, size_t len, char *ev, size_t *ev_len, bool *ev_data, bool *ev_error) {
+    const char *colon = memchr(line, ':', len);
+    size_t name_len = colon ? (size_t)(colon - line) : len;
+    const char *val = colon ? colon + 1 : line + len;
+    size_t val_len = colon ? len - name_len - 1 : 0;
+    if (val_len > 0 && val[0] == ' ') {
+        val++;
+        val_len--;
+    }
+    if (name_len == 4 && memcmp(line, "data", 4) == 0) {
+        if (*ev_data) ev[(*ev_len)++] = '\n';
+        memcpy(ev + *ev_len, val, val_len);
+        *ev_len += val_len;
+        *ev_data = true;
+    } else if (name_len == 5 && memcmp(line, "event", 5) == 0) {
+        *ev_error = val_len == 5 && memcmp(val, "error", 5) == 0;
+    }
+}
+
 /* Handle a streaming response: an SSE body of `size` bytes (not a C string - a NUL
- * byte must not end the scan early). Lines end in LF, CRLF or CR; a blank line ends
- * an event; "data:" lines (one optional space after the colon) are joined with LF;
- * ":" comment lines and other fields are ignored; a last event without a blank line
- * is still read. Returns the concatenated content, or NULL with *status set. */
+ * byte must not end the scan early). A leading UTF-8 BOM is skipped; lines end in LF,
+ * CRLF or CR; a blank line ends an event; "data" lines are joined with LF; ":"
+ * comment lines and other fields are ignored. A last event without the blank line is
+ * still read (deliberately, unlike the SSE rule: dropping it would return the reply
+ * without its end as a success). Returns the concatenated content, or NULL with
+ * *status set. */
 static char *handle_streaming_response(const char *data, size_t size, const char *request_uuid,
                                        SseStatus *status) {
     (void)request_uuid;
@@ -315,7 +339,7 @@ static char *handle_streaming_response(const char *data, size_t size, const char
     acc[0] = '\0';
     size_t acc_len = 0, ev_len = 0;
     bool ev_data = false, ev_error = false;
-    size_t i = 0;
+    size_t i = (size >= 3 && memcmp(data, "\xEF\xBB\xBF", 3) == 0) ? 3 : 0;
 
     for (;;) {
         size_t j = i;
@@ -326,20 +350,10 @@ static char *handle_streaming_response(const char *data, size_t size, const char
         const char *line = data + i;
         size_t line_len = j - i;
 
+        if (line_len > 0 && line[0] != ':') {
+            sse_field(line, line_len, ev, &ev_len, &ev_data, &ev_error);
+        }
         if (line_len == 0 || last) {
-            if (line_len > 0) {
-                /* final line without a terminator: treat as a line, then dispatch */
-                if (line_len >= 5 && memcmp(line, "data:", 5) == 0) {
-                    size_t off = (line_len > 5 && line[5] == ' ') ? 6 : 5;
-                    if (ev_data) ev[ev_len++] = '\n';
-                    memcpy(ev + ev_len, line + off, line_len - off);
-                    ev_len += line_len - off;
-                    ev_data = true;
-                } else if (line_len >= 6 && memcmp(line, "event:", 6) == 0) {
-                    size_t off = (line_len > 6 && line[6] == ' ') ? 7 : 6;
-                    ev_error = line_len - off == 5 && memcmp(line + off, "error", 5) == 0;
-                }
-            }
             /* an event whose data is empty is not dispatched (SSE; also what the old code did) */
             if ((ev_data && ev_len > 0) || ev_error) {
                 SseStatus st = sse_event(ev, ev_len, ev_error, acc, &acc_len, size + 1);
@@ -352,17 +366,6 @@ static char *handle_streaming_response(const char *data, size_t size, const char
             }
             ev_len = 0;
             ev_data = ev_error = false;
-        } else if (line[0] == ':') {
-            /* comment */
-        } else if (line_len >= 5 && memcmp(line, "data:", 5) == 0) {
-            size_t off = (line_len > 5 && line[5] == ' ') ? 6 : 5;
-            if (ev_data) ev[ev_len++] = '\n';
-            memcpy(ev + ev_len, line + off, line_len - off);
-            ev_len += line_len - off;
-            ev_data = true;
-        } else if (line_len >= 6 && memcmp(line, "event:", 6) == 0) {
-            size_t off = (line_len > 6 && line[6] == ' ') ? 7 : 6;
-            ev_error = line_len - off == 5 && memcmp(line + off, "error", 5) == 0;
         }
 
         if (last) {

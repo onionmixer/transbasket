@@ -68,6 +68,7 @@ def properties(harness, inputs):
                 reqs.append(f"{mode} {need - 1} {b.hex()}\n")
                 want.append("-1")
     got = [g.split(" ")[0] for g in run(harness, reqs)]
+    assert len(got) == len(reqs), (len(got), len(reqs))
     short = sum(1 for g, w in zip(got, want) if g != w)
     print(f"  never longer than the input: {len(longer)} exceptions; one byte short -> -1: {len(reqs) - short}/{len(reqs)}")
     return not longer and short == 0
@@ -131,7 +132,9 @@ def properties_quiet(harness, inputs):
         need = len(ref.unescape(b)) + 1
         if need > 1:
             reqs.append(f"U {need - 1} {b.hex()}\n")
-    return all(g.split(" ")[0] == "-1" for g in run(harness, reqs))
+    got = run(harness, reqs)
+    assert len(got) == len(reqs)
+    return all(g.split(" ")[0] == "-1" for g in got)
 
 
 def main():

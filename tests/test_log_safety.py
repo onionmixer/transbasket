@@ -141,6 +141,7 @@ class LogSafety(unittest.TestCase):
         cases += [(b"a\nb", 64, 64), (b"\\", 64, 64), (b"\x1b[31m", 64, 64), ("가".encode() * 30, 64, 300), (b"", 64, 4)]
         reqs = "".join(f"{m} {o} {b.hex()}\n" for b, m, o in cases)
         out = subprocess.run([ESCAPE], input=reqs, capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertEqual(len(out), len(cases), "one output line per input")
         bad = [(b, m, o, g) for (b, m, o), g in zip(cases, out) if bytes.fromhex(g[1:]) != log_escape_spec(b, m, o)]
         self.assertEqual(bad[:3], [])
         lines = sum(1 for (b, m, o), g in zip(cases, out) if b"\n" in bytes.fromhex(g[1:]) or b"\r" in bytes.fromhex(g[1:]))

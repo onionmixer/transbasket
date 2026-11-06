@@ -21,6 +21,8 @@
 #endif
 
 int daemon_begin(const char *log_path);
-int daemon_ready(void);
+/* 0 = reported, 1 = *stop was set (nothing reported), -1 = error. */
+#include <signal.h>
+int daemon_ready(volatile sig_atomic_t *stop);
 
 #endif /* DAEMON_H */

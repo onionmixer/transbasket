@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -50,7 +51,7 @@ static bool write_until(int fd, const char *buf, size_t len, long long deadline)
         size_t chunk = len > 512 ? 512 : len;   /* small writes: a ready fd takes them */
         ssize_t n = write(fd, buf, chunk);
         if (n < 0) {
-            if (errno == EINTR || errno == EAGAIN) continue;
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;   /* poll again */
             return false;
         }
         buf += n;
@@ -59,18 +60,37 @@ static bool write_until(int fd, const char *buf, size_t len, long long deadline)
     return true;
 }
 
+/* stderr for the launcher's copying. A pipe or terminal is reopened through
+ * /proc/self/fd/2 as a new, non-blocking open file description, so a write can never
+ * block past the deadline (another writer may fill the pipe between poll() and
+ * write()) and the O_NONBLOCK flag is not imposed on whoever shares fd 2. Regular
+ * files do not block; anything else falls back to fd 2 as it is. */
+static int launcher_out(void) {
+    struct stat st;
+    if (fstat(STDERR_FILENO, &st) == 0 && (S_ISFIFO(st.st_mode) || S_ISCHR(st.st_mode))) {
+        int fd = open("/proc/self/fd/2", O_WRONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+        if (fd >= 0) {
+            return fd;
+        }
+    }
+    return STDERR_FILENO;
+}
+
 /* The launcher: copy the log pipe to stderr, read the status pipe, exit. */
 static void launcher(pid_t child, int st_r, int lg_r) {
-    while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {
-        /* the intermediate child exits right after the second fork */
-    }
     long long deadline = now_ms() + (long long)DAEMON_READY_TIMEOUT * 1000;
+    int out = launcher_out();
+    bool reaped = false;
     bool log_open = true, st_open = true, copying = true, timed_out = false;
     char status[64];
     size_t slen = 0;
     char buf[4096];
 
     while (log_open || st_open) {
+        if (!reaped) {
+            /* the intermediate child exits right after the second fork; never wait for it blindly */
+            reaped = waitpid(child, NULL, WNOHANG) != 0;
+        }
         long long left = deadline - now_ms();
         if (left <= 0) {
             timed_out = true;
@@ -88,7 +108,7 @@ static void launcher(pid_t child, int st_r, int lg_r) {
             if (n <= 0) {
                 log_open = false;
             } else if (copying) {
-                copying = write_until(STDERR_FILENO, buf, (size_t)n, deadline);
+                copying = write_until(out, buf, (size_t)n, deadline);
             }
         }
         if (st_open && fds[1].revents) {
@@ -126,7 +146,10 @@ static void launcher(pid_t child, int st_r, int lg_r) {
         snprintf(msg, sizeof(msg), "Error: the daemon failed to start (see the messages above)\n");
         rc = 1;
     }
-    write_until(STDERR_FILENO, msg, strlen(msg), now_ms() + 2000);
+    write_until(out, msg, strlen(msg), now_ms() + 2000);
+    if (!reaped) {
+        waitpid(child, NULL, WNOHANG);   /* else init reaps it */
+    }
     _exit(rc);
 }
 
@@ -205,7 +228,7 @@ int daemon_begin(const char *log_path) {
     return 0;
 }
 
-int daemon_ready(void) {
+int daemon_ready(volatile sig_atomic_t *stop) {
     int fd = g_log_fd >= 0 ? g_log_fd : open("/dev/null", O_WRONLY | O_CLOEXEC);
     if (fd < 0) {
         return -1;
@@ -216,11 +239,17 @@ int daemon_ready(void) {
         return -1;
     }
     log_set_tee(-1);   /* stdout is the file itself now */
-    if (fd > 2) {
-        close(fd);
+    /* fd stays open: a request thread that read the tee fd before it was turned off
+     * may still write to it, and that must reach the log file, not a reused number. */
+    if (fd > 2 && g_log_fd < 0) {
+        close(fd);   /* /dev/null was never a tee target */
     }
-    g_log_fd = -1;
 
+    if (stop && *stop) {
+        close(g_status_w);   /* a stop arrived during startup: do not report success */
+        g_status_w = -1;
+        return 1;
+    }
     char msg[32];
     int n = snprintf(msg, sizeof(msg), "R%ld\n", (long)getpid());
     ssize_t w;

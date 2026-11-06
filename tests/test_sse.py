@@ -52,12 +52,14 @@ def differential(harness, bodies, quiet=False):
 def alloc_failures(harness, bodies):
     reqs, labels = [], []
     counts = run(harness, [f"S {b.hex()}\n" for b in bodies])
+    assert len(counts) == len(bodies)
     for b, g in zip(bodies, counts):
         n = int(g.split(" ")[2])
         for k in range(1, n + 1):
             reqs.append(f"F {k} {b.hex()}\n")
             labels.append((b[:40], k))
     got = run(harness, reqs, timeout=120)      # a retry loop would hang here
+    assert len(got) == len(reqs), (len(got), len(reqs))
     wrong = [(lab, g) for lab, g in zip(labels, got) if int(g.split(" ")[0]) != ref.NO_MEMORY]
     print(f"  allocation failure at each of {len(reqs)} malloc calls: {len(reqs) - len(wrong)} ended with NO_MEMORY")
     return wrong
@@ -70,8 +72,9 @@ MUTANTS = [
     ("content type unchecked", "            if (!cJSON_IsString(content) || !content->valuestring) {", "            if (!content->valuestring) {"),
     ("CR not a line end", "while (j < size && data[j] != '\\n' && data[j] != '\\r') {", "while (j < size && data[j] != '\\n') {"),
     ("event: error ignored", "    if (error_event) {\n        return SSE_ERROR_EVENT;", "    if (0) {\n        return SSE_ERROR_EVENT;"),
-    ("multi-line data not joined", "            if (ev_data) ev[ev_len++] = '\\n';\n            memcpy(ev + ev_len, line + off, line_len - off);\n            ev_len += line_len - off;\n            ev_data = true;\n        } else if (line_len >= 6",
-     "            ev_len = 0;\n            memcpy(ev + ev_len, line + off, line_len - off);\n            ev_len += line_len - off;\n            ev_data = true;\n        } else if (line_len >= 6"),
+    ("multi-line data not joined", "        if (*ev_data) ev[(*ev_len)++] = '\\n';", "        if (*ev_data) *ev_len = 0;"),
+    ("leading BOM not skipped", "size_t i = (size >= 3 && memcmp(data, \"\\xEF\\xBB\\xBF\", 3) == 0) ? 3 : 0;", "size_t i = 0;"),
+    ("colonless field ignored", "    const char *colon = memchr(line, ':', len);\n", "    const char *colon = memchr(line, ':', len);\n    if (!colon) return;\n"),
 ]
 
 
