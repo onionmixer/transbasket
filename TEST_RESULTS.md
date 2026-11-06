@@ -1,9 +1,38 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **원문 기준언어(source_hint) 검증 2026-11-06**입니다.
+> 최신 기록은 바로 아래의 **cleanup 기간·NUL 잘림 수정 검증 2026-11-06**입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## cleanup 기간·NUL 잘림 수정 검증 2026-11-06
+
+설계와 codex 검토 판정은 [PLAN_CLEANUP_DAYS_AND_NUL.md](PLAN_CLEANUP_DAYS_AND_NUL.md) 에 있다. 기대값은 모두 python 으로 계산했다.
+
+### 수정 전 실측 (main `9c4036a`)
+
+| 대상 | 결과 |
+|---|---|
+| `cache_tool cleanup` (1·100·400일 전 항목 3개) | 24,856 / 36,500 / 49,710 / 49,711 / 99999999999 일 → **전부 삭제**. 30·365·24,855·60,000 은 정상 |
+| `cache_tool delete 4294967297`, `delete 1abc` | **id 1 삭제** |
+| 요청 `text` 의 `\u0000` / `\u00ZZ` | 200, upstream 에 앞부분만 전달, 그 키로 캐시 |
+| MCP·normal·plain exec 응답의 NUL | 200, 잘린 번역문 응답·캐시 |
+
+### 수정 후
+
+| 대상 | 명령 | 결과 |
+|---|---|---|
+| cleanup 산술·백엔드·인자·설정 | `make test-cleanup-days` | 산술 13,977건 불일치 0, 텍스트·SQLite × 16개 일수 = 32회 cleanup+stats 기대값 일치, `cleanup` 인자 16종(허용 5·거부 11), `delete` 인자 9종(허용 1·거부 8), 설정값 17종의 실효 일수·주기·경고 일치. ASan/UBSan 깨끗. 수정 전 코드로는 4건 실패 + 1건 오류 |
+| 검출기 명세 ↔ 실제 cJSON | `make test-cjson-nul` | 할당자 훅 오라클 200,000건(cJSON 수락 72,912, 잘림 17,498): 소비 범위에서 명세 = 라이브러리, 거짓 음성 0. 시드 99 + ASan/UBSan: 수락 73,179, 잘림 17,409, 동일 |
+| 검출기 C ↔ 명세 | 같은 명령 | 200,044건 불일치 0. 돌연변이 7/7 검출(대문자 U 사례는 처음에 놓쳐 추가), 2바이트 건너뛰기는 등가 돌연변이 |
+| 서버 종단 | `make test-nul-guard` | 6건 통과: 요청 5종 422·호출 0·캐시 0, MCP 4종·exec·normal(비스트림 2종, 스트림 `정상→NUL→정상`) 502·캐시 0·재시도 없음. 대조군(문자 그대로 `\\u0000`, `\u00e9`, 서로게이트 짝, 루트 뒤 잔여물, SSE 주석, 깨진 청크) 200. 수정 전 바이너리는 보호 대상 5건 실패, 대조군은 양쪽 통과 |
+| 메모리 | 위 시험을 valgrind 로 | 서버 26회 실행 모두 오류 0 (definite·indirect 누수를 오류로 계산) |
+| 기존 회귀 | test-auto, test-coalescing, test-source-hint(-store/-server), test-cache-tool-hints, test-strict-json, test-structured-hint, `test_config_limits.py` | 모두 통과, 빌드 경고 0 |
+| 프롬프트 회귀 | `tests/test_prompt_regression.py <9c4036a> <신규>` | 36건 바이트 동일 |
+| 실제 codex | pge4 설정 사본 (포트·캐시·run dir·DEBUG 만 변경) | `kor→eng` 200 3.85 s, `auto→eng` 200 4.08 s (structured, model hint `ger`), 임시 디렉터리 잔존 0, 기동 로그 `cleanup check every 518400 seconds, cleanup after 60 days` |
+
+codex 교차검토: 계획 1차 6건·2차 2건 (전부 실측 후 채택), 구현 diff 검토 0건. MCP 경로는 설치된 codex-cli 0.166.0 에
+`mcp-server` 가 없어 가짜 서버로만 시험했다.
 
 ## 원문 기준언어(source_hint) 검증 2026-11-06
 

@@ -228,6 +228,27 @@ codex backend specifics:
   Change a reference and its C code together; a classifier rule change needs a new `SOURCE_HINT_VERSION`.
 - `TRANSBASKET_TEST_HOOKS` exists only in the `make test-structured-hint` test binary.
 
+### cJSON NUL guard and cleanup days - PLAN_CLEANUP_DAYS_AND_NUL.md
+
+cJSON 1.7.15 decodes `\u0000` **and every `\u` whose next four bytes are not all hex digits** to U+0000,
+and the C string is cut there (keys too). Invariants:
+
+- Every parse of a request or a translation-carrying reply is `cJSON_ParseWithOpts(x, &end, 0)` (same
+  behaviour as `cJSON_Parse`) followed by `json_decodes_nul(x, end - x)` - **only the consumed bytes**.
+  Checking the whole buffer would newly reject SSE comments, ignored chunks and bytes after the root.
+- Request -> 422 before any engine call. MCP: the flag is computed on the matched line **before** the
+  `memmove` in `wait_for_id()`. SSE: a NUL chunk fails the whole response; the other `NULL` returns of
+  `parse_sse_chunk()` stay ignored. Plain codex output: `memchr(result, 0, result_len)`. All 502, never cached.
+- Not guarded on purpose: the text-cache loader (only our own C strings are written) and the startup
+  `mcp list --json` probe (server names for a log line).
+- `make test-cjson-nul`: spec `tests/cjson_nul_ref.py` vs the real libcjson through an allocator-hook
+  oracle, and C vs spec. `make test-nul-guard`: every path through the server with offline fakes.
+- Tool inputs and editors may decode `\uXXXX` sequences when writing test files: the spec tables use
+  `~` for a backslash, and written files should be checked for decoded characters.
+- Cleanup cutoffs: `trans_cache_cutoff()` / `trans_cache_cleanup_interval()` (64-bit, saturated). Never
+  multiply days in `int` again. `TRANS_CACHE_CLEANUP_DAYS` keeps atoi's value where atoi is defined and
+  saturates otherwise; `cache_tool cleanup/delete` take strict decimals. `make test-cleanup-days`.
+
 ### Translation Cache Concurrency
 
 The cache is shared by every connection thread, so two rules are load-bearing:
@@ -253,7 +274,8 @@ the supported-code/name lists and Chinese tag parser, with a separate source-mod
 ### Error Handling Strategy
 
 **HTTP Status Code Mapping:**
-- 422: JSON parsing failures and validation errors (invalid UUID, language code, timestamp or text);
+- 422: JSON parsing failures and validation errors (invalid UUID, language code, timestamp or text,
+  or an escape that cJSON would decode to U+0000 - see "cJSON NUL guard");
   `handle_translate()` maps every failed `parse_translation_request()` to this status
 - 500: Unexpected internal errors
 - 502: OpenAI API 4xx errors (non-retryable)

@@ -618,3 +618,5 @@ codex 는 **기본 검증기가 무효 입력을 받아들이는 사례를 찾�
    그 뒤 최종 커밋으로 실제 codex 시험을 다시 통과했다.
 
 미해결로 남긴 것 (§14 와 같음): cleanup 기간 정수 오버플로, 레거시 MCP 경로의 `\u0000` 잘림.
+→ 2026-11-06 [PLAN_CLEANUP_DAYS_AND_NUL.md](PLAN_CLEANUP_DAYS_AND_NUL.md) 에서 해결했다. `\u0000` 잘림은 MCP 만이 아니라
+요청·normal 응답·plain exec 에도 있었다 (실측).

@@ -451,7 +451,9 @@ SQLite의 기존 버전 0/1 DB는 시작 시 버전 2로 이전하며, 기존 �
 
 **Status Codes:**
 - `200 OK`: 번역 성공
-- `422 Unprocessable Entity`: JSON 파싱 실패 또는 유효하지 않은 UUID, 언어 코드, 타임스탬프, 텍스트
+- `422 Unprocessable Entity`: JSON 파싱 실패 또는 유효하지 않은 UUID, 언어 코드, 타임스탬프, 텍스트.
+  U+0000 으로 디코드되는 `\u` 이스케이프(`\u0000`, 또는 `\u00ZZ` 처럼 뒤 4바이트가 16진수가 아닌 것)가 본문 어디에든 있는 경우도 포함
+  (아래 "문자열 무결성" 참고)
 - `500 Internal Server Error`: 예상치 못한 내부 오류
 - `502 Bad Gateway`: OpenAI API 4xx 오류 (재시도 불가)
 - `503 Service Unavailable`: OpenAI API 5xx/타임아웃 (재시도 가능, `Retry-After: 5` 헤더 포함)
@@ -555,6 +557,23 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
 > 입력이 10,000 바이트 이하여도 **영→한처럼 바이트 수가 늘어나는 방향**에서는 `normal` 백엔드의 8,191 바이트
 > 상한에 걸릴 수 있습니다(한글은 UTF-8 에서 글자당 3바이트).
 
+#### 문자열 무결성 (cJSON 의 NUL 잘림)
+
+cJSON 1.7.15 는 `\u0000` 과, 뒤 4바이트가 16진수가 아닌 모든 `\u` 이스케이프(`\u00ZZ`, `\u-123` 등)를 U+0000 으로
+디코드하고, C 문자열은 거기서 끊깁니다. 2026-11-06 이전에는 이 때문에 **잘린 요청이 번역되고, 잘린 번역문이 200 으로 응답·캐시**되었습니다.
+지금은 cJSON 이 실제로 읽은 바이트를 `json_decodes_nul()` 로 검사해 거부합니다 ([PLAN_CLEANUP_DAYS_AND_NUL.md](PLAN_CLEANUP_DAYS_AND_NUL.md)).
+
+| 입력 | 동작 |
+|------|------|
+| 요청 본문 (값·키·`uuid`·언어 필드 모두) | `422 VALIDATION_ERROR`, upstream·codex 호출 없음 |
+| `normal` 응답 (비스트리밍 본문, 각 SSE `data:` 페이로드) | `502`, 재시도·캐시 없음. 한 청크라도 걸리면 응답 전체가 실패합니다 |
+| codex MCP `tools/call` 응답 | `502`, 캐시 없음 |
+| codex exec 출력(plain)에 원시 NUL 바이트 | `502`, 캐시 없음 |
+| codex structured 출력 | 기존대로 `strict_json_validate()` 가 거부 (`502`) |
+
+영향이 없는 것: 백슬래시를 이스케이프한 문자 그대로의 `\\u0000`, `\u00e9`·서로게이트 짝 같은 정상 이스케이프,
+지금도 무시되는 SSE 주석·깨진 청크·루트 값 뒤의 잔여 바이트.
+
 #### 시간 한계
 
 | 항목 | 값 | 비고 |
@@ -564,6 +583,7 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
 | `normal` upstream 호출 타임아웃 | 최대 60초/시도와 남은 전체 예산 중 작은 값 | 최대 3회 시도, 백오프 `2^attempt` 초, 전체 마감 후 추가 시도 없음 |
 | `codex` 호출 타임아웃 | `CODEX_TIMEOUT` (기본 100초) | 반드시 120초보다 작아야 함. 초과 시 `504` |
 | `codex` 동시 실행 슬롯 대기 | `CODEX_TIMEOUT`과 남은 전체 예산 이내 | 슬롯 대기 실패 `503`, 전체 작업 마감 `504` |
+| 캐시 정리 기간 | `TRANS_CACHE_CLEANUP_DAYS`, 기본 60일 | 64비트로 계산 (예전에는 24,856일 이상에서 전체 삭제 가능). `atoi` 와 같은 값으로 읽고, int 범위를 넘으면 최댓값으로 포화(사실상 만료 없음)하며 경고. 확인 주기는 기간의 1/10, 최소 1시간. 기동 로그 `Cache background thread started (... cleanup after N days)` 에 실효값 |
 
 #### 동시성
 
@@ -718,6 +738,8 @@ transbasket/
 ### cache_tool.c
 - Separate `cache_tool` binary: list / clear / stats / cleanup / search / export / migrate / backfill-hints
 - Note: every command except `migrate` and `backfill-hints` operates on the **text** backend
+- `cleanup <days>` and `delete <id>` accept only a decimal integer in 1..2147483647; anything else
+  (`30days`, `+30`, `4294967297`, ...) exits 1 and deletes nothing (they used to wrap via `atoi`)
 - `list`/`stats` show the source_hint of auto rows; `migrate` carries hints (an existing destination
   row keeps its translation, hints merge by priority: model > script)
 - `backfill-hints --backend <text|sqlite> --config <path> [--dry-run]` fills missing/outdated script hints
