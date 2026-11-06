@@ -1,9 +1,29 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **레거시 MCP 제거 검증 2026-11-06** 이고, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
+> 최신 기록은 바로 아래의 **번역 백엔드 모듈 분리 검증 2026-11-06** 이고, 그 아래가 **레거시 MCP 제거 검증 2026-11-06**, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## 번역 백엔드 모듈 분리 검증 2026-11-06
+
+설계·결정·codex 판정 (계획 2회, 구현 1회) 은 [PLAN_BACKEND_MODULES.md](PLAN_BACKEND_MODULES.md) 에 있다. 기준 바이너리는 `cfde092`.
+`src/http_client.c` 1,559줄 → `http_client.c` 141 (API·dispatch), `backend_normal.c` 728, `backend_codex.c` 474, `prompt_builder.c` 273,
+`trace_file.c` 79, `codex_driver_exec.c` 99 (+ 헤더 5개). 단계 1 은 코드 이동만, 단계 2 는 codex 를 `CodexDriver` 로 실행.
+
+| 검증 | 방법 | 결과 |
+|---|---|---|
+| V1 이동만 했나 (단계 1) | `tests/check_move.py <cfde092 http_client.c> <새 .c 5개>` | 옛 항목 61개 = include 24 + 그대로 이동 35 + 분할 2. 분할된 세 함수는 옛 블록을 들여쓰기만 줄인 것과 같음 (python 대조). 도구는 글자 1개 변경·중복·추가 함수를 모두 잡음 |
+| V2 심볼 | `nm -g --defined-only` | 100 → 109, 잃은 것 0, 추가 9개 = 계획 목록. 링크 라이브러리 8개와 이름 충돌 0 |
+| V3 프롬프트 | `tests/test_prompt_regression.py <cfde092> <신규>` | 24건 바이트 동일 (단계 1·2) |
+| V3b/V4/V5 차등 | `make test-backend-parity PARITY_OLD_BIN=<cfde092>` (신규) | 13 시나리오 (normal 3, codex 10: CLI 능력 조합·MCP 서버 경고·structured·실패·NUL·마감·슬롯 고갈) 에서 응답·`Retry-After`·argv·프롬프트·스키마 바이트·upstream 본문·로그·trace 동일, ASan 빌드도 동일. 도구는 고의 변경 5개를 모두 잡음 |
+| V6 회귀 | `make test-*` 22종 + `test_config_limits.py`, ASan 서버, valgrind | 모두 통과, 경고 0. valgrind: V8 하네스, `mcp` 거부 경로, exec 번역 4건 오류 0 |
+| V7 SSE | 옛/새 하네스 출력 대조 | 60,023 본문과 malloc 실패 73곳에서 상태·내용·malloc 횟수 바이트 동일, 돌연변이 8 검출 + 등가 1 (기존과 같음) |
+| V8 드라이버 교체 지점 | `make test-codex-backend` (신규, 가짜 드라이버) | 번역 20행 (caps 끔 8, 켬 12 — structured 3종은 켬에서만) 의 상태·텍스트·hint, 실행 중 슬롯 점유·반환, 임시 cwd·스키마 파일 삭제, structured 조건, DEBUG 에서만 stderr, control 전달, init 실패 경로, exec 드라이버 S1. 고의 변경 8/8 검출. ASan 통과 |
+| V9 실제 | 배포 설정 3개 (사본, 네임스페이스), pge4 사본 `-d -l` + 호스트 codex-cli **0.167.0** | 설정 3개: 옛/새 같은 줄·경고 0. `kor→eng` 200 3.32 s, `auto→eng` 200 4.02 s (structured), 로그에 원문 0줄, 임시 디렉터리 0 |
+
+동작 차이는 하나 (결정 S1): exec 드라이버가 작은 상태를 할당하고, 그 할당이 실패하면 기동이 `Error: Memory allocation failed` 로 실패한다.
+알게 된 기존 동작 (바꾸지 않음): codex 슬롯 대기는 `sem_trywait` 폴링이라 먼저 기다린 요청이 먼저 얻는다는 보장이 없다.
 
 ## 레거시 MCP 제거 검증 2026-11-06
 

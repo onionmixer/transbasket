@@ -40,7 +40,7 @@ OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_tab
 /* Free OpenAI translator */
 void openai_translator_free(OpenAITranslator *translator);
 
-/* Translate text using OpenAI API */
+/* Translate text with the configured backend (MODEL_TYPE: normal or codex) */
 char *openai_translate(
     OpenAITranslator *translator,
     const char *from_lang,

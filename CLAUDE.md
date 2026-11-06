@@ -70,9 +70,12 @@ The C implementation follows a clear separation of concerns across these core mo
 2. **config_loader.c**: Parses `transbasket.conf` (KEY="value" format) and `PROMPT_PREFIX.txt`
 3. **utils.c**: Validation utilities (RFC 3339 timestamps, UUID v4, ISO 639-2 language codes, emoji stripping)
 4. **json_handler.c**: JSON request/response handling using cJSON
-5. **http_client.c**: Translation dispatch — `normal` (OpenAI API via libcurl, retry/backoff) and `codex` backends
+5. **http_client.c**: public translator API and the backend dispatch table (`MODEL_TYPE`); the backends live in
+   **backend_normal.c** (OpenAI API via libcurl, SSE, retry/backoff) and **backend_codex.c** (slot, temp cwd,
+   delimiter-isolated prompt, structured output, status codes), sharing **prompt_builder.c** and **trace_file.c**
+   (PLAN_BACKEND_MODULES.md, see "Translation backend modules" below)
 6. **http_server.c**: HTTP server using libmicrohttpd with thread-per-connection model
-7. **codex_exec.c**: `codex exec` driver — the codex backend's only interface, plus the startup CLI probe
+7. **codex_exec.c**: runs `codex exec` and probes the CLI; **codex_driver_exec.c** adapts it to the `CodexDriver` interface (`codex_driver.h`)
 8. **source_hint.c**: script classifier for the from=auto base language (see "Source hint" below)
 9. **strict_json.c**: strict validator for codex structured output, run before cJSON
 10. **listen_address.c**: `LISTEN` parser and LISTEN line recognizer (see "LISTEN address" below)
@@ -183,10 +186,10 @@ Two configuration files:
 
 ### Translation Backend (MODEL_TYPE)
 
-`MODEL_TYPE` selects how translations are produced (see `config_loader.c`, `http_client.c:openai_translate()` dispatch):
+`MODEL_TYPE` selects how translations are produced (see `config_loader.c`, `http_client.c:openai_translate()` dispatch, `backend_normal.c`, `backend_codex.c`):
 
 - **`normal`** (default): existing OpenAI-compatible HTTP API path (`/v1/chat/completions` via libcurl). Uses `OPENAI_BASE_URL/MODEL/API_KEY`. Behavior unchanged.
-- **`codex`**: drives the installed `codex` CLI. `OPENAI_*` are unused; `CODEX_*` settings apply. One run per request (`codex_exec.c`):
+- **`codex`**: drives the installed `codex` CLI. `OPENAI_*` are unused; `CODEX_*` settings apply. One run per request through the exec driver (`codex_driver_exec.c` → `codex_exec.c`):
   `codex exec --skip-git-repo-check --color never [--ephemeral] [--ignore-user-config] -s … -c approval_policy="…" [-c model_reasoning_effort="…"] [-m …] -C <tmp> -o <tmp>/last-message.txt -`
 
 ⚠ **The legacy MCP interface was removed on 2026-11-06** (PLAN_REMOVE_LEGACY_MCP.md). It drove `codex mcp-server`, which
@@ -196,7 +199,7 @@ refuses it in codex mode and warns in normal mode - decided after the whole file
 wins (a later `exec`/invalid value clears it), other invalid values still warn and use exec. Do not bring back a silent
 fallback from `mcp` to exec (`make test-codex-interface`). The `codex mcp list --json` probe is **not** part of the removed
 route: it counts the MCP servers in the codex user's config.toml for the warning below. The codex CLI surface keeps moving,
-which is why `openai_translator_init()` runs `codex_cli_probe()` at startup (version, `exec --help` flag detection,
+which is why the exec driver's init (`codex_driver_exec.c`, called from `codex_backend_init()`) runs `codex_cli_probe()` at startup (version, `exec --help` flag detection,
 `mcp list --json`) and logs a `Warning:` when `codex exec` or a flag it needs is missing.
 
 codex backend specifics:
@@ -211,6 +214,28 @@ codex backend specifics:
 - codex output is **not** re-unescaped or emoji-stripped (would corrupt it), only trimmed + whole-output code-fence unwrapped.
 - Requires the host (service user) to have `codex login` done and a writable `CODEX_HOME`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` §7.1 for the systemd/operator checklist (that plan describes the removed MCP route; the operator steps still apply).
 - **`TRANS_CACHE_THRESHOLD` must be `1` in codex mode.** codex output is non-deterministic, so the same source text comes back slightly reworded on each call; `handle_translate()` then treats it as a changed translation and resets the entry's `count` to 1. With any threshold above 1 the count never reaches it, the cache never serves a hit, and every request pays for a codex call. Verified: threshold 3 → 4 identical requests all took ~4 s and re-invoked codex; threshold 1 → second request served from cache in ~0.01 s.
+
+### Translation backend modules - PLAN_BACKEND_MODULES.md
+
+`http_client.c` used to hold both backends (1,559 lines). Since 2026-11-06 it is the public API and the dispatch
+table only; `backend_normal.c`, `backend_codex.c`, `prompt_builder.c` and `trace_file.c` hold the rest (step 1 moved
+the code verbatim: `tests/check_move.py`). The codex backend runs codex through a **driver** (`include/codex_driver.h`,
+step 2). Invariants:
+
+- `backend_codex.c` owns everything that does not depend on how codex is started: slot and its deadline, temp cwd,
+  schema file, prompt and delimiter, NUL check, structured parsing, post-processing, status codes (failure 502,
+  deadline 504 retryable, slot 503), DEBUG trace. It must not include `codex_exec.h`; only `codex_driver_exec.c` does.
+- The exec driver's init prints the `codex CLI: ... (interface=exec)` line and the five CLI warnings, in the order and
+  wording they had before; `codex translator initialized` follows from the backend. Driver state is read-only after init
+  and shared by all request threads. If allocating it fails, startup fails (`Error: Memory allocation failed`).
+- Contract (`codex_driver.h`): synchronous, honours the control and `CODEX_TIMEOUT`, reaps its children, tries to
+  remove its own files from the cwd, caller frees result/error/stderr, `*len_out` counts embedded NULs. The schema is a
+  request to codex - the backend validates the output.
+- **Adding a driver**: a driver file, a row in `CODEX_DRIVERS` (`backend_codex.c`), storing the chosen
+  `CODEX_INTERFACE` in `Config` (today only `exec` is accepted and nothing is stored, `config_loader.c`), and the
+  `Codex Interface:` line in `main.c`. Then run `make test-codex-backend` (fake driver through the real backend) and
+  `make test-backend-parity PARITY_OLD_BIN=<earlier build>` (old vs new: replies, argv, prompts, schema bytes,
+  upstream bodies, logs, traces; the old binary needs `language_tables.conf` next to it).
 
 ### Source hint (from=auto base language) - PLAN_SOURCE_HINT_METADATA.md
 
@@ -381,7 +406,7 @@ This improves LLM translation quality vs raw codes.
 
 ### Prompt Template Processing
 
-`http_client.c:build_instruction_message()` builds the instruction from
+`prompt_builder.c:build_instruction_message()` builds the instruction from
 `PROMPT_PREFIX_FILE`, and the template's own content selects the format:
 
 - **contains `{TEXT}`** (TranslateGemma style, e.g. `PROMPT_PREFIX_translategemma.txt`):
@@ -426,10 +451,10 @@ Public-facing copies live in `README.md` → "한계와 보장"; keep both in sy
 |---|---|---|---|
 | `MAX_TEXT_LENGTH` | `json_handler.c` | 10,000 bytes | request rejected with 422 (explicit) |
 | `MIN_TEXT_LENGTH` | `json_handler.c` | 1 byte | 422 |
-| `MAX_UPSTREAM_RESPONSE` | `http_client.c` | 4 MB | normal reply body (both modes) **errors** ("Upstream response too large" -> 502, not retried, not cached); post-processing buffers are sized from the reply, no other cap |
+| `MAX_UPSTREAM_RESPONSE` | `backend_normal.c` | 4 MB | normal reply body (both modes) **errors** ("Upstream response too large" -> 502, not retried, not cached); post-processing buffers are sized from the reply, no other cap |
 | `CODEX_OUT_MAX` | `codex_exec.c` | 4 MB | exec path **errors** ("codex response too large" → 502) rather than truncating |
 | MHD connection timeout | `http_server.c` | 120 s | connection closed |
-| curl timeout (`normal`) | `http_client.c` | min(60 s, remaining total budget), up to 3 attempts | 503 for timeout |
+| curl timeout (`normal`) | `backend_normal.c` | min(60 s, remaining total budget), up to 3 attempts | 503 for timeout |
 | Total translation budget | `TRANSLATION_TOTAL_TIMEOUT` | default 110 s, configurable 1..110 | normal 503, codex 504; no follower deadline extension |
 
 The codex path deliberately bypasses `unescape_string()`/`strip_emoji_and_shortcodes()`. The old `normal` caps (16 KB unescape, 8 KB cleaned, 64 KB stream - all silent) were removed on 2026-11-06; measured since: 40,000-byte replies and 96,000-byte streams come back whole.
@@ -508,10 +533,8 @@ silently translated as Simplified. Full rationale in `PLAN_CHINESE_SCRIPT_CODES.
 
 ### Modifying OpenAI Retry Logic
 
-Edit `http_client.c`:
-- `max_retries` parameter in `openai_translator_init()`
-- Backoff calculation: `pow(2, attempt)`
-- Retryable condition: `http_code >= 500`
+- `max_retries` parameter of `openai_translator_init()` (`http_client.c`; `http_server.c` passes 3)
+- Backoff calculation `pow(2, attempt)` and retryable condition `http_code >= 500`: `translate_via_openai()` in `backend_normal.c`
 
 ### Adding New Endpoints
 

@@ -6,7 +6,8 @@
 #include "translation_control.h"
 
 /*
- * `codex exec` driver - the codex backend's only interface.
+ * Runs `codex exec` and probes the CLI. The codex backend reaches it only through the
+ * exec driver (src/codex_driver_exec.c, include/codex_driver.h).
  *
  * codex-cli 0.154.0 removed the `codex mcp-server` subcommand, and the legacy
  * MCP route that used it was removed from transbasket on 2026-11-06

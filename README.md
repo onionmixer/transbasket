@@ -572,7 +572,7 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
 ### 한계와 보장 (Limits and guarantees)
 
 크기 제한은 2026-08-21 코드·실측 기준이며, 시간·동시성 정책은 2026-11-03 요청 병합 구현을 반영합니다.
-크기 상수는 `src/http_client.c`, `src/json_handler.c`에 있고, 전체 번역 시간과 병합 한도는 위 설정으로 조정합니다.
+크기 상수는 `src/backend_normal.c`, `src/codex_exec.c`, `src/json_handler.c`에 있고, 전체 번역 시간과 병합 한도는 위 설정으로 조정합니다.
 
 #### 크기 한계
 
@@ -698,13 +698,15 @@ transbasket/
 ├── PLAN_SOURCE_LANGUAGE_AUTO.md # auto design, implementation and validation status
 ├── include/                    # Header files
 │   ├── utils.h  config_loader.h  json_handler.h
-│   ├── http_client.h  http_server.h  codex_exec.h
+│   ├── http_client.h  http_server.h  codex_exec.h  codex_driver.h
+│   ├── backend_normal.h  backend_codex.h  prompt_builder.h  trace_file.h
 │   ├── inflight_translation.h  translation_control.h
 │   ├── language_table.h
 │   └── trans_cache.h  cache_backend_text.h  cache_backend_sqlite.h
 ├── src/                        # Source files
 │   ├── main.c  utils.c  config_loader.c  json_handler.c
-│   ├── http_client.c  http_server.c  codex_exec.c
+│   ├── http_client.c  http_server.c  codex_exec.c  codex_driver_exec.c
+│   ├── backend_normal.c  backend_codex.c  prompt_builder.c  trace_file.c
 │   ├── inflight_translation.c   # Shared running translations and waiter lifetime
 │   ├── language_table.c
 │   ├── trans_cache.c  cache_backend_text.c  cache_backend_sqlite.c
@@ -748,17 +750,24 @@ transbasket/
 - Request/response validation
 
 ### http_client.c
-- Translation dispatch on `MODEL_TYPE` (normal vs codex)
-- normal: OpenAI API communication with libcurl, retry with exponential backoff
-- codex: builds delimiter-isolated prompt, concurrency semaphore, per-request temp cwd
-- Prompt building: `{TEXT}`-style templates (TranslateGemma) and the legacy
-  `[TARGET LANGUAGE]` / `{{LANGUAGE_TO}}` form
-- `auto` branch bypasses source language lookup and resolves only the target
-- Shared monotonic deadline/cancellation across retries, codex slot waits and I/O
-- Error handling and status code mapping
+- Public translator API and the dispatch table on `MODEL_TYPE` (normal vs codex)
+- Shared monotonic deadline/cancellation: an expired or cancelled request maps to 503/504 here
 
-### codex_exec.c
-- The codex interface: one `codex exec` child per request, prompt on stdin
+### backend_normal.c
+- normal: OpenAI API communication with libcurl, SSE parsing, retry with exponential backoff
+
+### backend_codex.c
+- codex: concurrency semaphore, per-request temp cwd, delimiter-isolated prompt, structured output,
+  post-processing and status codes; runs codex through a driver (`codex_driver.h`, today `codex exec`)
+
+### prompt_builder.c / trace_file.c
+- Prompt building shared by both backends: `{TEXT}`-style templates (TranslateGemma) and the legacy
+  `[TARGET LANGUAGE]` / `{{LANGUAGE_TO}}` form; the `auto` branch resolves only the target
+- DEBUG trace files (0600, never overwritten) shared by both backends
+
+### codex_exec.c / codex_driver_exec.c
+- The exec driver: one `codex exec` child per request, prompt on stdin (`codex_driver_exec.c` adapts
+  `codex_exec.c` to the driver interface and owns the startup probe's log lines)
 - Startup probe: `codex --version`, `codex exec --help` (flag detection), `codex mcp list --json`
 - Spawns codex in its own process group, kills the whole group on timeout
 - Collects the final message from `--output-last-message` (stdout fallback), bounded at 4 MB
