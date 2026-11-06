@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#include <math.h>
 #include "config_loader.h"
 #include "utils.h"
 #include "listen_address.h"
@@ -228,18 +229,31 @@ static bool is_codex_token(const char *s) {
     return true;
 }
 
-/* atoi() for every input where atoi is defined (glibc: (int)strtol(s, NULL, 10) -
- * leading isspace, optional sign, digits, the rest ignored); a value outside the
- * int range saturates instead of being undefined. *plain is false when there are
- * no digits, characters follow them, or the value saturated. */
-static int atoi_saturating(const char *value, bool *plain) {
-    char *end = NULL;
-    errno = 0;
-    long n = strtol(value, &end, 10);
-    bool saturated = errno == ERANGE || n > INT_MAX || n < INT_MIN;
-    if (n > INT_MAX) n = INT_MAX;
-    if (n < INT_MIN) n = INT_MIN;
-    *plain = end != value && *end == '\0' && !saturated;
+/* atoi-compatible int setting (utils.c atoi_saturating), warning when the text is
+ * not a plain integer in int range - PLAN_OPEN_ISSUES.md F. */
+static int config_int(const char *key, const char *value) {
+    bool plain = true;
+    int n = atoi_saturating(value, &plain);
+    if (!plain) {
+        LOG_INFO("Warning: %s '%s' is not a plain integer in int range; read as %d\n", key, value, n);
+    }
+    return n;
+}
+
+/* atof() value that must be finite: nan/inf used to reach the request JSON as null. */
+static double config_finite(const char *key, const char *value, bool *bad) {
+    double d = atof(value);
+    if (!isfinite(d)) {
+        LOG_INFO("Error: %s '%s' is not a finite number", key, value);
+        *bad = true;
+    }
+    return d;
+}
+
+/* long from strtol() -> int without wrapping (values past INT_MAX used to turn negative). */
+static int long_to_int_saturating(long n) {
+    if (n > INT_MAX) return INT_MAX;
+    if (n < INT_MIN) return INT_MIN;
     return (int)n;
 }
 
@@ -475,6 +489,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
      * the 0.0.0.0 default in place (PLAN_LISTEN_ADDRESS.md 3.3): it stops startup. */
     bool listen_line_bad = false;
     bool quote_line_bad = false;   /* PLAN_OPEN_ISSUES.md H / Q8 */
+    bool number_bad = false;       /* PLAN_OPEN_ISSUES.md F: nan/inf */
 
     ListenScan listen_scan;
     bool too_long, has_nul;
@@ -536,24 +551,32 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             free(config->listen);
             config->listen = strdup(value);
         } else if (strcmp(key, "PORT") == 0) {
-            config->port = atoi(value);
+            config->port = config_int(key, value);
         } else if (strcmp(key, "DEBUG") == 0) {
             config->debug = (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0);
         } else if (strcmp(key, "TEMPERATURE") == 0) {
-            config->temperature = atof(value);
+            config->temperature = config_finite(key, value, &number_bad);
         } else if (strcmp(key, "TOP_P") == 0) {
-            config->top_p = atof(value);
+            config->top_p = config_finite(key, value, &number_bad);
         } else if (strcmp(key, "SEED") == 0) {
-            config->seed = atoi(value);
+            config->seed = config_int(key, value);
         } else if (strcmp(key, "STREAM") == 0) {
             config->stream = (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
         } else if (strcmp(key, "FREQUENCY_PENALTY") == 0) {
             config->frequency_penalty = atof(value);
+            if (isnan(config->frequency_penalty)) {   /* inf still clamps to +-2 below, as before */
+                LOG_INFO("Error: %s '%s' is not a number", key, value);
+                number_bad = true;
+            }
             /* Clamp to valid range: -2.0 to 2.0 */
             if (config->frequency_penalty < -2.0) config->frequency_penalty = -2.0;
             if (config->frequency_penalty > 2.0) config->frequency_penalty = 2.0;
         } else if (strcmp(key, "PRESENCE_PENALTY") == 0) {
             config->presence_penalty = atof(value);
+            if (isnan(config->presence_penalty)) {
+                LOG_INFO("Error: %s '%s' is not a number", key, value);
+                number_bad = true;
+            }
             /* Clamp to valid range: -2.0 to 2.0 */
             if (config->presence_penalty < -2.0) config->presence_penalty = -2.0;
             if (config->presence_penalty > 2.0) config->presence_penalty = 2.0;
@@ -626,7 +649,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
         } else if (strcmp(key, "INFLIGHT_MAX_WAITERS_PER_KEY") == 0) {
             config->inflight_max_waiters_per_key = positive_integer(value);
         } else if (strcmp(key, "TRANS_CACHE_THRESHOLD") == 0) {
-            config->cache_threshold = atoi(value);
+            config->cache_threshold = config_int(key, value);
             if (config->cache_threshold < 1) {
                 config->cache_threshold = 5;  /* Minimum 1 */
             }
@@ -711,7 +734,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
                 LOG_INFO("Warning: Invalid CODEX_TIMEOUT '%s', using 100\n", value);
                 config->codex_timeout = 100;
             } else {
-                config->codex_timeout = (int)t;
+                config->codex_timeout = long_to_int_saturating(t);
             }
         } else if (strcmp(key, "CODEX_MAX_CONCURRENCY") == 0) {
             char *endptr = NULL;
@@ -719,7 +742,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             if (endptr == value || *endptr != '\0' || c < 1) {
                 config->codex_max_concurrency = 0;  /* 0 = use MAX_WORKERS */
             } else {
-                config->codex_max_concurrency = (int)c;
+                config->codex_max_concurrency = long_to_int_saturating(c);
             }
         } else if (strcmp(key, "CODEX_ALLOW_UNSAFE") == 0) {
             config->codex_allow_unsafe = (strcasecmp(value, "yes") == 0 ||
@@ -734,7 +757,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
 
     fclose(fp);
 
-    if (listen_line_bad || quote_line_bad) {
+    if (listen_line_bad || quote_line_bad || number_bad) {
         if (listen_line_bad) {
             LOG_INFO("Error: refusing to start with the default LISTEN address while a LISTEN line is unreadable");
         }

@@ -22,6 +22,12 @@ void log_message(const char *level, const char *format, ...);
 /* Get current timestamp for logging */
 void get_log_timestamp(char *buffer, size_t size);
 
+/* atoi() for every input where atoi is defined (glibc: (int)strtol(s, NULL, 10) -
+ * leading isspace, optional sign, digits, the rest ignored); a value outside the
+ * int range saturates instead of being undefined. *plain is false when there are
+ * no digits, characters follow them, or the value saturated. */
+int atoi_saturating(const char *value, bool *plain);
+
 /* Language code validation. Accepts ISO 639-2 codes plus the transbasket
  * specific codes "zhs"/"zht" (Chinese Simplified/Traditional). */
 bool validate_language_code(const char *lang_code);

@@ -143,6 +143,11 @@ test-listen-parse: directories
 	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -DWITH_CONFIG_LOADER -o $(LISTEN_PARSE_BIN)_cl tests/test_listen_address.c src/listen_address.c src/utils.c -lcjson -luuid
 	python3 -I tests/test_listen_parse.py $(LISTEN_PARSE_BIN) $(LISTEN_PARSE_BIN)_cl --mutants
 
+# Numeric settings: effective values, warnings and startup errors computed in python.
+test-config-numbers: all
+	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_config_numbers tests/test_config_numbers.c src/config_loader.c src/utils.c src/listen_address.c -lcjson -luuid -lm
+	python3 -I tests/test_config_numbers.py $(OBJ_DIR)/test_config_numbers $(abspath $(TARGET))
+
 # parse_config_line() vs tests/config_line_ref.py, quoted-value errors and the tracked
 # templates starting unmodified (server rows inside an unprivileged namespace).
 test-config-syntax: all
@@ -175,4 +180,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers

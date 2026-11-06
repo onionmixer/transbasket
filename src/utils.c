@@ -17,7 +17,20 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <errno.h>
+#include <limits.h>
 #include "utils.h"
+
+int atoi_saturating(const char *value, bool *plain) {
+    char *end = NULL;
+    errno = 0;
+    long n = strtol(value, &end, 10);
+    bool saturated = errno == ERANGE || n > INT_MAX || n < INT_MIN;
+    if (n > INT_MAX) n = INT_MAX;
+    if (n < INT_MIN) n = INT_MIN;
+    *plain = end != value && *end == '\0' && !saturated;
+    return (int)n;
+}
 
 /* Get current timestamp for logging in [YYYY-MM-DD HH:MM:SS] format */
 void get_log_timestamp(char *buffer, size_t size) {

@@ -96,7 +96,12 @@ int main(int argc, char *argv[]) {
         } else if ((strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--role") == 0) && i + 1 < argc) {
             system_role_path = argv[++i];
         } else if ((strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--workers") == 0) && i + 1 < argc) {
-            max_workers = atoi(argv[++i]);
+            const char *w = argv[++i];
+            bool plain = true;
+            max_workers = atoi_saturating(w, &plain);
+            if (!plain) {
+                LOG_INFO("Warning: -w '%s' is not a plain integer in int range; read as %d", w, max_workers);
+            }
         } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--daemon") == 0) {
             run_as_daemon = true;
         } else {
@@ -115,7 +120,11 @@ int main(int argc, char *argv[]) {
     if (max_workers == 0) {
         const char *workers_env = getenv("MAX_WORKERS");
         if (workers_env) {
-            max_workers = atoi(workers_env);
+            bool plain = true;
+            max_workers = atoi_saturating(workers_env, &plain);
+            if (!plain) {
+                LOG_INFO("Warning: MAX_WORKERS '%s' is not a plain integer in int range; read as %d", workers_env, max_workers);
+            }
         }
     }
 
