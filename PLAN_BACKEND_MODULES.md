@@ -3,7 +3,7 @@
 작성 2026-11-06. 작업 위치: worktree `../transbasket-backend`, 브랜치 `refactor/backend-modules` (main `cfde092` 위, 문서 정정 `60a225e` 다음).
 원칙: 동작은 바이트 단위로 그대로 (프롬프트·요청 본문·응답·상태 코드·로그 문구와 순서), 계산·집계는 python,
 codex 는 입력일 뿐 (지적은 전부 코드·실측으로 확인 후 채택), push·서비스 재시작은 요청 시에만.
-이 문서의 `파일:줄` 은 main `cfde092` (레거시 MCP 제거 반영) 기준이다. 상태: **계획, codex 계획 검토 1회 반영 (§8), 코딩 전.**
+이 문서의 `파일:줄` 은 main `cfde092` (레거시 MCP 제거 반영) 기준이다. 상태: **단계 1 (`50d46d6`)·단계 2 구현 완료**, codex 검토 계획 2회·구현 1회 (§8).
 
 ## 1. 현재 구조 (실측)
 
@@ -210,3 +210,16 @@ README (`:575`, 트리 `:701,707`, 모듈 설명 `:749`), TEST_RESULTS 새 절. 
 | S1 할당 실패 경로 검증 없음 | V8·§6 은 세마포어 실패만 | ✅ 채택 (V8) |
 | §3.1 선언이 정의와 일치, include 순환 없음, 심볼 충돌 없음 | 내 추출 (`grep` 시그니처) 과 같음, `nm -D` 라이브러리 8개 0건 | ✅ |
 | 기동 순서·SOURCE_HINT 경고 소유 (어댑터) 타당 | `:661-714` 열람 | ✅ |
+
+### 단계 2 구현 diff 검토 (커밋 전)
+
+| codex 주장 | 내 검증 방법 | 결과 |
+|---|---|---|
+| 기동 줄·경고 5종 문구·조건·순서, `CodexExecOptions` 12개 필드, structured 결정, DEBUG 에서만 stderr, 상태 코드, 정리 순서가 cfde092 와 같음 | 내 V4/V5 parity (13 시나리오, ASan 포함) 결과와 `git diff` 대조 | ✅ (동작 회귀 지적 0) |
+| 계약: 드라이버가 스키마를 지킨다고 쓴 것은 과장 — exec 는 `--output-schema` 를 넘기고 비어 있지 않은지만 봄 | `codex_exec.c:459`, `:512` 열람 | ✅ 채택 (문구 정정) |
+| 계약: 파일 삭제는 best effort (`unlink` 미검사), `*err_out` 은 strdup 실패 시 NULL, "프롬프트를 담지 않음" 은 프롬프트에 그대로 있는 `ERROR:` 줄만 거르는 것 | `codex_exec.c:290-311` (`last_error_line`), `:477`, `:488-492` 열람 | ✅ 채택 (문구 정정, 바이너리 sha256 동일 확인) |
+| 하네스: 성공은 non-NULL 만, 세마포어는 획득을 건너뛰어도 통과, 호출 횟수·행별 초기화 없음 | 하네스 열람 | ✅ 채택: 결과 텍스트·model hint, 실행 중 세마포어 = conc-1, 행마다 호출 1회, 관찰값 초기화. 돌연변이 4개 추가 (슬롯 미획득, structured 미파싱, stderr 항상 요청, control 누락) → 8/8 검출 |
+| 하네스: 빈 출력·fence·structured NUL·script 모드·DEBUG stderr·control 전달 누락 | 하네스 열람 | ✅ 채택 (행 추가) |
+| 하네스: cwd 실패·슬롯 고갈·실제 마감/취소·`sem_destroy` 1회·S1 로그 문구 | — | ⏭️ 다른 곳이 덮음: 슬롯 고갈은 parity "slot exhaustion", 마감/취소는 `test-coalescing` exec 단계, `sem_destroy` 1회는 코드 검토 (codex·나) + ASan. cwd 실패·S1 로그 문구는 미검증으로 남김 |
+| 하네스: 실패 경로에서 예기치 않게 성공한 translator 를 놓아 줌 | 하네스 열람 | ✅ 채택 (`openai_translator_free` 추가, NULL 허용 확인 `http_client.c`) |
+| 문서 갱신 위치 (CLAUDE.md, README, 헤더 주석) | 문서 갱신 때 원문 열람 | 문서 커밋에서 처리 |

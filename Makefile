@@ -177,6 +177,11 @@ test-config-numbers: all
 test-codex-interface: all
 	python3 -I tests/test_codex_interface.py $(abspath $(TARGET))
 
+# PLAN_BACKEND_MODULES.md V8: the codex backend with a fake driver, and the exec driver's init paths.
+test-codex-backend: directories
+	$(CC) $(CFLAGS) -DTRANSBASKET_TEST_HOOKS $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_codex_backend tests/test_codex_backend.c $(filter-out $(SRC_DIR)/main.c, $(SERVER_SRCS)) $(LIBS) $(LDFLAGS)
+	d=$$(mktemp -d) && $(OBJ_DIR)/test_codex_backend $$d $(abspath language_tables.conf); rc=$$?; rm -rf $$d; exit $$rc
+
 # PLAN_BACKEND_MODULES.md V3b/V4/V5: compare against an earlier build, e.g. PARITY_OLD_BIN=/path/to/old/transbasket
 # (that binary needs language_tables.conf next to it: the language table resolves against the executable's directory).
 test-backend-parity: all
@@ -213,4 +218,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity test-codex-backend

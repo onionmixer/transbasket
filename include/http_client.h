@@ -8,6 +8,8 @@
 #include "translation_control.h"
 #include "trans_cache.h"   /* SourceHint */
 
+struct CodexDriver;   /* codex_driver.h */
+
 /* OpenAI translator structure */
 typedef struct {
     Config *config;
@@ -18,8 +20,9 @@ typedef struct {
     /* codex backend: limit concurrent codex processes (codex mode only) */
     sem_t codex_sem;
     bool  codex_sem_inited;
-    bool  codex_ephemeral;      /* installed `codex exec` supports --ephemeral */
-    bool  codex_output_schema;  /* installed `codex exec` supports --output-schema */
+    const struct CodexDriver *codex_driver;  /* how codex is run (codex_driver.h) */
+    void *codex_driver_state;                /* the driver's own; read-only after init */
+    bool  codex_structured_output;           /* the driver can follow a JSON schema */
 } OpenAITranslator;
 
 /* Translation error structure */

@@ -1,6 +1,7 @@
 /**
- * codex backend: one `codex exec` run per request.
- * Split out of http_client.c (PLAN_BACKEND_MODULES.md step 1); the code below is moved verbatim.
+ * codex backend: slot, temp cwd, prompt, structured output and status codes; how codex
+ * is run is the driver's business (codex_driver.h, PLAN_BACKEND_MODULES.md step 2).
+ * Split out of http_client.c (step 1).
  */
 
 #include <stdio.h>
@@ -22,7 +23,6 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include "http_client.h"
-#include "codex_exec.h"
 #include "strict_json.h"
 #include "source_hint.h"
 #include "language_table.h"
@@ -30,6 +30,22 @@
 #include "backend_codex.h"
 #include "prompt_builder.h"
 #include "trace_file.h"
+#include "codex_driver.h"
+
+/* Ways to run codex, by CODEX_INTERFACE value (codex_driver.h says how to add one). */
+static const CodexDriver *const CODEX_DRIVERS[] = { &codex_exec_driver };
+
+static const CodexDriver *codex_driver_for(const char *name) {
+    for (size_t i = 0; i < sizeof(CODEX_DRIVERS) / sizeof(CODEX_DRIVERS[0]); i++) {
+        if (strcmp(CODEX_DRIVERS[i]->name, name) == 0) return CODEX_DRIVERS[i];
+    }
+    return NULL;
+}
+
+#ifdef TRANSBASKET_TEST_HOOKS
+/* Test builds only: tests/test_codex_backend.c swaps in a fake driver. */
+const CodexDriver *codex_test_driver = NULL;
+#endif
 
 /* ===================== codex backend ===================== */
 
@@ -249,7 +265,7 @@ char *translate_via_codex(OpenAITranslator *translator, const char *from_lang,
     /* 3+4. Structured mode only with everything it needs; a schema-file failure
      *      keeps the cwd and falls back to plain output. */
     if (cfg->source_hint_mode == SOURCE_HINT_MODEL &&
-        translator->codex_output_schema && is_auto_source_language(from_lang) && temp_cwd &&
+        translator->codex_structured_output && is_auto_source_language(from_lang) && temp_cwd &&
         translation_remaining_ms(control)) {
         if (write_schema_file(temp_cwd, schema_path, sizeof(schema_path), &schema_created) == 0) {
             structured = true;
@@ -305,25 +321,17 @@ char *translate_via_codex(OpenAITranslator *translator, const char *from_lang,
     if (!prompt) { setup_error = "Memory allocation failed"; goto cleanup; }
     snprintf(prompt, plen, "%s\n\n%s\n\n%s", sys_role, constraint, core);
 
-    /* 6. One `codex exec` run, prompt on stdin. Not retried - a failure here
-     *    is a model/auth/config problem, not a flaky handshake. */
+    /* 6. One run of the codex driver (today `codex exec`, prompt on stdin). Not
+     *    retried - a failure here is a model/auth/config problem, not a flaky handshake. */
     {
-        CodexExecOptions opt = {
-            .bin = cfg->codex_bin,
-            .model = cfg->codex_model,
-            .sandbox = cfg->codex_sandbox,
-            .approval_policy = cfg->codex_approval_policy,
-            .reasoning_effort = cfg->codex_reasoning_effort,
+        CodexRunRequest run = {
+            .prompt = prompt,
             .cwd = temp_cwd,
-            .ephemeral = translator->codex_ephemeral,
-            .ignore_user_config = cfg->codex_ignore_user_config,
-            .timeout_sec = cfg->codex_timeout,
+            .schema_path = structured ? schema_path : NULL,
             .control = control,
-            .output_schema = structured ? schema_path : NULL,
-            .require_output_file = structured,
         };
-        result = codex_exec_run(&opt, prompt, &result_len, &call_err, &timed_out,
-                                cfg->debug ? &codex_stderr : NULL);
+        result = translator->codex_driver->run(translator->codex_driver_state, cfg, &run, &result_len,
+                                               &call_err, &timed_out, cfg->debug ? &codex_stderr : NULL);
         if (!result) {
             status_code = timed_out ? 504 : 502;
             retryable = timed_out;
@@ -420,9 +428,10 @@ cleanup:
     return result;
 }
 
-/* MODEL_TYPE=codex part of openai_translator_init(): the concurrency semaphore, the
- * CLI probe and its startup log lines. -1 only when the semaphore cannot be created;
- * the caller then cleans up curl and the translator. */
+/* MODEL_TYPE=codex part of openai_translator_init(): the concurrency semaphore, then
+ * the driver's init (CLI probe and its startup lines). -1 when the semaphore or the
+ * driver state cannot be created; the semaphore is destroyed again here, and the
+ * caller cleans up curl and the translator. */
 int codex_backend_init(OpenAITranslator *translator, const Config *config, int max_concurrency) {
     int conc = max_concurrency > 0 ? max_concurrency : 1;
     if (sem_init(&translator->codex_sem, 0, (unsigned int)conc) == 0) {
@@ -432,44 +441,21 @@ int codex_backend_init(OpenAITranslator *translator, const Config *config, int m
         LOG_INFO("Error: failed to init codex concurrency semaphore: %s", strerror(errno));
         return -1;
     }
-    /* The codex CLI surface changes between releases (0.154.0 dropped
-     * `mcp-server` and every request started failing with "stdin is not a
-     * terminal"), so check `codex exec` and its flags once and say so loudly
-     * instead of discovering it per request. Warn only: codex may be
-     * installed or upgraded after the daemon starts. */
-    CodexCliInfo cli;
-    codex_cli_probe(config->codex_bin, &cli);
-    translator->codex_ephemeral = cli.has_ephemeral;
-    translator->codex_output_schema = cli.has_output_schema;
-    /* version and server names come from the codex child's output */
-    char version_esc[sizeof(cli.version) * 4 + 4];
-    log_escape(cli.version[0] ? cli.version : "version unknown", sizeof(cli.version), version_esc, sizeof(version_esc));
-    LOG_INFO("codex CLI: %s (interface=exec)\n", version_esc);
-    if (!cli.version[0]) {
-        LOG_INFO("Warning: `%s --version` failed - is codex installed and on PATH?\n", config->codex_bin);
+    /* How codex is run (codex_driver.h). CODEX_INTERFACE accepts only "exec"
+     * (PLAN_REMOVE_LEGACY_MCP.md), so this is the only row in use. */
+    translator->codex_driver = codex_driver_for("exec");
+#ifdef TRANSBASKET_TEST_HOOKS
+    if (codex_test_driver) translator->codex_driver = codex_test_driver;
+#endif
+    CodexDriverCaps caps = { 0 };
+    if (!translator->codex_driver ||
+        translator->codex_driver->init(config, &translator->codex_driver_state, &caps) != 0) {
+        sem_destroy(&translator->codex_sem);
+        translator->codex_sem_inited = false;
+        translator->codex_driver = NULL;
+        return -1;
     }
-    if (!cli.has_exec) {
-        LOG_INFO("Warning: `%s exec` is not available; codex translations will fail\n", config->codex_bin);
-    }
-    if (config->codex_ignore_user_config && !cli.has_ignore_user_config) {
-        LOG_INFO("Warning: CODEX_IGNORE_USER_CONFIG is set but `%s exec` has no --ignore-user-config; "
-                "codex translations will fail\n", config->codex_bin);
-    }
-    bool isolated = config->codex_ignore_user_config;
-    if (!isolated && cli.mcp_enabled > 0) {
-        /* sandbox=read-only covers shell commands, not MCP tool calls. */
-        char names_esc[sizeof(cli.mcp_names) * 4 + 4];
-        log_escape(cli.mcp_names, sizeof(cli.mcp_names), names_esc, sizeof(names_esc));
-        LOG_INFO("Warning: codex will start %d MCP server(s) from its config.toml on every "
-                "translation (%s); their tools are reachable from untrusted text and are not "
-                "covered by the read-only sandbox. Set CODEX_IGNORE_USER_CONFIG=\"true\" "
-                "(with CODEX_MODEL) to isolate translations.\n", cli.mcp_enabled, names_esc);
-    }
-
-    if (config->source_hint_mode == SOURCE_HINT_MODEL && !cli.has_output_schema) {
-        LOG_INFO("Warning: SOURCE_HINT_MODE=\"model\" needs a codex exec with "
-                "--output-schema (not advertised by this CLI); source hints come from the script classifier\n");
-    }
+    translator->codex_structured_output = caps.structured_output;
 
     LOG_INFO("codex translator initialized: bin=%s, model=%s, sandbox=%s, timeout=%ds, concurrency=%d\n",
             config->codex_bin, config->codex_model ? config->codex_model : "(default)",
@@ -479,6 +465,9 @@ int codex_backend_init(OpenAITranslator *translator, const Config *config, int m
 
 /* MODEL_TYPE=codex part of openai_translator_free(). */
 void codex_backend_free(OpenAITranslator *translator) {
+    if (translator->codex_driver && translator->codex_driver->free) {
+        translator->codex_driver->free(translator->codex_driver_state);
+    }
     if (translator->codex_sem_inited) {
         sem_destroy(&translator->codex_sem);
     }
