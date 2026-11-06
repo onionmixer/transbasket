@@ -15,7 +15,7 @@ typedef enum {
 /* Translation backend type (MODEL_TYPE) */
 typedef enum {
     MODEL_TYPE_NORMAL = 0,     /* OpenAI-compatible HTTP API (default) */
-    MODEL_TYPE_CODEX           /* codex CLI (CODEX_INTERFACE: exec or legacy MCP) */
+    MODEL_TYPE_CODEX           /* codex CLI, one `codex exec` per request */
 } ModelType;
 
 /* How from=auto translations record the source text's base language (SOURCE_HINT_MODE) */
@@ -24,12 +24,6 @@ typedef enum {
     SOURCE_HINT_SCRIPT,        /* script classifier (default) */
     SOURCE_HINT_MODEL          /* codex exec structured output, classifier as fallback */
 } SourceHintMode;
-
-/* How the codex backend talks to the CLI (CODEX_INTERFACE) */
-typedef enum {
-    CODEX_INTERFACE_EXEC = 0,  /* `codex exec` per request (default, current CLIs) */
-    CODEX_INTERFACE_MCP        /* `codex mcp-server` (legacy, codex-cli < 0.154.0) */
-} CodexInterface;
 
 /* Configuration structure */
 typedef struct {
@@ -82,7 +76,7 @@ typedef struct {
     char *model_type_str;            /* Backend type as string for logging */
 
     /* codex backend settings - only used when model_type == MODEL_TYPE_CODEX */
-    CodexInterface codex_interface;  /* exec (default) or legacy mcp */
+    bool codex_interface_mcp;        /* CODEX_INTERFACE="mcp" was asked for: removed, refused in codex mode */
     char *codex_bin;                 /* codex executable (default "codex", PATH-searched) */
     char *codex_model;               /* model override (optional, NULL = codex default) */
     char *codex_sandbox;             /* sandbox mode (forced "read-only" unless allow_unsafe) */

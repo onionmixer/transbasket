@@ -296,8 +296,8 @@ class CoalescingTests(AutoTests):
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
-    def test_codex_exec_and_mcp_coalescing(self):
-        for backend in ("exec", "mcp"):
+    def test_codex_exec_coalescing(self):
+        for backend in ("exec",):
             with self.subTest(backend=backend):
                 self.config(backend=backend, threshold=3)
                 with self.codex_gate() as (gate, pids), self.server():
@@ -313,8 +313,8 @@ class CoalescingTests(AutoTests):
                     self.assertEqual(len(pids.read_text().splitlines()), 1)
                     self.assert_reaped(pids)
 
-    def test_codex_deadlines_cover_call_initialize_and_stdin(self):
-        for backend, stage in (("exec", "reply"), ("mcp", "initialize"), ("exec", "stdin"), ("mcp", "stdin")):
+    def test_codex_deadlines_cover_call_and_stdin(self):
+        for backend, stage in (("exec", "reply"), ("exec", "stdin")):
             with self.subTest(backend=backend, stage=stage):
                 self.config(backend=backend)
                 self.configure(TRANSLATION_TOTAL_TIMEOUT=2)
@@ -331,7 +331,7 @@ class CoalescingTests(AutoTests):
                     self.assert_reaped(pids)
 
     def test_codex_failures_are_shared(self):
-        for backend in ("exec", "mcp"):
+        for backend in ("exec",):
             with self.subTest(backend=backend):
                 self.config(backend=backend)
                 with patch.dict(os.environ, {"TB_INFLIGHT_ERROR": "1"}), self.codex_gate() as (gate, pids), self.server():
@@ -349,7 +349,7 @@ class CoalescingTests(AutoTests):
                     self.assert_reaped(pids)
 
     def test_shutdown_wakes_waiters_and_stops_backends(self):
-        for backend in ("normal", "exec", "mcp"):
+        for backend in ("normal", "exec"):
             with self.subTest(backend=backend):
                 self.config(backend=backend)
                 self.gate.clear()

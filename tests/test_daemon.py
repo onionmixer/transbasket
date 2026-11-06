@@ -116,7 +116,9 @@ def rows(binary, short):
         # failed starts: the launcher must say so
         for name, over, needle in [("invalid LISTEN", {"LISTEN": "abc"}, 'Error: LISTEN "abc"'),
                                    ("missing prompt", {"PROMPT_PREFIX_FILE": "/nonexistent/p.txt"}, "Error: "),
-                                   ("port in use", {}, "Address already in use")]:
+                                   ("port in use", {}, "Address already in use"),
+                                   ("removed CODEX_INTERFACE=mcp", {"MODEL_TYPE": "codex", "CODEX_INTERFACE": "mcp"},
+                                    'Error: CODEX_INTERFACE "mcp" was removed')]:
             d = Path(tempfile.mkdtemp(dir=work))
             conf = make_conf(d, port, **over)
             blocker = None

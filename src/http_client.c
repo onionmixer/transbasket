@@ -22,7 +22,6 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include "http_client.h"
-#include "mcp_client.h"
 #include "codex_exec.h"
 #include "strict_json.h"
 #include "source_hint.h"
@@ -672,33 +671,28 @@ OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_tab
         }
         /* The codex CLI surface changes between releases (0.154.0 dropped
          * `mcp-server` and every request started failing with "stdin is not a
-         * terminal"), so check the chosen interface once and say so loudly
+         * terminal"), so check `codex exec` and its flags once and say so loudly
          * instead of discovering it per request. Warn only: codex may be
          * installed or upgraded after the daemon starts. */
         CodexCliInfo cli;
         codex_cli_probe(config->codex_bin, &cli);
         translator->codex_ephemeral = cli.has_ephemeral;
         translator->codex_output_schema = cli.has_output_schema;
-        bool use_exec = (config->codex_interface == CODEX_INTERFACE_EXEC);
         /* version and server names come from the codex child's output */
         char version_esc[sizeof(cli.version) * 4 + 4];
         log_escape(cli.version[0] ? cli.version : "version unknown", sizeof(cli.version), version_esc, sizeof(version_esc));
-        LOG_INFO("codex CLI: %s (interface=%s)\n", version_esc, use_exec ? "exec" : "mcp");
+        LOG_INFO("codex CLI: %s (interface=exec)\n", version_esc);
         if (!cli.version[0]) {
             LOG_INFO("Warning: `%s --version` failed - is codex installed and on PATH?\n", config->codex_bin);
         }
-        if (use_exec && !cli.has_exec) {
+        if (!cli.has_exec) {
             LOG_INFO("Warning: `%s exec` is not available; codex translations will fail\n", config->codex_bin);
         }
-        if (!use_exec && !codex_cli_has_mcp_server(&cli)) {
-            LOG_INFO("Warning: %s no longer provides `codex mcp-server` (removed in 0.154.0); "
-                    "set CODEX_INTERFACE=\"exec\" or every codex translation will fail\n", version_esc);
-        }
-        if (use_exec && config->codex_ignore_user_config && !cli.has_ignore_user_config) {
+        if (config->codex_ignore_user_config && !cli.has_ignore_user_config) {
             LOG_INFO("Warning: CODEX_IGNORE_USER_CONFIG is set but `%s exec` has no --ignore-user-config; "
                     "codex translations will fail\n", config->codex_bin);
         }
-        bool isolated = use_exec && config->codex_ignore_user_config;
+        bool isolated = config->codex_ignore_user_config;
         if (!isolated && cli.mcp_enabled > 0) {
             /* sandbox=read-only covers shell commands, not MCP tool calls. */
             char names_esc[sizeof(cli.mcp_names) * 4 + 4];
@@ -709,10 +703,9 @@ OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_tab
                     "(with CODEX_MODEL) to isolate translations.\n", cli.mcp_enabled, names_esc);
         }
 
-        if (config->source_hint_mode == SOURCE_HINT_MODEL && (!use_exec || !cli.has_output_schema)) {
-            LOG_INFO("Warning: SOURCE_HINT_MODE=\"model\" needs CODEX_INTERFACE=\"exec\" and a codex exec with "
-                    "--output-schema (%s); source hints come from the script classifier\n",
-                    !use_exec ? "interface is mcp" : "not advertised by this CLI");
+        if (config->source_hint_mode == SOURCE_HINT_MODEL && !cli.has_output_schema) {
+            LOG_INFO("Warning: SOURCE_HINT_MODE=\"model\" needs a codex exec with "
+                    "--output-schema (not advertised by this CLI); source hints come from the script classifier\n");
         }
 
         LOG_INFO("codex translator initialized: bin=%s, model=%s, sandbox=%s, timeout=%ds, concurrency=%d\n",
@@ -1283,8 +1276,7 @@ static char *parse_structured_output(const char *buf, size_t len, const char *so
     return translation;
 }
 
-/* Translate text with the codex CLI: `codex exec` (default) or the legacy
- * `codex mcp-server` MCP route, per CODEX_INTERFACE.
+/* Translate text with the codex CLI: one `codex exec` run per request.
  *
  * Order (PLAN_SOURCE_HINT_METADATA.md section 4.1): slot -> temp cwd -> schema
  * file -> mode -> prompt -> run, so the prompt is built for the mode that is
@@ -1336,7 +1328,7 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
 
     /* 3+4. Structured mode only with everything it needs; a schema-file failure
      *      keeps the cwd and falls back to plain output. */
-    if (cfg->source_hint_mode == SOURCE_HINT_MODEL && cfg->codex_interface == CODEX_INTERFACE_EXEC &&
+    if (cfg->source_hint_mode == SOURCE_HINT_MODEL &&
         translator->codex_output_schema && is_auto_source_language(from_lang) && temp_cwd &&
         translation_remaining_ms(control)) {
         if (write_schema_file(temp_cwd, schema_path, sizeof(schema_path), &schema_created) == 0) {
@@ -1393,11 +1385,9 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
     if (!prompt) { setup_error = "Memory allocation failed"; goto cleanup; }
     snprintf(prompt, plen, "%s\n\n%s\n\n%s", sys_role, constraint, core);
 
-    /* 6a. exec (default): one `codex exec` run, prompt on stdin. Not retried -
-     *     a failure here is a model/auth/config problem, not a flaky handshake.
-     * 6b. legacy MCP: spawn -> initialize -> tools/call. Retry transient
-     *     start/init only. */
-    if (cfg->codex_interface == CODEX_INTERFACE_EXEC) {
+    /* 6. One `codex exec` run, prompt on stdin. Not retried - a failure here
+     *    is a model/auth/config problem, not a flaky handshake. */
+    {
         CodexExecOptions opt = {
             .bin = cfg->codex_bin,
             .model = cfg->codex_model,
@@ -1418,42 +1408,6 @@ static char *translate_via_codex(OpenAITranslator *translator, const char *from_
             status_code = timed_out ? 504 : 502;
             retryable = timed_out;
         }
-    }
-
-    for (int attempt = 1;
-         cfg->codex_interface == CODEX_INTERFACE_MCP && attempt <= 2 && !result && translation_remaining_ms(control);
-         attempt++) {
-        MCPClient *cli = mcp_client_start(cfg->codex_bin);
-        if (!cli) {
-            free(call_err);
-            call_err = strdup("failed to start codex mcp-server");
-            retryable = (attempt < 2);
-            continue;  /* transient: retry */
-        }
-        cli->control = control;
-        if (mcp_initialize(cli, cfg->codex_timeout) != 0) {
-            mcp_client_stop(cli);
-            free(call_err);
-            call_err = strdup("codex MCP initialize failed");
-            retryable = (attempt < 2);
-            continue;  /* transient: retry */
-        }
-
-        free(call_err);
-        call_err = NULL;
-        result = mcp_call_codex(cli, prompt, cfg->codex_model, cfg->codex_sandbox,
-                                cfg->codex_approval_policy, temp_cwd,
-                                cfg->codex_reasoning_effort, cfg->codex_timeout,
-                                &call_err, &timed_out);
-        mcp_client_stop(cli);
-
-        if (!result) {
-            /* Model-level failure: do not retry. */
-            status_code = timed_out ? 504 : 502;
-            retryable = timed_out;
-            break;
-        }
-        result_len = strlen(result);
     }
 
 cleanup:

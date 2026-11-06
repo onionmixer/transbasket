@@ -24,7 +24,7 @@
 
 extern char **environ;
 
-#define CODEX_OUT_MAX        (4 * 1024 * 1024)  /* same cap as MCP_RBUF_MAX */
+#define CODEX_OUT_MAX        (4 * 1024 * 1024)
 #define CODEX_ERR_TAIL_MAX   16384              /* stderr kept for diagnostics */
 #define CODEX_POLL_SLICE_MS  100
 #define CODEX_DRAIN_READS    16   /* reads per fd per poll round, so a chatty child
@@ -32,10 +32,6 @@ extern char **environ;
 #define CODEX_TOKEN_MAX      64   /* see config_loader.c:is_codex_token() */
 #define CODEX_PROBE_TIMEOUT  15
 #define CODEX_LAST_MSG_FILE  "last-message.txt"
-
-/* `codex mcp-server` was removed in codex-cli 0.154.0. */
-#define CODEX_MCP_REMOVED_MAJOR 0
-#define CODEX_MCP_REMOVED_MINOR 154
 
 /* ---- small helpers -------------------------------------------------------- */
 
@@ -90,7 +86,7 @@ static void tail_append(char *buf, size_t *len, const char *data, size_t n) {
 
 /* Spawn argv[0] with piped stdio in its own process group (the `codex` node
  * wrapper runs the real binary as a grandchild, so we signal the whole group).
- * Same hygiene as mcp_client_start(): fds >= 3 closed, signal state reset. */
+ * fds >= 3 are closed and the signal state is reset in the child. */
 static int spawn_child(char *const argv[], pid_t *pid, int *fd_in, int *fd_out, int *fd_err) {
     int in_pipe[2] = { -1, -1 }, out_pipe[2] = { -1, -1 }, err_pipe[2] = { -1, -1 };
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
@@ -404,11 +400,6 @@ void codex_cli_probe(const char *bin, CodexCliInfo *info) {
     }
 }
 
-bool codex_cli_has_mcp_server(const CodexCliInfo *info) {
-    if (!info || info->major < 0) return true;  /* unknown: don't claim it is gone */
-    if (info->major != CODEX_MCP_REMOVED_MAJOR) return info->major < CODEX_MCP_REMOVED_MAJOR;
-    return info->minor < CODEX_MCP_REMOVED_MINOR;
-}
 
 char *codex_exec_run(const CodexExecOptions *opt, const char *prompt, size_t *len_out,
                      char **err_out, bool *timed_out, char **stderr_out) {

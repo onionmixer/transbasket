@@ -174,24 +174,18 @@ class LogSafety(unittest.TestCase):
         print("  6 forging attempts (text, uuid, timestamp, from, to, JSON tail): no forged line, no source text")
 
     def test_codex_errors_escaped(self):
-        for iface in ("exec", "mcp"):
-            with tempfile.TemporaryDirectory(prefix="logsafe-codex-") as d:
-                fake = Path(d) / "codex"
-                fake.write_text(FAKE_EXEC_FAIL if iface == "exec" else (ROOT / "tests/fake_codex_nul.py").read_text())
-                fake.chmod(0o700)
-                env_hex = ('{"jsonrpc":"2.0","id":@ID@,"error":{"code":-1,"message":"boom\\n' + FORGED + ' via mcp"}}').encode().hex()
-                os.environ["TB_NUL_MCP_HEX"] = env_hex
-                srv = Server(d, {"MODEL_TYPE": "codex", "CODEX_BIN": str(fake), "CODEX_INTERFACE": iface,
-                                 "CODEX_RUN_DIR": d, "CODEX_TIMEOUT": "10"})
-                status = srv.post(request(text="hello"))
-                log = srv.stop()
-            self.assertNotEqual(status, 200)
-            self.assertEqual([l for l in log.splitlines() if l.startswith(FORGED)], [], iface)
-            if iface == "exec":
-                self.assertIn("\\x1b[31m red \\x07 bell", log)
-            else:
-                self.assertIn("boom\\n[2026-01-01", log)
-        print("  codex exec stderr and MCP error text: control bytes escaped, no forged line")
+        with tempfile.TemporaryDirectory(prefix="logsafe-codex-") as d:
+            fake = Path(d) / "codex"
+            fake.write_text(FAKE_EXEC_FAIL)
+            fake.chmod(0o700)
+            srv = Server(d, {"MODEL_TYPE": "codex", "CODEX_BIN": str(fake), "CODEX_INTERFACE": "exec",
+                             "CODEX_RUN_DIR": d, "CODEX_TIMEOUT": "10"})
+            status = srv.post(request(text="hello"))
+            log = srv.stop()
+        self.assertNotEqual(status, 200)
+        self.assertEqual([l for l in log.splitlines() if l.startswith(FORGED)], [])
+        self.assertIn("\\x1b[31m red \\x07 bell", log)
+        print("  codex exec stderr: control bytes escaped, no forged line")
 
     def test_trace_files(self):
         with tempfile.TemporaryDirectory(prefix="logsafe-trace-") as d:

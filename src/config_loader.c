@@ -277,6 +277,11 @@ int validate_config(const Config *config) {
      * In codex mode these settings are unused, so skip them entirely - including
      * URL syntax - so a stale OPENAI_BASE_URL does not block codex startup. */
     if (config->model_type == MODEL_TYPE_NORMAL) {
+        /* CODEX_* keys are unused here, so a leftover one does not block startup. */
+        if (config->codex_interface_mcp) {
+            LOG_INFO("Warning: CODEX_INTERFACE \"mcp\" was removed; ignored because MODEL_TYPE is normal");
+        }
+
         /* Validate OPENAI_BASE_URL */
         if (!config->openai_base_url || strlen(config->openai_base_url) == 0) {
             LOG_INFO( "Error: OPENAI_BASE_URL is required");
@@ -302,6 +307,14 @@ int validate_config(const Config *config) {
             return -1;
         }
     } else {
+        /* The legacy `codex mcp-server` interface was removed (PLAN_REMOVE_LEGACY_MCP.md):
+         * refuse instead of silently running exec for a config that asked for mcp. */
+        if (config->codex_interface_mcp) {
+            LOG_INFO("Error: CODEX_INTERFACE \"mcp\" was removed (codex-cli 0.154.0 dropped `codex mcp-server`); "
+                     "use CODEX_INTERFACE=\"exec\" or delete the line");
+            return -1;
+        }
+
         /* codex mode: codex_bin must be present */
         if (!config->codex_bin || strlen(config->codex_bin) == 0) {
             LOG_INFO( "Error: CODEX_BIN is required in codex mode");
@@ -468,7 +481,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->model_type_str = strdup("normal");
 
     /* codex backend defaults */
-    config->codex_interface = CODEX_INTERFACE_EXEC;
+    config->codex_interface_mcp = false;
     config->codex_bin = strdup("codex");
     config->codex_model = NULL;             /* NULL = codex default model */
     config->codex_sandbox = strdup("read-only");
@@ -701,13 +714,11 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
                 config->model_type_str = strdup("normal");
             }
         } else if (strcmp(key, "CODEX_INTERFACE") == 0) {
-            if (strcasecmp(value, "exec") == 0) {
-                config->codex_interface = CODEX_INTERFACE_EXEC;
-            } else if (strcasecmp(value, "mcp") == 0) {
-                config->codex_interface = CODEX_INTERFACE_MCP;
-            } else {
+            /* exec is the only interface. The last line wins, as before: a later
+             * exec or invalid value clears an earlier mcp. */
+            config->codex_interface_mcp = (strcasecmp(value, "mcp") == 0);
+            if (strcasecmp(value, "exec") != 0 && !config->codex_interface_mcp) {
                 LOG_INFO("Warning: Invalid CODEX_INTERFACE '%s', using 'exec'\n", value);
-                config->codex_interface = CODEX_INTERFACE_EXEC;
             }
         } else if (strcmp(key, "CODEX_BIN") == 0) {
             free(config->codex_bin);

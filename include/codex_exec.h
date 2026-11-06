@@ -6,11 +6,12 @@
 #include "translation_control.h"
 
 /*
- * `codex exec` driver - the codex backend's default interface.
+ * `codex exec` driver - the codex backend's only interface.
  *
- * codex-cli 0.154.0 removed the `codex mcp-server` subcommand (absent from the
- * 0.166.0 binary as well), so the MCP route in mcp_client.c only works with older
- * CLIs. `codex exec` is the supported non-interactive surface: the prompt is fed
+ * codex-cli 0.154.0 removed the `codex mcp-server` subcommand, and the legacy
+ * MCP route that used it was removed from transbasket on 2026-11-06
+ * (PLAN_REMOVE_LEGACY_MCP.md). `codex exec` is the supported non-interactive
+ * surface: the prompt is fed
  * on stdin (never argv, so untrusted text does not show up in ps or
  * /proc/<pid>/cmdline) and the final agent message is taken from
  * --output-last-message, falling back to stdout.
@@ -47,10 +48,6 @@ typedef struct {
 
 /* Probe the installed CLI. Never fails hard; unknown fields stay false/""/-1. */
 void codex_cli_probe(const char *bin, CodexCliInfo *info);
-
-/* false when the probed version is known to be >= 0.154.0, which no longer has
- * `codex mcp-server`. An unknown version returns true (no false alarm). */
-bool codex_cli_has_mcp_server(const CodexCliInfo *info);
 
 /* Run one `codex exec` turn and return the final message (caller frees), or
  * NULL on failure with *err_out (caller frees) set to a short message that is

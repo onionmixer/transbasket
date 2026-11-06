@@ -84,7 +84,7 @@ class NulGuard(unittest.TestCase):
                  "PROMPT_PREFIX_FILE": "p.txt", "LANGUAGE_TABLE_FILE": str(ROOT / "language_tables.conf"),
                  "TRANS_CACHE_TYPE": "sqlite", "TRANS_CACHE_SQLITE_PATH": str(d / "c.db"), "TRANS_CACHE_THRESHOLD": "1",
                  "TRANS_CACHE_CLEANUP_ENABLED": "false", "CODEX_BIN": str(fake),
-                 "CODEX_INTERFACE": "mcp" if backend == "mcp" else "exec", "CODEX_RUN_DIR": str(d), "CODEX_TIMEOUT": "5",
+                 "CODEX_INTERFACE": "exec", "CODEX_RUN_DIR": str(d), "CODEX_TIMEOUT": "5",
                  "TRANSLATION_TOTAL_TIMEOUT": "8", "STREAM": "true" if stream else "false"}
             (d / "t.conf").write_text("".join(f'{k}="{x}"\n' for k, x in v.items()))
             with open(d / "log", "w") as log:
@@ -151,23 +151,6 @@ class NulGuard(unittest.TestCase):
         # bytes after the root value are ignored by cJSON, before and after the change
         status, _, rows, calls = self.run_case("normal", self.body(extra=bs(" ~u0000")))
         self.assertEqual((status, len(calls)), (200, 1))
-
-    # ---- MCP ----
-    def test_mcp(self):
-        line = lambda content: b'{"jsonrpc":"2.0","id":@ID@,"result":{"structuredContent":{"content":' + content + b"}}}"
-        for name, raw in [("structuredContent \\u0000", line(bs('"앞~u0000뒤"'))),
-                          ("structuredContent \\u00ZZ", line(bs('"앞~u00ZZ뒤"'))),
-                          ("content[].text \\u0000", b'{"jsonrpc":"2.0","id":@ID@,"result":{"content":[{"type":"text","text":' + bs('"앞~u0000뒤"') + b"}]}}"),
-                          ("isError text \\u0000", b'{"jsonrpc":"2.0","id":@ID@,"result":{"isError":true,"content":[{"type":"text","text":' + bs('"e~u0000"') + b"}]}}")]:
-            status, out, rows, _ = self.run_case("mcp", self.body(), {"TB_NUL_MCP_HEX": raw.hex()})
-            self.assertEqual((status, rows), (502, []), name)
-            if not name.startswith("isError"):
-                self.assertIn("U+0000", json.dumps(out), name)
-        for raw, want in [(line(bs('"lit~~u0000"')), "lit" + chr(92) + "u0000"),
-                          (line(b'"OK"') + bs(" ~u0000"), "OK"),
-                          (line(bs('"caf~u00e9"')), "caf" + chr(0xE9))]:
-            status, out, rows, _ = self.run_case("mcp", self.body(), {"TB_NUL_MCP_HEX": raw.hex()})
-            self.assertEqual((status, out.get("translatedText"), len(rows)), (200, want, 1), raw)
 
     # ---- exec plain ----
     def test_exec_plain(self):

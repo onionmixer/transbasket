@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline codex exec/MCP fixture. Never invokes a model or external service."""
+"""Offline codex exec fixture. Never invokes a model or external service."""
 import json
 import os
 from pathlib import Path
@@ -39,22 +39,5 @@ elif sys.argv[1] == "exec":
         print("ERROR: fixture failure", file=sys.stderr)
         sys.exit(1)
     Path(sys.argv[sys.argv.index("-o") + 1]).write_text("번역 결과", encoding="utf-8")
-elif sys.argv[1] == "mcp-server":
-    for line in sys.stdin:
-        request = json.loads(line)
-        if "id" not in request:
-            continue
-        result = {}
-        if request["method"] == "initialize":
-            gate("initialize")
-        if request["method"] == "tools/call":
-            capture(request["params"]["arguments"]["prompt"])
-            gate("reply")
-            result = {"structuredContent": {"content": "번역 결과"}}
-            if os.environ.get("TB_INFLIGHT_ERROR"):
-                result = {"isError": True, "structuredContent": {"content": "fixture failure"}}
-        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
-        if request["method"] == "initialize":
-            gate("stdin")  # acknowledge init, then stop reading a large tools/call
 else:
     sys.exit(1)

@@ -100,7 +100,7 @@ class AutoTests(unittest.TestCase):
             "TRANS_CACHE_TYPE": cache, "TRANS_CACHE_FILE": str(self.cache),
             "TRANS_CACHE_SQLITE_PATH": str(self.cache), "TRANS_CACHE_THRESHOLD": str(threshold),
             "TRANS_CACHE_CLEANUP_ENABLED": "false", "CODEX_BIN": str(fake),
-            "CODEX_INTERFACE": "mcp" if backend == "mcp" else "exec",
+            "CODEX_INTERFACE": "exec",
             "CODEX_RUN_DIR": str(self.directory), "CODEX_TIMEOUT": "5",
         }
         if custom is not None:
@@ -232,8 +232,8 @@ class AutoTests(unittest.TestCase):
             self.assertIn("CUSTOM Korean kor", messages[1]["content"])
             self.assertEqual(self.request("eng"), 200)
 
-    def test_codex_exec_and_mcp_prompts(self):
-        for interface in ("exec", "mcp"):
+    def test_codex_exec_prompts(self):
+        for interface in ("exec",):
             with self.subTest(interface=interface):
                 self.config(backend=interface, custom="CUSTOM {TARGET_LANG} {TARGET_CODE}\n{TEXT}", gemma=True)
                 # New source text keeps the second backend from using the first backend's cache.
@@ -241,7 +241,7 @@ class AutoTests(unittest.TestCase):
                     self.assertEqual(self.request(text=SOURCE + interface), 200)
                     self.assertEqual(self.request("AUTO", text=SOURCE + interface), 200)
                 prompts = [json.loads(line) for line in self.capture.read_text().splitlines()]
-                self.assertEqual(len(prompts), 1 if interface == "exec" else 2)
+                self.assertEqual(len(prompts), 1)
                 self.check_prompt(prompts[-1])
                 self.assertNotIn("{TEXT}", prompts[-1])
                 # Original text is enclosed by the same generated marker on both sides.

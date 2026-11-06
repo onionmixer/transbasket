@@ -3,7 +3,7 @@
 
     python3 tests/test_prompt_regression.py <old transbasket> <new transbasket>
 
-Runs both binaries against the same offline fixtures (fake codex exec/MCP,
+Runs both binaries against the same offline fixtures (fake codex exec,
 fake OpenAI upstream) and compares every captured codex prompt and upstream
 request body. Only the per-request random delimiter ===SRC-<32 hex>=== is
 normalized. The fake codex does not advertise --output-schema, so
@@ -61,7 +61,7 @@ def run(binary, backend, template, mode, upstream_port, workdir):
         "PROMPT_PREFIX_FILE": "explicit.txt", "LANGUAGE_TABLE_FILE": str(ROOT / "language_tables.conf"),
         "TRANS_CACHE_TYPE": "text", "TRANS_CACHE_FILE": str(d / "cache.jsonl"), "TRANS_CACHE_THRESHOLD": "1",
         "TRANS_CACHE_CLEANUP_ENABLED": "false", "CODEX_BIN": str(fake),
-        "CODEX_INTERFACE": "mcp" if backend == "mcp" else "exec", "CODEX_RUN_DIR": str(d), "CODEX_TIMEOUT": "5",
+        "CODEX_INTERFACE": "exec", "CODEX_RUN_DIR": str(d), "CODEX_TIMEOUT": "5",
         "SOURCE_HINT_MODE": mode,
     }
     conf = d / "t.conf"
@@ -99,7 +99,7 @@ def main():
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
     failures = compared = 0
-    for backend in ("exec", "mcp", "normal"):
+    for backend in ("exec", "normal"):
         for template in ("legacy", "gemma"):
             for mode in ("script", "model"):
                 with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
