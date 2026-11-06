@@ -1,9 +1,39 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **cleanup 기간·NUL 잘림 수정 검증 2026-11-06**입니다.
+> 최신 기록은 바로 아래의 **LISTEN 적용 수정 검증 2026-11-06**입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## LISTEN 적용 수정 검증 2026-11-06
+
+설계·결정·codex 판정은 [PLAN_LISTEN_ADDRESS.md](PLAN_LISTEN_ADDRESS.md) 에 있다. 기대값은 모두 python 으로 계산했다.
+서버 시험은 비특권 네트워크·PID 네임스페이스(`unshare -rn --pid --fork --kill-child=KILL --mount-proc`) 안에서 lo 와
+dummy `198.18.0.1/24` 로만 했다. 호스트 LAN 에는 시험 서버를 열지 않았다.
+
+### 수정 전 실측 (main `573b6ea`)
+
+| 대상 | 결과 |
+|---|---|
+| `LISTEN` = `127.0.0.1`, `198.18.0.1`, `::`, `::1`, `abc`, `localhost` … | 전부 `0.0.0.0` 에 바인드, 다른 인터페이스에서 접속됨, IPv6 불가, 잘못된 값도 기동 |
+| `LISTEN` 줄이 512바이트 값·1,024바이트 넘는 줄·`LISTEN = "…"`·`export`·소문자 | 경고 후 무시, 기본값 `0.0.0.0` |
+| NUL 바이트가 든 줄 다음의 `LISTEN` 줄 | 함께 버려져 `0.0.0.0` (첫 구현에서도 재현, 이번에 수정) |
+
+### 수정 후
+
+| 대상 | 명령 | 결과 |
+|---|---|---|
+| 주소 파서·줄 인식기 C ↔ 명세 | `make test-listen-parse` | 주소 120,197건, 줄 60,042건(무작위 조각 입력) 불일치 0. 실제 `parse_config_line()` 38,886줄: "키 LISTEN 으로 파싱되는 줄은 모두 인식" 위반 0. 돌연변이 16/16 검출. ASan/UBSan 깨끗 |
+| 서버 종단 | `make test-listen-address LISTEN_OLD_BIN=<573b6ea>` | 166항목 통과. 접속 5행(`0.0.0.0`/`127.0.0.1`/`198.18.0.1`/`::`/`::1` × 127.0.0.1·198.18.0.1·::1, 일반 소켓 기준선·`ss`·기동 로그 일치), 잘못된 값·바인드 실패 19행(종료 코드 1, 문구, 포트 미바인드), 줄 인식기 11종 × 유효한 `LISTEN` 앞/뒤 22행, 대조군 10행, IPv6 끈 네임스페이스(`::1` 기동 실패, `::` 는 IPv4 계속 수신) |
+| 같은 표, 수정 전 바이너리 | 같은 명령 | 접속 4/5, 잘못된 값 16/19, 인식기 22/22 행이 어긋남. 어긋나지 않은 것은 `0.0.0.0` 과, 수정 전에도 기동 실패하던 빈 값 2종·포트 사용 중 |
+| 배포 설정 사본 | dkfs·pge4 설정 사본, 가짜 codex (스크래치 스크립트) | 수정 전과 바인드(`0.0.0.0`)·접속 동일, 기동 로그 `HTTP server listening on 0.0.0.0:<port> (IPv4)`, codex 능력 확인 3회·번역 호출 0회 |
+| 실제 설정 파일 7개 | 줄 인식기 + 실제 파서 | 모두 `LISTEN` 한 줄, 유효한 할당, 파싱 실패 줄 0 → 이번 변경으로 기동이 막히는 설정 없음 |
+| 메모리 | valgrind, `127.0.0.1`/`::`/`::1`/`abc`/`0.1.2.3` | 릴리스·디버그 빌드 10회 오류 0 (definite·indirect 누수 포함) |
+| 기존 회귀 | test-auto, test-coalescing, test-source-hint(-store/-server), test-cache-tool-hints, test-strict-json, test-structured-hint, test-cleanup-days, test-cjson-nul, test-nul-guard, `test_config_limits.py` | 모두 통과, 릴리스·디버그 빌드 경고 0 |
+| 프롬프트 회귀 | `tests/test_prompt_regression.py <573b6ea> <신규>` | 36건 바이트 동일 |
+
+codex 교차검토: 계획 1차 8건·2차 8건(실측 후 채택 13, 부분 채택 3), 구현 diff 0건. 동작이 바뀐 점: 줄바꿈 앞까지 정확히
+1,023바이트인 줄은 이제 정상 줄로 읽는다 (예전에는 긴 줄로 버려짐).
 
 ## cleanup 기간·NUL 잘림 수정 검증 2026-11-06
 

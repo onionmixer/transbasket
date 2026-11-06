@@ -76,6 +76,7 @@ The C implementation follows a clear separation of concerns across these core mo
 8. **mcp_client.c**: Minimal MCP stdio JSON-RPC 2.0 client for the legacy `codex mcp-server` interface (codex-cli < 0.154.0)
 9. **source_hint.c**: script classifier for the from=auto base language (see "Source hint" below)
 10. **strict_json.c**: strict validator for codex structured output, run before cJSON
+11. **listen_address.c**: `LISTEN` parser and LISTEN line recognizer (see "LISTEN address" below)
 
 (Cache and language-table concerns live in `trans_cache.c`, `cache_backend_*.c`, and `language_table.c`.)
 
@@ -248,6 +249,26 @@ and the C string is cut there (keys too). Invariants:
 - Cleanup cutoffs: `trans_cache_cutoff()` / `trans_cache_cleanup_interval()` (64-bit, saturated). Never
   multiply days in `int` again. `TRANS_CACHE_CLEANUP_DAYS` keeps atoi's value where atoi is defined and
   saturates otherwise; `cache_tool cleanup/delete` take strict decimals. `make test-cleanup-days`.
+
+### LISTEN address - PLAN_LISTEN_ADDRESS.md
+
+Until 2026-11-06 `MHD_start_daemon()` got only the port, so every `LISTEN` value bound `0.0.0.0`. Invariants now:
+
+- `parse_listen_address()` is the only parser, used by `validate_config()` and `translation_server_start()`.
+  Numeric `inet_pton` literals only, no DNS (`localhost` resolves to `::1` first on this host). `::` means
+  `MHD_USE_DUAL_STACK`; other IPv6 `MHD_USE_IPv6`. Multicast, `255.255.255.255`, `::ffff:0:0/96` and
+  `fe80::/10` are rejected; anything else that cannot be bound fails at bind time with the MHD reason logged.
+- `MHD_OPTION_SOCK_ADDR` decides the bind; the `port` argument is ignored for binding but appears in MHD's
+  error text, so it gets the same value. `MHD_OPTION_EXTERNAL_LOGGER` must be the first option.
+  MHD messages are INFO only until `MHD_start_daemon()` returns, then DEBUG (never used as a format string).
+- A config line that tries to set LISTEN (`listen_scan_*`: blanks/BOM, optional `export`, the word LISTEN in
+  any case) but is not read as `LISTEN=<value>` - parse failure, overlong value, overlong physical line -
+  stops startup instead of leaving the `0.0.0.0` default. Note POSIX ERE: `LISTEN=` is an empty assignment.
+- The log line `HTTP server listening on ...` comes from `getsockname()` + `IPV6_V6ONLY`, not from the config.
+- `make test-listen-parse` (C vs `tests/listen_address_ref.py`, real `parse_config_line()`, mutants) and
+  `make test-listen-address` (real server inside `unshare -rn --pid --fork --kill-child=KILL --mount-proc`
+  with a dummy 198.18.0.1 interface; `LISTEN_OLD_BIN=` also runs a pre-fix binary). Tests bind loopback only.
+- `-d` still daemonizes before the config is read, so startup errors are invisible there (separate task).
 
 ### Translation Cache Concurrency
 
