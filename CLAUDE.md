@@ -167,8 +167,14 @@ Two configuration files:
 1. **transbasket.conf**: Shell-style KEY="value" format (not INI)
    - Parsed with regex pattern matching
    - Custom validation for URLs, ports
-   - The config file itself is resolved relative to the executable; prompt, role and language
-     table paths inside it are resolved relative to the **config file's directory**
+   - Relative paths resolve against three different bases (measured 2026-11-06 with the
+     executable, the config and the working directory in three separate directories):
+     - the config file (`-c`, `TRANSBASKET_CONFIG`, default) - the **executable's directory**
+     - `PROMPT_PREFIX_FILE`, `PROMPT_PREFIX_AUTO_FILE`, `-p`, `-r` - the **config file's directory**
+     - `LANGUAGE_TABLE_FILE` - the **executable's directory** (`language_table.c` `resolve_path()`
+       uses `/proc/self/exe`); if it is not found the server only warns and runs without the table
+     - `TRANS_CACHE_FILE`, `TRANS_CACHE_SQLITE_PATH`, `CODEX_RUN_DIR`, `./trace/` - the **working
+       directory** (which `-d` keeps since 2026-11-06)
 
 2. **PROMPT_PREFIX.txt**: Multi-line prompt prefix
    - Loaded at startup
@@ -588,10 +594,13 @@ valgrind --leak-check=full --show-leak-kinds=all ./transbasket
 
 | Metric | Python POC | C Implementation |
 |--------|-----------|------------------|
-| Memory Usage | ~50 MB | ~5 MB |
-| Startup Time | ~1 second | ~0.1 second |
-| Binary Size | N/A | ~120 KB |
+| Memory Usage | ~50 MB | 8.6 MiB idle RSS (normal mode, text cache, language table loaded) |
+| Startup Time | ~1 second | 0.026 s to listening (normal mode; codex mode adds the CLI probe) |
+| Binary Size | N/A | 185 KiB (189,832 bytes, release build, not stripped) |
 | Request Latency | Same (network bound) | Same (network bound) |
+
+The C column was re-measured on 2026-11-06 (median of 5 starts, `cfde092`); the Python column is the
+original POC estimate.
 
 ### Scalability
 
@@ -633,7 +642,8 @@ sudo systemctl start transbasket
 
 There is no Dockerfile in this repository. Containerizing means installing the libraries from
 "Library Dependencies", running `make`, and mounting the config, prompt, language table and cache
-paths - remember that relative paths in the config resolve against the executable's directory.
+paths - relative paths resolve against three different bases (see "Configuration System"), so
+absolute paths are the safe choice there.
 
 ## Security Considerations
 

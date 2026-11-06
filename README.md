@@ -737,8 +737,9 @@ transbasket/
 - Prompt prefix / system role file loading
 - Optional `PROMPT_PREFIX_AUTO_FILE` loading and source-placeholder rejection
 - Configuration validation (including the codex sandbox/approval hard-coercion)
-- Path resolution: the config file relative to the executable, prompt/role/language
-  files relative to the config file's directory
+- Path resolution: the config file and `LANGUAGE_TABLE_FILE` relative to the executable's
+  directory, prompt/role files relative to the config file's directory, cache files,
+  `CODEX_RUN_DIR` and `./trace/` relative to the working directory
 
 ### json_handler.c
 - JSON request parsing with cJSON
@@ -863,8 +864,8 @@ make rebuild
 | Feature | Python POC | C Implementation |
 |---------|-----------|------------------|
 | Performance | ~50 req/s | ~500+ req/s |
-| Memory Usage | ~50 MB | ~5 MB |
-| Startup Time | ~1 second | ~0.1 second |
+| Memory Usage | ~50 MB | 8.6 MiB idle RSS (measured 2026-11-06) |
+| Startup Time | ~1 second | 0.026 s to listening, normal mode (measured 2026-11-06) |
 | Threading | ThreadPoolExecutor | Thread-per-connection |
 | API Contract | ✓ Identical | ✓ Identical |
 
