@@ -151,7 +151,7 @@ bool validate_language_code(const char *lang_code) {
 
     char lower_code[4];
     for (int i = 0; i < 3; i++) {
-        lower_code[i] = tolower(lang_code[i]);
+        lower_code[i] = (char)tolower((unsigned char)lang_code[i]);
     }
     lower_code[3] = '\0';
 
@@ -210,7 +210,7 @@ const char *get_language_name(const char *lang_code) {
 
     char lower_code[4];
     for (int i = 0; i < 3; i++) {
-        lower_code[i] = tolower(lang_code[i]);
+        lower_code[i] = (char)tolower((unsigned char)lang_code[i]);
     }
     lower_code[3] = '\0';
 
@@ -393,7 +393,7 @@ const char *normalize_language_code(const char *lang_input) {
             /* Return the canonical lowercase version from our list */
             char lower_code[4];
             for (int i = 0; i < 3; i++) {
-                lower_code[i] = tolower(lang_input[i]);
+                lower_code[i] = (char)tolower((unsigned char)lang_input[i]);
             }
             lower_code[3] = '\0';
 
@@ -461,6 +461,7 @@ int get_current_timestamp(char *timestamp_buf, size_t buf_size) {
 }
 
 /* Forward declaration for UTF-8 decoding helper */
+#define UTF8_INVALID 0xFFFFFFFFu
 static int utf8_decode(const unsigned char *s, unsigned int *cp);
 
 /* Truncate text with suffix (UTF-8 aware) */
@@ -530,25 +531,83 @@ static bool is_emoji_codepoint(unsigned int cp) {
            (cp >= 0x2600 && cp <= 0x26FF);      // Misc Symbols
 }
 
-/* Decode UTF-8 character and return codepoint */
+/* Strict UTF-8 (RFC 3629): returns the sequence length and sets *cp. An invalid,
+ * overlong, surrogate, out-of-range or truncated sequence returns 1 with
+ * *cp = UTF8_INVALID (never an emoji), so the byte is kept as it is. A byte past
+ * s[0] is read only while the previous one was a valid continuation byte, so a
+ * NUL-terminated string is never read beyond its terminator (PLAN_OPEN_ISSUES.md C). */
 static int utf8_decode(const unsigned char *s, unsigned int *cp) {
-    if ((s[0] & 0x80) == 0) {
-        *cp = s[0];
+    unsigned char c = s[0];
+    int len;
+    unsigned int v, min;
+    if (c < 0x80) {
+        *cp = c;
         return 1;
-    } else if ((s[0] & 0xE0) == 0xC0) {
-        *cp = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
-        return 2;
-    } else if ((s[0] & 0xF0) == 0xE0) {
-        *cp = ((s[0] & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
-        return 3;
-    } else if ((s[0] & 0xF8) == 0xF0) {
-        *cp = ((s[0] & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
-        return 4;
+    } else if (c >= 0xC2 && c <= 0xDF) {
+        len = 2; v = c & 0x1Fu; min = 0x80;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+        len = 3; v = c & 0x0Fu; min = 0x800;
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        len = 4; v = c & 0x07u; min = 0x10000;
+    } else {
+        *cp = UTF8_INVALID;
+        return 1;
     }
-    return 1;
+    for (int i = 1; i < len; i++) {
+        if ((s[i] & 0xC0) != 0x80) {
+            *cp = UTF8_INVALID;
+            return 1;
+        }
+        v = (v << 6) | (s[i] & 0x3Fu);
+    }
+    if (v < min || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF)) {
+        *cp = UTF8_INVALID;
+        return 1;
+    }
+    *cp = v;
+    return len;
 }
 
 /* Strip emoji and shortcodes from text */
+static bool ascii_alnum(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
+
+static bool shortcode_char(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '+' || c == '-';
+}
+
+static bool c_locale_space(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+/* Length of a shortcode such as ":smile:" starting at in[pos], or 0. The name is
+ * [a-z0-9_+-]+ with at least one lowercase letter, and neither colon may touch an
+ * ASCII letter or digit, so times (10:30), ratios (3:1), URLs (http://), IPv6
+ * literals, "Note:" and ":)" are not shortcodes. Specification: tests/strip_ref.py. */
+static size_t shortcode_at(const char *in, size_t pos, size_t len) {
+    if (pos > 0 && ascii_alnum((unsigned char)in[pos - 1])) {
+        return 0;
+    }
+    size_t j = pos + 1;
+    bool lower = false;
+    while (j < len && shortcode_char((unsigned char)in[j])) {
+        if (in[j] >= 'a' && in[j] <= 'z') {
+            lower = true;
+        }
+        j++;
+    }
+    if (j == pos + 1 || !lower || j >= len || in[j] != ':') {
+        return 0;
+    }
+    if (j + 1 < len && ascii_alnum((unsigned char)in[j + 1])) {
+        return 0;
+    }
+    return j + 1 - pos;
+}
+
+/* Never writes more bytes than it reads, so output_size = strlen(input) + 1 always
+ * fits. Returns -1 instead of truncating if output_size is smaller than needed. */
 int strip_emoji_and_shortcodes(const char *input, char *output, size_t output_size) {
     if (!input || !output || output_size == 0) {
         return -1;
@@ -557,68 +616,45 @@ int strip_emoji_and_shortcodes(const char *input, char *output, size_t output_si
     size_t in_len = strlen(input);
     size_t out_pos = 0;
     size_t in_pos = 0;
-    bool in_shortcode = false;
     bool last_was_space = false;
 
-    while (in_pos < in_len && out_pos < output_size - 1) {
+    while (in_pos < in_len) {
+        unsigned char c = (unsigned char)input[in_pos];
+
+        if (c == ':') {
+            size_t skip = shortcode_at(input, in_pos, in_len);
+            if (skip) {
+                in_pos += skip;
+                continue;
+            }
+        }
+
         unsigned int codepoint;
-        int char_len = utf8_decode((unsigned char *)&input[in_pos], &codepoint);
-
-        // Check for shortcode start
-        if (input[in_pos] == ':' && !in_shortcode) {
-            in_shortcode = true;
-            in_pos++;
+        int char_len = utf8_decode((const unsigned char *)&input[in_pos], &codepoint);
+        if (codepoint != UTF8_INVALID && is_emoji_codepoint(codepoint)) {
+            in_pos += (size_t)char_len;
             continue;
         }
 
-        // Check for shortcode end
-        if (in_shortcode) {
-            if (input[in_pos] == ':') {
-                in_shortcode = false;
-                in_pos++;
-                continue;
-            } else if (!isalnum(input[in_pos]) && input[in_pos] != '_' &&
-                       input[in_pos] != '+' && input[in_pos] != '-' && input[in_pos] != '&') {
-                // Not a valid shortcode, output the stored ':'
-                in_shortcode = false;
-            } else {
-                in_pos++;
-                continue;
-            }
-        }
-
-        // Check for emoji
-        if (is_emoji_codepoint(codepoint)) {
-            in_pos += char_len;
-            continue;
-        }
-
-        // Handle whitespace normalization
-        if (isspace(input[in_pos])) {
-            // Preserve newlines
-            if (input[in_pos] == '\n') {
-                if (out_pos < output_size - 1) {
-                    output[out_pos++] = '\n';
-                }
-                last_was_space = false;  // Reset for next line
-                in_pos++;
-                continue;
-            }
-
-            // Normalize other whitespace to single space
-            if (!last_was_space && out_pos > 0 && out_pos < output_size - 1) {
-                output[out_pos++] = ' ';
+        if (c_locale_space(c)) {
+            if (c == '\n') {
+                if (out_pos + 1 >= output_size) return -1;
+                output[out_pos++] = '\n';
+                last_was_space = false;   /* Preserve newlines */
+            } else if (!last_was_space && out_pos > 0) {
+                if (out_pos + 1 >= output_size) return -1;
+                output[out_pos++] = ' ';   /* Normalize other whitespace to one space */
                 last_was_space = true;
             }
             in_pos++;
             continue;
         }
 
-        // Copy character
+        if (out_pos + (size_t)char_len >= output_size) return -1;   /* never cut a character */
+        memcpy(output + out_pos, input + in_pos, (size_t)char_len);
+        out_pos += (size_t)char_len;
+        in_pos += (size_t)char_len;
         last_was_space = false;
-        for (int i = 0; i < char_len && in_pos < in_len && out_pos < output_size - 1; i++) {
-            output[out_pos++] = input[in_pos++];
-        }
     }
 
     // Remove trailing space
@@ -679,6 +715,9 @@ int unescape_string(const char *input, char *output, size_t output_size) {
         }
     }
 
+    if (in_pos < in_len) {
+        return -1;   /* output_size too small: never truncate silently */
+    }
     output[out_pos] = '\0';
     return 0;
 }

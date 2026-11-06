@@ -29,8 +29,6 @@
 
 #define DEFAULT_TIMEOUT 60
 #define DEFAULT_MAX_RETRIES 3
-#define MAX_TRANSLATION_BUFFER 16384  /* 16KB for unescaped text */
-#define MAX_CLEANED_TEXT_BUFFER 8192  /* 8KB for cleaned text */
 #define MAX_STREAM_BUFFER 65536       /* 64KB for streaming response accumulation */
 
 /* Structure for curl response data */
@@ -963,8 +961,11 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
         }
 
         /* Process the raw translation: unescape and clean */
-        char *unescaped_text = malloc(MAX_TRANSLATION_BUFFER);
-        char *cleaned_text = malloc(MAX_CLEANED_TEXT_BUFFER);
+        /* Neither step writes more than it reads (PLAN_OPEN_ISSUES.md C), so input
+         * length + 1 always fits: no 16 KB / 8 KB caps, no silent truncation. */
+        size_t raw_len = strlen(raw_translation);
+        char *unescaped_text = malloc(raw_len + 1);
+        char *cleaned_text = malloc(raw_len + 1);
 
         if (!unescaped_text || !cleaned_text) {
             LOG_DEBUG("[%s] Memory allocation failed for translation buffers\n", request_uuid);
@@ -980,7 +981,7 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
         }
 
         /* First unescape \\n to \n, \\t to \t, etc. */
-        if (unescape_string(raw_translation, unescaped_text, MAX_TRANSLATION_BUFFER) != 0) {
+        if (unescape_string(raw_translation, unescaped_text, raw_len + 1) != 0) {
             LOG_DEBUG("[%s] Failed to unescape translation text\n", request_uuid);
             free(unescaped_text);
             free(cleaned_text);
@@ -994,7 +995,7 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
         }
 
         /* Then strip emoji and shortcodes */
-        if (strip_emoji_and_shortcodes(unescaped_text, cleaned_text, MAX_CLEANED_TEXT_BUFFER) != 0) {
+        if (strip_emoji_and_shortcodes(unescaped_text, cleaned_text, raw_len + 1) != 0) {
             LOG_DEBUG("[%s] Failed to clean translation text\n", request_uuid);
             free(unescaped_text);
             free(cleaned_text);
