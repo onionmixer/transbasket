@@ -405,7 +405,9 @@ int mcp_initialize(MCPClient *c, int timeout_sec) {
     char *err = NULL;
     cJSON *resp = wait_for_id(c, id, timeout_sec, &timed_out, &err, NULL);
     if (!resp) {
-        LOG_INFO("Error: MCP initialize failed: %s", err ? err : "unknown");
+        char esc[1300];
+        log_escape(err ? err : "unknown", 300, esc, sizeof(esc));   /* may carry the child's stderr */
+        LOG_INFO("Error: MCP initialize failed: %s", esc);
         free(err);
         return -1;
     }

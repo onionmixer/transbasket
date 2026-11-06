@@ -20,6 +20,7 @@
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include "http_client.h"
 #include "mcp_client.h"
 #include "codex_exec.h"
@@ -76,47 +77,75 @@ static size_t transbasket_curl_write_callback(void *contents, size_t size, size_
     return realsize;
 }
 
+/* Open a new trace file ./trace/<base><ext> for writing (DEBUG=yes only;
+ * PLAN_OPEN_ISSUES.md B). The directory is created 0700 if missing; an existing one
+ * with group/other permissions is used but warned about once (its permissions are
+ * the operator's). Files are created 0600 with O_EXCL|O_NOFOLLOW, never reusing or
+ * following an existing name: a clash (same client uuid+timestamp) gets "-1".."-9". */
+static FILE *open_trace_file(const char *base, const char *ext, char *path, size_t path_size) {
+    static atomic_bool warned = false;
+    const char *dir = "./trace";
+    struct stat st;
+    if (stat(dir, &st) != 0) {
+        if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
+            LOG_DEBUG("Warning: Failed to create trace directory: %s\n", dir);
+            return NULL;
+        }
+    } else if (!S_ISDIR(st.st_mode)) {
+        return NULL;
+    } else if ((st.st_mode & 077) && !atomic_exchange(&warned, true)) {
+        LOG_INFO("Warning: %s is accessible to group/others (mode %03o); trace files hold request text\n",
+                 dir, (unsigned)(st.st_mode & 0777));
+    }
+    for (int k = 0; k < 10; k++) {
+        if (k == 0) {
+            snprintf(path, path_size, "%s/%s%s", dir, base, ext);
+        } else {
+            snprintf(path, path_size, "%s/%s-%d%s", dir, base, k, ext);
+        }
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            FILE *fp = fdopen(fd, "w");
+            if (!fp) {
+                close(fd);
+            }
+            return fp;
+        }
+        if (errno != EEXIST) {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+/* Trace file base name from the request's timestamp and uuid (both validated), ':' -> '-'. */
+static void trace_base(char *out, size_t size, const char *timestamp, const char *uuid) {
+    snprintf(out, size, "%s_%s", timestamp, uuid);
+    for (char *q = out; *q; q++) {
+        if (*q == ':') *q = '-';
+    }
+}
+
 /* Save debug curl command to file */
 static void save_debug_curl(const char *timestamp, const char *uuid,
-                           const char *url, const char *api_key,
-                           const char *json_request) {
-    if (!timestamp || !uuid || !url || !api_key || !json_request) {
+                           const char *url, const char *json_request) {
+    if (!timestamp || !uuid || !url || !json_request) {
         return;
     }
 
-    /* Create trace directory if it doesn't exist */
-    const char *trace_dir = "./trace";
-    struct stat st = {0};
-    if (stat(trace_dir, &st) == -1) {
-        if (mkdir(trace_dir, 0755) == -1) {
-            LOG_DEBUG( "Warning: Failed to create trace directory: %s\n", trace_dir);
-            return;
-        }
-    }
-
-    /* Create filename from timestamp and uuid */
-    char filename[512];
-    snprintf(filename, sizeof(filename), "%s_%s.txt", timestamp, uuid);
-
-    /* Replace ':' with '-' in filename for filesystem compatibility */
-    for (char *p = filename; *p; p++) {
-        if (*p == ':') *p = '-';
-    }
-
-    /* Build full path */
+    char base[512];
+    trace_base(base, sizeof(base), timestamp, uuid);
     char filepath[768];
-    snprintf(filepath, sizeof(filepath), "%s/%s", trace_dir, filename);
-
-    FILE *fp = fopen(filepath, "w");
+    FILE *fp = open_trace_file(base, ".txt", filepath, sizeof(filepath));
     if (!fp) {
-        LOG_DEBUG( "Warning: Failed to create debug file: %s\n", filepath);
+        LOG_DEBUG( "Warning: Failed to create debug file for %s\n", uuid);
         return;
     }
 
     /* Write curl command using heredoc for proper JSON formatting */
     fprintf(fp, "curl -X POST '%s' \\\n", url);
     fprintf(fp, "  -H 'Content-Type: application/json; charset=utf-8' \\");
-    fprintf(fp, "  -H 'Authorization: Bearer %s' \\\n", api_key);
+    fprintf(fp, "  -H 'Authorization: Bearer <redacted>' \\\n");   /* never the real key */
     fprintf(fp, "  --fail-with-body -sS \\");
     fprintf(fp, "  --data-binary @- <<'JSON'\n");
     fprintf(fp, "%s\n", json_request);
@@ -648,8 +677,10 @@ OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_tab
         translator->codex_ephemeral = cli.has_ephemeral;
         translator->codex_output_schema = cli.has_output_schema;
         bool use_exec = (config->codex_interface == CODEX_INTERFACE_EXEC);
-        LOG_INFO("codex CLI: %s (interface=%s)\n",
-                cli.version[0] ? cli.version : "version unknown", use_exec ? "exec" : "mcp");
+        /* version and server names come from the codex child's output */
+        char version_esc[sizeof(cli.version) * 4 + 4];
+        log_escape(cli.version[0] ? cli.version : "version unknown", sizeof(cli.version), version_esc, sizeof(version_esc));
+        LOG_INFO("codex CLI: %s (interface=%s)\n", version_esc, use_exec ? "exec" : "mcp");
         if (!cli.version[0]) {
             LOG_INFO("Warning: `%s --version` failed - is codex installed and on PATH?\n", config->codex_bin);
         }
@@ -658,7 +689,7 @@ OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_tab
         }
         if (!use_exec && !codex_cli_has_mcp_server(&cli)) {
             LOG_INFO("Warning: %s no longer provides `codex mcp-server` (removed in 0.154.0); "
-                    "set CODEX_INTERFACE=\"exec\" or every codex translation will fail\n", cli.version);
+                    "set CODEX_INTERFACE=\"exec\" or every codex translation will fail\n", version_esc);
         }
         if (use_exec && config->codex_ignore_user_config && !cli.has_ignore_user_config) {
             LOG_INFO("Warning: CODEX_IGNORE_USER_CONFIG is set but `%s exec` has no --ignore-user-config; "
@@ -667,10 +698,12 @@ OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_tab
         bool isolated = use_exec && config->codex_ignore_user_config;
         if (!isolated && cli.mcp_enabled > 0) {
             /* sandbox=read-only covers shell commands, not MCP tool calls. */
+            char names_esc[sizeof(cli.mcp_names) * 4 + 4];
+            log_escape(cli.mcp_names, sizeof(cli.mcp_names), names_esc, sizeof(names_esc));
             LOG_INFO("Warning: codex will start %d MCP server(s) from its config.toml on every "
                     "translation (%s); their tools are reachable from untrusted text and are not "
                     "covered by the read-only sandbox. Set CODEX_IGNORE_USER_CONFIG=\"true\" "
-                    "(with CODEX_MODEL) to isolate translations.\n", cli.mcp_enabled, cli.mcp_names);
+                    "(with CODEX_MODEL) to isolate translations.\n", cli.mcp_enabled, names_esc);
         }
 
         if (config->source_hint_mode == SOURCE_HINT_MODEL && (!use_exec || !cli.has_output_schema)) {
@@ -851,8 +884,7 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
 
         /* Save debug curl command on first attempt if DEBUG enabled */
         if (attempt == 1 && translator->config->debug) {
-            save_debug_curl(timestamp, request_uuid, url,
-                          translator->config->openai_api_key, json_request);
+            save_debug_curl(timestamp, request_uuid, url, json_request);
         }
 
         /* Setup curl */
@@ -1144,17 +1176,10 @@ static void save_debug_codex(const char *timestamp, const char *uuid,
                              const char *prompt, const char *result,
                              const char *errmsg, const char *codex_stderr) {
     if (!timestamp || !uuid) return;
-    const char *trace_dir = "./trace";
-    struct stat st = {0};
-    if (stat(trace_dir, &st) == -1) {
-        if (mkdir(trace_dir, 0755) == -1) return;
-    }
-    char filename[512];
-    snprintf(filename, sizeof(filename), "%s_%s.codex.txt", timestamp, uuid);
-    for (char *p = filename; *p; p++) if (*p == ':') *p = '-';
+    char base[512];
+    trace_base(base, sizeof(base), timestamp, uuid);
     char filepath[768];
-    snprintf(filepath, sizeof(filepath), "%s/%s", trace_dir, filename);
-    FILE *fp = fopen(filepath, "w");
+    FILE *fp = open_trace_file(base, ".codex.txt", filepath, sizeof(filepath));
     if (!fp) return;
     fprintf(fp, "=== codex trace ===\nuuid: %s\ntimestamp: %s\n", uuid, timestamp);
     fprintf(fp, "\n--- prompt ---\n%s\n", prompt ? prompt : "(null)");
@@ -1458,7 +1483,9 @@ cleanup:
     }
 
     if (!result) {
-        LOG_INFO("[%s] codex translation failed: %s\n", request_uuid, call_err ? call_err : "unknown");
+        char esc[1300];
+        log_escape(call_err ? call_err : "unknown", 300, esc, sizeof(esc));
+        LOG_INFO("[%s] codex translation failed: %s\n", request_uuid, esc);
         if (error) {
             error->message = call_err ? call_err : strdup("codex translation failed");
             error->retryable = retryable;
@@ -1486,7 +1513,9 @@ cleanup:
         char *translation = parse_structured_output(result, result_len, text, request_uuid, hint_out, &call_err);
         free(result);
         if (!translation) {
-            LOG_INFO("[%s] codex translation failed: %s\n", request_uuid, call_err ? call_err : "unknown");
+            char esc[1300];
+            log_escape(call_err ? call_err : "unknown", 300, esc, sizeof(esc));
+            LOG_INFO("[%s] codex translation failed: %s\n", request_uuid, esc);
             if (error) {
                 error->message = call_err ? call_err : strdup("codex structured output rejected");
                 error->retryable = false;

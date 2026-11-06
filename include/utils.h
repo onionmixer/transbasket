@@ -28,6 +28,12 @@ void get_log_timestamp(char *buffer, size_t size);
  * no digits, characters follow them, or the value saturated. */
 int atoi_saturating(const char *value, bool *plain);
 
+/* Copy an untrusted string into out for a log line: control bytes and DEL become
+ * \n, \r, \t or \xNN and a backslash becomes \\, so the text cannot start a
+ * line of its own (PLAN_OPEN_ISSUES.md B). At most max_in input bytes are used;
+ * "..." marks a cut. out is always terminated; no allocation. NULL -> "(null)". */
+void log_escape(const char *in, size_t max_in, char *out, size_t out_size);
+
 /* Language code validation. Accepts ISO 639-2 codes plus the transbasket
  * specific codes "zhs"/"zht" (Chinese Simplified/Traditional). */
 bool validate_language_code(const char *lang_code);

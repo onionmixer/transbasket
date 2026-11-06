@@ -21,6 +21,44 @@
 #include <limits.h>
 #include "utils.h"
 
+void log_escape(const char *in, size_t max_in, char *out, size_t out_size) {
+    if (!out || out_size == 0) {
+        return;
+    }
+    if (!in) {
+        snprintf(out, out_size, "(null)");
+        return;
+    }
+    size_t o = 0;
+    bool cut = false;
+    for (size_t i = 0; in[i]; i++) {
+        if (i >= max_in) {
+            cut = true;
+            break;
+        }
+        unsigned char c = (unsigned char)in[i];
+        char tmp[5];
+        size_t n;
+        if (c == '\n') { memcpy(tmp, "\\n", 2); n = 2; }
+        else if (c == '\r') { memcpy(tmp, "\\r", 2); n = 2; }
+        else if (c == '\t') { memcpy(tmp, "\\t", 2); n = 2; }
+        else if (c == '\\') { memcpy(tmp, "\\\\", 2); n = 2; }
+        else if (c < 0x20 || c == 0x7F) { snprintf(tmp, sizeof(tmp), "\\x%02x", c); n = 4; }
+        else { tmp[0] = (char)c; n = 1; }
+        if (o + n + 4 > out_size) {   /* keep room for "..." and the terminator */
+            cut = true;
+            break;
+        }
+        memcpy(out + o, tmp, n);
+        o += n;
+    }
+    if (cut && o + 4 <= out_size) {
+        memcpy(out + o, "...", 3);
+        o += 3;
+    }
+    out[o < out_size ? o : out_size - 1] = '\0';
+}
+
 int atoi_saturating(const char *value, bool *plain) {
     char *end = NULL;
     errno = 0;

@@ -4,6 +4,7 @@
  */
 
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <cjson/cJSON.h>
@@ -24,7 +25,8 @@ TranslationRequest *parse_translation_request(const char *json_str) {
     const char *parse_end = NULL;
     cJSON *root = cJSON_ParseWithOpts(json_str, &parse_end, 0);   /* == cJSON_Parse, plus the end */
     if (!root) {
-        fprintf(stderr, "Error: Failed to parse JSON: %s\n", cJSON_GetErrorPtr());
+        /* the offset only: the body is the client's, and cJSON_GetErrorPtr() is global state */
+        LOG_INFO("Error: Failed to parse JSON at byte %td", parse_end ? parse_end - json_str : (ptrdiff_t)-1);
         return NULL;
     }
 
@@ -53,7 +55,9 @@ TranslationRequest *parse_translation_request(const char *json_str) {
     }
 
     if (!validate_timestamp(timestamp->valuestring)) {
-        fprintf(stderr, "Error: Invalid timestamp format: %s\n", timestamp->valuestring);
+        char esc[300];
+        log_escape(timestamp->valuestring, 64, esc, sizeof(esc));
+        LOG_INFO("Error: Invalid timestamp format: %s", esc);
         free(req);
         cJSON_Delete(root);
         return NULL;
@@ -71,7 +75,9 @@ TranslationRequest *parse_translation_request(const char *json_str) {
     }
 
     if (!validate_uuid(uuid->valuestring)) {
-        fprintf(stderr, "Error: Invalid UUID format: %s\n", uuid->valuestring);
+        char esc[300];
+        log_escape(uuid->valuestring, 64, esc, sizeof(esc));
+        LOG_INFO("Error: Invalid UUID format: %s", esc);
         free(req);
         cJSON_Delete(root);
         return NULL;
@@ -91,7 +97,9 @@ TranslationRequest *parse_translation_request(const char *json_str) {
     /* Check auto before general language normalization. */
     const char *from_code = normalize_source_language(from->valuestring);
     if (!from_code) {
-        fprintf(stderr, "Error: Invalid 'from' language code or name: %s\n", from->valuestring);
+        char esc[300];
+        log_escape(from->valuestring, 64, esc, sizeof(esc));
+        LOG_INFO("Error: Invalid 'from' language code or name: %s", esc);
         free(req);
         cJSON_Delete(root);
         return NULL;
@@ -111,7 +119,9 @@ TranslationRequest *parse_translation_request(const char *json_str) {
     /* Normalize language code/name to ISO 639-2 code */
     const char *to_code = normalize_language_code(to->valuestring);
     if (!to_code) {
-        fprintf(stderr, "Error: Invalid 'to' language code or name: %s\n", to->valuestring);
+        char esc[300];
+        log_escape(to->valuestring, 64, esc, sizeof(esc));
+        LOG_INFO("Error: Invalid 'to' language code or name: %s", esc);
         free(req);
         cJSON_Delete(root);
         return NULL;

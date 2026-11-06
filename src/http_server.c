@@ -31,8 +31,6 @@
 #endif
 
 #define DEFAULT_MAX_WORKERS 30
-#define TRUNCATE_DISPLAY_LENGTH 50
-#define TRUNCATE_BUFFER_SIZE 100
 
 /* Build an MHD response body; the HTTP status is applied by the caller
  * when it queues the response. */
@@ -272,10 +270,9 @@ static int handle_translate(struct MHD_Connection *connection, const char *uploa
     free(cleaned_text);
     req->text = control_filtered_text;
 
-    char truncated_text[TRUNCATE_BUFFER_SIZE];
-    truncate_text(req->text, truncated_text, TRUNCATE_DISPLAY_LENGTH, "...");
-    LOG_INFO("[%s] Translation request received: %s -> %s, text: %s",
-            request_uuid, req->from_lang, req->to_lang, truncated_text);
+    /* No source text in the log (PLAN_OPEN_ISSUES.md B, Q2): only its size. */
+    LOG_INFO("[%s] Translation request received: %s -> %s, text_bytes=%zu",
+            request_uuid, req->from_lang, req->to_lang, strlen(req->text));
 
     /* Fast cache hits do not consume admission or waiter capacity. */
     CacheEntry *cached = server->cache
@@ -535,10 +532,12 @@ static void mhd_log(void *cls, const char *fmt, va_list ap) {
     while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r')) {
         msg[--n] = '\0';
     }
+    char esc[2100];
+    log_escape(msg, sizeof(msg), esc, sizeof(esc));
     if (atomic_load(&mhd_start_returned)) {
-        LOG_DEBUG("libmicrohttpd: %s", msg);
+        LOG_DEBUG("libmicrohttpd: %s", esc);
     } else {
-        LOG_INFO("libmicrohttpd: %s", msg);
+        LOG_INFO("libmicrohttpd: %s", esc);
     }
 }
 
