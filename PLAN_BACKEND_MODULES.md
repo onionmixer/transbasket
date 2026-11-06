@@ -121,6 +121,9 @@ typedef struct {
   `*len_out` 은 붙인 종단 NUL 을 빼고 **안에 든 NUL 바이트는 포함** (backend 의 `memchr` 검사가 이 길이를 쓴다), `*err_out` 은 호출자가 `free` 하고
   클라이언트에 보여도 되는 짧은 문구 (프롬프트를 담지 않음), `*stderr_out` 은 DEBUG 일 때만, 호출자가 `free`, 길이 제한. 요청의 포인터는 호출 동안만 쓴다.
   `require_output_file` 은 `schema_path != NULL` 에서 나온다 (지금 둘 다 `structured`).
+- **계약 (계속)**: `run` 은 동기 호출이며 `req->control` 의 취소와 `CODEX_TIMEOUT` 을 지킨다 (지금 `codex_exec_run` 이 자식 프로세스 그룹을 거두고 `-o` 파일을
+  지운 뒤 돌아온다, `codex_exec.c:280,477` — 그래서 backend 가 cwd 를 `rmdir` 할 수 있다). 여러 요청 스레드가 같은 `state` 로 동시에 부르므로
+  `state` 는 init 뒤 읽기 전용이다.
 - **결정 S1**: exec 드라이버 상태 (`has_ephemeral` 등) 는 init 에서 할당한다. 할당 실패는 기동 실패 (`Error: Memory allocation failed`) —
   지금 `calloc(OpenAITranslator)` 실패와 같은 부류이고, 그 밖의 경우 (CLI 없음·옛 CLI) 는 지금처럼 경고만. 메모리 부족에서만 생기는 새 실패 지점이라 차이로 기록한다.
 - **exec 드라이버** = 새 어댑터 `src/codex_driver_exec.c` (`const CodexDriver codex_exec_driver`). `codex_exec.c` 는 `Config` 를 모르는 지금 모습 그대로 둔다
@@ -143,14 +146,14 @@ typedef struct {
 
 | # | 무엇 | 방법 |
 |---|---|---|
-| V1 | 단계 1 이 이동뿐인가 (도구: `tests/check_move.py <옛 파일> <새 파일...>`, 깊이 0 에서 빈 줄로 나뉜 덩어리 = 주석+정의 단위로 비교) | python: 옛 `http_client.c` 의 함수·typedef·매크로·정적 데이터·전처리 블록·dispatch 표를 하나씩 뽑아 새 파일들 중 **정확히 한 곳**에 글자 그대로 있는지 (include 는 집합으로 대조). 예외 (`static` 제거 9곳, init/free 분할) 는 목록으로 두고 줄 단위 diff 를 출력해 사람이 본다 |
+| V1 | 단계 1 이 이동뿐인가 | `tests/check_move.py <옛 파일> <새 파일...>`: C 문법을 어휘 단위로 따라가며 (주석·문자열 안의 괄호는 세지 않음) 깊이 0 의 **항목** 단위로 자른다 — 함수 정의, typedef, 정적 데이터, 표, `#include`/`#define` 은 한 줄씩, 바로 위에 붙은 주석은 그 항목에 딸림, 빈 줄로 떨어진 주석은 독립 항목. 함수 안의 시험 훅 전처리 블록은 함수에 딸림. 판정: (a) 옛 항목은 모두 새 파일들 중 **정확히 한 곳**에 글자 그대로 (예외: `static ` 이 빠진 6개 함수의 첫 줄, init/free 분할), (b) 새 파일의 항목 중 옛 파일에 없는 것은 **허용 목록** (파일 머리 주석, include, 헤더 선언, `normal_backend_init`·`codex_backend_init`·`codex_backend_free` 와 facade 의 호출부) 에만 있어야 함. 예외·허용 항목은 줄 단위 diff 로 출력해 사람이 본다 |
 | V2 | 심볼 | `nm -g --defined-only` 옛/새 오브젝트 합집합 비교: 옛 심볼 손실 0, 새 심볼은 §3·§4 목록과 일치 (존재만 본다 — 시그니처·동작은 V1·V3-V5 가 본다) |
-| V3 | 프롬프트·요청 본문 | `tests/test_prompt_regression.py <기준> <새>` 24건 동일. **추가 V3b**: 지금 회귀 픽스처는 `--output-schema` 를 광고하지 않아 (`fake_codex_auto.py:31`) structured 프롬프트를 비교하지 않고, `test_structured_hint.py:151` 은 부분 문자열만 본다 → `--output-schema` 를 광고하는 픽스처로 structured 프롬프트·스키마 파일 바이트·**argv 전체** (`--ephemeral` `--ignore-user-config` `-m` `-s` `-c` 순서 포함) 를 옛/새 비교 |
-| V4 | 기동 로그 (요청 로그도) | python: 같은 설정으로 옛/새 바이너리 기동, 시각·포트·pid 를 가린 로그 전체가 같은지. 설정 행렬: normal, normal+`SOURCE_HINT_MODE=model`, codex 가짜 CLI 의 능력 조합 (버전 실패 / exec 없음 / `--ephemeral` 없음 / `--ignore-user-config` 없음+설정 켬 / `--output-schema` 없음+model 모드 / config.toml MCP 서버 있음+격리 끔·켬). 같은 실행에서 요청 몇 개를 보내 **요청 처리 로그의 줄 순서**와 DEBUG trace 파일 내용 (stderr 꼬리 포함) 도 비교 |
+| V3 | 프롬프트·요청 본문 | `tests/test_prompt_regression.py <기준> <새>` 24건 동일. **추가 V3b**: 지금 회귀 픽스처는 `--output-schema` 를 광고하지 않아 (`fake_codex_auto.py:31`) structured 프롬프트를 비교하지 않고, `test_structured_hint.py:151` 은 부분 문자열만 본다 → `--output-schema` 를 광고하는 픽스처로 structured 프롬프트·스키마 파일 **원시 바이트** (기존 `fake_codex_structured.py:25` 는 `json.load` 라 바이트 변화를 못 봄 → 새 픽스처는 hex 로 기록)·**argv 전체**를 옛/새 비교. 실제 순서 `exec --skip-git-repo-check --color never [--ephemeral] [--ignore-user-config] -s … -c approval_policy=… [-c model_reasoning_effort=…] [-m …] -C <tmp> -o <tmp>/last-message.txt [--output-schema <tmp>/…] -` (`codex_exec.c:425-460`). `mkdtemp` 경로는 가리되 `-o`·`--output-schema` 가 `-C` 디렉터리 안인지는 확인 |
+| V4 | 기동 로그 (요청 로그도) | python: 같은 설정으로 옛/새 바이너리 기동, 시각·포트·pid 를 가린 로그 전체가 같은지. 설정 행렬: normal, normal+`SOURCE_HINT_MODE=model`, codex 가짜 CLI 의 능력 조합 (버전 실패 / exec 없음 / `--ephemeral` 없음 / `--ignore-user-config` 없음+설정 켬 / `--output-schema` 없음+model 모드 / config.toml MCP 서버 있음+격리 끔·켬). 같은 실행에서 요청 몇 개를 보내 **요청 처리 로그의 줄 순서**와 DEBUG trace 파일 내용 (stderr 꼬리 포함) 도 비교. 정규화: 시각·포트·pid·임시 경로·`elapsed_ms=` (`http_server.c:335`)·구분자 `===SRC-<32 hex>===`. 백그라운드 스레드 줄 (`Cache background thread started` 등, `http_server.c:88,510`) 은 순서가 정해져 있지 않으므로 그 줄들만 **다중집합**으로, 나머지는 순서대로 비교 |
 | V5 | 응답 | 회귀 도구를 넓혀 옛/새의 HTTP 상태·본문·`Retry-After` 도 비교. 성공 응답은 요청 시각을 그대로 돌려주지만 **오류 응답은 현재 시각을 넣으므로** (`json_handler.c:237-239`) 오류 본문의 `timestamp` 만 가린다. 슬롯 초과 503 은 `CODEX_TIMEOUT` (슬롯 대기 마감, `http_client.c:1302-1316`) 을 `TRANSLATION_TOTAL_TIMEOUT` 보다 짧게 둬야 504 로 덮이지 않는다 (`:1541`). 경우: exec 성공·실패 (502)·마감 (504)·슬롯 초과 (503)·structured 위반 (502), normal 4xx (502)·5xx 재시도 후 503·SSE 오류 (502) |
 | V6 | 기존 회귀 | 21개 타깃 + `test_config_limits.py`, ASan/UBSan 서버, valgrind |
 | V7 | SSE 시험 | `test_sse.py` 의 차등 6만 건 불일치 0. malloc 실패 주입은 후보 바이너리에서 횟수를 세므로 그것만으로는 "같다" 가 안 된다 → 옛/새 하네스로 본문마다 malloc 횟수와 k 번째 실패 결과를 **둘 다 뽑아 python 으로 대조** (지금 합계 73). 돌연변이 9개 anchor 가 새 파일에서 유일, 8개는 잡히고 1개는 기존대로 등가 (`content type unchecked`) |
-| V8 | 단계 2 교체 지점이 실제로 쓸 수 있나 (가짜 드라이버는 exec 어댑터를 우회하므로 어댑터는 V3b 의 argv 대조가 맡는다) | 신규 C 시험 (`TRANSBASKET_TEST_HOOKS` 빌드에서만 드라이버를 바꿔 끼움): 가짜 드라이버의 성공·오류·마감·err 없는 NULL·NUL 포함 결과마다 상태 코드·retryable, 슬롯 반환, 임시 cwd·스키마 파일 삭제, caps 에 따른 structured 켜짐/꺼짐, 드라이버가 받는 프롬프트가 exec 경로와 같은지 |
+| V8 | 단계 2 교체 지점이 실제로 쓸 수 있나 (가짜 드라이버는 exec 어댑터를 우회하므로 어댑터는 V3b 의 argv 대조가, 실제 마감·취소 처리는 기존 `test-coalescing` 의 exec 마감 시험 (`reply`·`stdin` 단계) 이 맡는다). 추가: 시험 훅으로 **드라이버 상태 할당 실패** (S1) — 기동 실패·`Error: Memory allocation failed`·세마포어 한 번만 정리 (ASan·valgrind) | 신규 C 시험 (`TRANSBASKET_TEST_HOOKS` 빌드에서만 드라이버를 바꿔 끼움): 가짜 드라이버의 성공·오류·마감·err 없는 NULL·NUL 포함 결과마다 상태 코드·retryable, 슬롯 반환, 임시 cwd·스키마 파일 삭제, caps 에 따른 structured 켜짐/꺼짐, 드라이버가 받는 프롬프트가 exec 경로와 같은지 |
 | V9 | 실제 (연기 시험일 뿐) | host codex (0.167.0) 로 pge4 복사본 `-d -l` exec 번역 kor/auto, 배포 설정 3개 기동 경고 0 |
 
 커밋: ① 단계 1 (V1–V7) ② 단계 2 (V2–V8) ③ 문서·TEST_RESULTS (V9). 각 커밋에서 전체 회귀.
@@ -192,3 +195,18 @@ README (`:575`, 트리 `:701,707`, 모듈 설명 `:749`), TEST_RESULTS 새 절. 
 | 내놓는 이름 8 → 9 (새 3개는 현재 0건) | 계획 §3 목록 셈 | ✅ 정정 (내 오류) |
 | `test-*` 규칙 22개 | python: Makefile 정규식 → 22개, `test-inflight-unit` 은 `test-coalescing` 선행 (`Makefile:102`) | ✅ 정정 |
 | 헤더 함수 4개, `OpenAITranslator` 타입은 `http_server.h` 가 씀 | python 헤더 추출 4개, `http_server.h:17` | ✅ 정정 (내 오류) |
+
+### 2차 검토 (계획 수정 후, 코딩 전)
+
+| codex 주장 | 내 검증 방법 | 결과 |
+|---|---|---|
+| V1 의 "빈 줄로 나뉜 덩어리" 는 `:31-34` 매크로 3개를 한 덩어리로 묶는데 §3 은 서로 다른 파일로 보냄 | `sed -n 30,36p` — 빈 줄 없이 연속 | ✅ 채택 (V1 을 항목 단위로) |
+| 떨어진 주석은 독립 덩어리, 새 코드 역방향 검사 없음 | 설계 검토 | ✅ 채택 (V1 (b) 허용 목록) |
+| `static` 제거는 9가 아니라 6 | 계획 §3 의 기존 6 + 신규 3 | ✅ 정정 (내 오류) |
+| argv 실제 순서 sandbox → `-c` → model | `codex_exec.c:425-460` argv 조립 열람 | ✅ 정정 (내 나열이 틀림) |
+| 구조화 픽스처는 스키마를 `json.load` → 바이트 변화 못 봄 | `fake_codex_structured.py:25` | ✅ 채택 (V3b) |
+| `elapsed_ms`·무작위 구분자·백그라운드 스레드 줄 순서 | `http_server.c:335`, `:88`, `:510`, `make_delimiter` | ✅ 채택 (V4 정규화·다중집합) |
+| 드라이버 계약: 동기·취소·동시 호출·산출물 정리 | `codex_exec.c:280` (`reap_child`), `:477` (`unlink(out_path)`) | ✅ 채택 (§4 계약) |
+| S1 할당 실패 경로 검증 없음 | V8·§6 은 세마포어 실패만 | ✅ 채택 (V8) |
+| §3.1 선언이 정의와 일치, include 순환 없음, 심볼 충돌 없음 | 내 추출 (`grep` 시그니처) 과 같음, `nm -D` 라이브러리 8개 0건 | ✅ |
+| 기동 순서·SOURCE_HINT 경고 소유 (어댑터) 타당 | `:661-714` 열람 | ✅ |
