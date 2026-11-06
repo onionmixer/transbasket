@@ -3,6 +3,15 @@
 -- for fast lookup and efficient cleanup operations.
 -- New databases only. Existing databases must be migrated by the application;
 -- CREATE TABLE IF NOT EXISTS cannot update an existing CHECK constraint.
+--
+-- The server does not need this file: it creates the schema itself on startup
+-- (src/cache_backend_sqlite.c), including the source_hint tables, their delete
+-- trigger and the trans_cache_effective_source view, which are not in this file.
+-- Differences from what the server creates:
+--   - CHECK(last_used >= created_at) below exists only in this script;
+--   - the PRAGMAs below are suggestions: the server opens every database with
+--     journal_mode=WAL, synchronous=NORMAL, cache_size=2000 (pages) and
+--     mmap_size=268435456, and does not set temp_store or foreign_keys.
 
 -- Main cache table
 CREATE TABLE IF NOT EXISTS trans_cache (
@@ -12,7 +21,7 @@ CREATE TABLE IF NOT EXISTS trans_cache (
     to_lang TEXT NOT NULL,                  -- 3-char target code (ISO 639-2, or zhs/zht)
     source_text TEXT NOT NULL,              -- Original text to translate
     translated_text TEXT NOT NULL,          -- Translated result
-    count INTEGER DEFAULT 1,                -- Number of times this translation was requested
+    count INTEGER DEFAULT 1,                -- Times this same result was produced or served from the cache; reset to 1 when the result changes
     last_used INTEGER NOT NULL,             -- Last access timestamp (Unix epoch seconds)
     created_at INTEGER NOT NULL,            -- Creation timestamp (Unix epoch seconds)
 

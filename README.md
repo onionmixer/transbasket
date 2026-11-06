@@ -15,7 +15,7 @@ Production-ready C implementation of the Transbasket translation server for opti
 - Automatic source language: `from: "auto"` (normal and codex backends)
 - Concurrent duplicate requests share one translation and retain their own response IDs
 - Emoji and shortcode stripping (normal backend only - codex output is passed through)
-- RFC 3339 timestamp and UUID v4 validation
+- Timestamp (RFC 3339 shape) and UUID v4 validation
 - Graceful shutdown with signal handling
 - Retry logic with exponential backoff
 
@@ -47,15 +47,10 @@ sudo yum install -y \
     sqlite-devel \
     pkg-config
 
-# macOS (Homebrew)
-brew install \
-    curl \
-    libmicrohttpd \
-    cjson \
-    ossp-uuid \
-    openssl \
-    sqlite
 ```
+
+Linux (glibc) only: the code uses `/proc/self/exe`, `pipe2()` and
+`posix_spawn_file_actions_addclosefrom_np()`, so it does not build or run on macOS as it stands.
 
 ### Optional: codex CLI (only for `MODEL_TYPE=codex`)
 
@@ -144,11 +139,13 @@ $EDITOR transbasket.local.conf        # OPENAI_BASE_URL, OPENAI_API_KEY 등
 
 ### 1. transbasket.conf
 
-실행 파일과 **같은 디렉터리**에서 찾습니다(상대 경로는 실행 파일 위치 기준으로 해석). 위의
-설정 파일 정책에 따라 `transbasket.local.conf` 가 있으면 그쪽이 먼저 사용됩니다.
+설정 파일은 실행 파일과 **같은 디렉터리**에서 찾습니다 (`-c` 의 상대 경로도 실행 파일 위치 기준). 위의
+설정 파일 정책에 따라 `transbasket.local.conf` 가 있으면 그쪽이 먼저 사용됩니다. 설정 **안의** 상대 경로는 키마다 기준이 다릅니다 —
+아래 "Module Overview → config_loader.c" 의 경로 규칙을 보세요.
 
 ```
-OPENAI_BASE_URL="http://<ollama-host>:11434/v1"   # OpenAI 호환 엔드포인트
+# OpenAI 호환 엔드포인트
+OPENAI_BASE_URL="http://<ollama-host>:11434/v1"
 OPENAI_MODEL="gpt-oss:20b"
 OPENAI_API_KEY="."
 LISTEN="0.0.0.0"
@@ -164,6 +161,25 @@ PORT="8889"
   이제 범위 오류입니다. `PORT`·`SEED`·`TRANS_CACHE_THRESHOLD`·`-w`·`MAX_WORKERS` 는 `8889x` 처럼 숫자 뒤에 글자가 있으면 숫자 부분을
   쓰고 경고합니다. `CODEX_TIMEOUT`·`CODEX_MAX_CONCURRENCY` 는 기존 규칙(잘못되면 100 / 자동) 그대로이고 큰 값은 감기지 않습니다.
   `TEMPERATURE`·`TOP_P` 의 `nan`·`inf` 와 penalty 의 `nan` 은 기동 오류입니다 (예전에는 upstream 에 `null` 로 전달).
+
+#### 그 밖의 설정 키 (기본값은 `src/config_loader.c`)
+
+다른 절에서 다루지 않는 키입니다. 추적 템플릿은 일부를 기본값과 다르게 둡니다 (예: `transbasket_codex.conf` 의 `TRANS_CACHE_THRESHOLD="1"`).
+
+| 키 | 기본값 | 뜻 |
+|---|---|---|
+| `TEMPERATURE`, `TOP_P` | `0.0`, `1.0` | normal 요청 본문에 그대로. `nan`·`inf` 는 기동 오류 |
+| `FREQUENCY_PENALTY`, `PRESENCE_PENALTY` | `0.0` | normal 요청 본문에. −2.0~2.0 으로 잘림, `nan` 은 기동 오류 |
+| `SEED` | `42` | normal 요청 본문에 |
+| `REASONING_EFFORT` | `none` | normal 요청 본문에 (codex 는 `CODEX_REASONING_EFFORT`) |
+| `STREAM` | 끔 | `yes`·`1`·`true` 면 SSE 로 받음 (아래 "스트리밍 응답") |
+| `DEBUG` | 끔 | `yes`·`1` 만 켬 (`true` 는 꺼짐). 켜면 `./trace/` 에 요청별 trace (아래 "로그") |
+| `TRANS_CACHE_TYPE` | `text` | `text` (JSONL) 또는 `sqlite`. `mongodb`·`redis` 는 미구현이라 경고 후 `text` |
+| `TRANS_CACHE_FILE` | `./trans_dictionary.txt` | text 캐시 파일 (cwd 기준) |
+| `TRANS_CACHE_SQLITE_PATH` | `./trans_cache.db` | SQLite 캐시 파일 (cwd 기준) |
+| `TRANS_CACHE_SQLITE_JOURNAL_MODE`, `TRANS_CACHE_SQLITE_SYNC` | `WAL`, `NORMAL` | **현재 읽기만 하고 적용하지 않습니다** — SQLite 는 항상 `WAL`/`NORMAL` 로 엽니다 (`cache_backend_sqlite.c`) |
+| `TRANS_CACHE_THRESHOLD` | `5` | 같은 번역 결과가 나온 횟수 (캐시 사용 포함) 가 이 값 이상이어야 캐시를 씀. 결과가 달라지면 1 로 되돌아감. 1 미만은 5. codex 는 1 권장 |
+| `TRANS_CACHE_CLEANUP_ENABLED` | 켬 | `yes`·`1`·`true` 면 켬. 기간은 `TRANS_CACHE_CLEANUP_DAYS` (아래 "시간 한계") |
 
 #### `LISTEN` - 바인드 주소
 
@@ -194,7 +210,8 @@ PORT="8889"
 #### Translation backend: `MODEL_TYPE`
 
 ```
-MODEL_TYPE="normal"   # normal (default) | codex
+# normal (default) | codex
+MODEL_TYPE="normal"
 ```
 
 - **`normal`** — translate via the OpenAI-compatible HTTP API (`OPENAI_*`). Default; unchanged behavior.
@@ -202,15 +219,25 @@ MODEL_TYPE="normal"   # normal (default) | codex
 
 ```
 MODEL_TYPE="codex"
-#CODEX_INTERFACE="exec"         # the only value; "mcp" was removed and stops startup
-#CODEX_BIN="codex"              # codex executable (PATH-searched)
-#CODEX_MODEL="gpt-5.2"          # optional model override (unset = codex default)
-#CODEX_TIMEOUT="100"            # seconds (must be < MHD 120s)
-#CODEX_MAX_CONCURRENCY="8"      # concurrent codex processes (default = MAX_WORKERS)
-#CODEX_RUN_DIR="/var/lib/transbasket/run"   # writable root for per-request temp cwd
-#CODEX_REASONING_EFFORT="none"  # optional model_reasoning_effort override (valid values depend on the model)
-#CODEX_ALLOW_UNSAFE="false"     # allow non read-only/never (dev only)
-#CODEX_IGNORE_USER_CONFIG="false"  # exec only: skip $CODEX_HOME/config.toml (set CODEX_MODEL too)
+# the only value; "mcp" was removed and stops startup
+#CODEX_INTERFACE="exec"
+# codex executable (PATH-searched)
+#CODEX_BIN="codex"
+# optional model override (unset = codex default)
+#CODEX_MODEL="gpt-5.2"
+# seconds, default 100; 120 or more is lowered to 110 (MHD connection timeout 120 s),
+# an invalid or non-positive value becomes 100
+#CODEX_TIMEOUT="100"
+# concurrent codex processes (default = MAX_WORKERS)
+#CODEX_MAX_CONCURRENCY="8"
+# root for the per-request temp cwd; created 0700 at startup if missing
+#CODEX_RUN_DIR="/var/lib/transbasket/run"
+# optional model_reasoning_effort override (valid values depend on the model)
+#CODEX_REASONING_EFFORT="none"
+# allow values other than read-only/never (dev only)
+#CODEX_ALLOW_UNSAFE="false"
+# skip $CODEX_HOME/config.toml (set CODEX_MODEL too)
+#CODEX_IGNORE_USER_CONFIG="false"
 ```
 
 With `CODEX_INTERFACE="exec"` each request runs
@@ -238,16 +265,17 @@ servers configured, set `CODEX_IGNORE_USER_CONFIG="true"` together with an expli
 may reject `CODEX_REASONING_EFFORT="none"`). Measured: with 5 configured servers one
 translation spawned 9 helper processes; with the flag set it spawned none.
 
-In codex mode set `TRANS_CACHE_THRESHOLD="1"`: codex output is non-deterministic, so a
-repeated source text is re-worded on every call, which resets the cache entry's `count`
-to 1 — with a higher threshold the cache never reaches it and every request re-invokes
-codex. The ready-made `transbasket_codex.conf` already sets this.
+In codex mode set `TRANS_CACHE_THRESHOLD="1"` (the loader default is 5): codex output is
+non-deterministic, so a repeated source text usually comes back re-worded, which resets the
+cache entry's `count` to 1 — with a higher threshold the cache practically never reaches it and
+every request re-invokes codex (measured: threshold 3, four identical requests, four codex calls).
+The ready-made `transbasket_codex.conf` already sets this.
 
 codex mode requires the running user to have completed `codex login` and to have a writable `CODEX_HOME`. The endpoint translates untrusted text, so `sandbox` is forced to `read-only` and `approval_policy` to `never` unless `CODEX_ALLOW_UNSAFE=true`; `CODEX_APPROVAL_POLICY` and `CODEX_REASONING_EFFORT` must match `[A-Za-z0-9._-]{1,64}` because they are passed as TOML `-c` overrides. See `PLAN_MODEL_TYPE_CODEX_MCP.md` for the original design (its MCP route has since been removed) and the operator/systemd checklist.
 
 ### 2. PROMPT_PREFIX.txt
 
-Located at `../PROMPT_PREFIX.txt` (relative to executable):
+`PROMPT_PREFIX_FILE` (default `PROMPT_PREFIX.txt`), relative to the **config file's** directory; `-p` overrides it:
 
 ```
 translation from language to language. not add more text. note add emoji syntax. only return plain translate text.
@@ -336,14 +364,21 @@ Usage: transbasket [OPTIONS]
 Options:
   -c, --config PATH       Path to configuration file
                           (default: transbasket.local.conf, else transbasket.conf)
-  -p, --prompt PATH       Path to prompt prefix file (default: ../PROMPT_PREFIX.txt)
-  -w, --workers NUM       Number of worker threads (default: 30)
+  -p, --prompt PATH       Path to prompt prefix file (default: PROMPT_PREFIX_FILE from the config,
+                          else PROMPT_PREFIX.txt; relative to the config file's directory)
+  -r, --role PATH         Path to system role file (default: ROLS.txt, same base)
+  -w, --workers NUM       Worker count (default: 30), see below
+  -d, --daemon            Run in the background; exits 0 once the server listens, 1 on a failed start
+  -l, --log-file PATH     With -d: append the daemon's log to PATH (default: discarded)
   -h, --help              Show help message
 
 Environment Variables:
   TRANSBASKET_CONFIG      Config file path
-  MAX_WORKERS             Thread pool size
+  MAX_WORKERS             Worker count (as -w)
 ```
+
+`-w`/`MAX_WORKERS` is not a thread pool or a connection limit: libmicrohttpd runs one thread per
+connection. The value is the default for `CODEX_MAX_CONCURRENCY` and `INFLIGHT_MAX_KEYS`.
 
 ## API Endpoints
 
@@ -393,7 +428,7 @@ curl -X POST http://localhost:8889/translate \
 ```
 
 **Request Body:**
-- `timestamp` (string, required): RFC 3339 형식의 타임스탬프
+- `timestamp` (string, required): RFC 3339 모양의 타임스탬프 — 정규식으로 형식만 봅니다 (`T`·`Z` 는 대문자, 날짜·시각 범위는 검사하지 않음)
 - `uuid` (string, required): RFC 4122 UUID v4 형식의 고유 식별자
 - `from` (string, required): 원본 언어 코드 또는 `auto` (아래 "언어 코드" 참조)
 - `to` (string, required): 대상 언어 코드 (아래 "언어 코드" 참조)
@@ -480,11 +515,11 @@ SQLite의 기존 버전 0/1 DB는 시작 시 버전 2로 이전하며, 기존 �
 ```
 
 **Response Body:**
-- `timestamp` (string): 요청의 타임스탬프 (원본 그대로 반환)
+- `timestamp` (string): 요청의 타임스탬프 (그대로 반환. 단 63바이트까지만 저장하므로, 소수점 자리가 아주 많아 더 긴 값은 잘린 채 돌아옵니다)
 - `uuid` (string): 요청의 UUID (원본 그대로 반환)
 - `translatedText` (string): 번역된 텍스트
   - `MODEL_TYPE="normal"`: 이스케이프 해제 + 이모지/단축코드 제거 + 공백 정규화. 길이로 잘리지 않습니다 (upstream 응답 본문이 4 MB 를 넘으면 `502`, 아래 한계 표)
-  - `MODEL_TYPE="codex"`: 앞뒤 공백 제거와 전체 코드펜스 언랩만 적용되고 **길이 제한 없음**
+  - `MODEL_TYPE="codex"`: 앞뒤 공백 제거와 전체 코드펜스 언랩만 적용. codex 결과가 4 MB (`CODEX_OUT_MAX`) 를 넘으면 잘리지 않고 `502`
 
 **Status Codes:**
 - `200 OK`: 번역 성공
@@ -492,12 +527,15 @@ SQLite의 기존 버전 0/1 DB는 시작 시 버전 2로 이전하며, 기존 �
   U+0000 으로 디코드되는 `\u` 이스케이프(`\u0000`, 또는 `\u00ZZ` 처럼 뒤 4바이트가 16진수가 아닌 것)가 본문 어디에든 있는 경우도 포함
   (아래 "문자열 무결성" 참고)
 - `500 Internal Server Error`: 예상치 못한 내부 오류
-- `502 Bad Gateway`: OpenAI API 4xx 오류 (재시도 불가)
-- `503 Service Unavailable`: OpenAI API 5xx/타임아웃 (재시도 가능, `Retry-After: 5` 헤더 포함)
+- `502 Bad Gateway`: OpenAI API 4xx 오류 (재시도 불가). 그 밖에 upstream 응답이 4 MB 를 넘거나, 깨진 SSE 이벤트·`error` 이벤트,
+  비어 있는 번역, U+0000 으로 잘릴 응답도 `502` 입니다 (아래 "한계와 보장")
+- `503 Service Unavailable`: OpenAI API 5xx·전송 오류·전체 마감 (재시도 가능, `Retry-After: 5` 헤더 포함), 병합 대기 한도 초과
 - `504 Gateway Timeout`: 요청 타임아웃
 
 codex 백엔드의 상태 코드 매핑은 조금 다릅니다: 동시 실행 슬롯을 `CODEX_TIMEOUT` 안에 얻지 못하면 `503`,
-codex 호출 자체가 `CODEX_TIMEOUT` 을 넘기면 `504`, 그 밖의 codex 실패(기동/초기화/빈 응답 등)는 `502` 입니다.
+codex 호출 자체가 `CODEX_TIMEOUT` 이나 전체 마감을 넘기면 `504`, 그 밖의 codex 실패 (`codex exec` 실패·4 MB 초과·NUL 이 든 출력·
+빈 응답·structured 출력 위반 등) 는 `502` 입니다. 오류 응답의 `errorMessage` 에는 실제 원인 문구가 들어가고, `timestamp` 는 응답 시각입니다
+(422 검증 오류에는 `uuid` 도 없습니다).
 
 ---
 
@@ -559,7 +597,7 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
   SELECT from_lang, to_lang, effective_source, mixed, origin FROM trans_cache_effective_source;
   ```
 - **JSONL:** auto 행에 `source_hint`, `hint_mixed`, `hint_origin`, `hint_version` 필드가 붙습니다.
-- **모드 전환과 캐시:** codex 모드는 `TRANS_CACHE_THRESHOLD=1` 이라 이미 저장된 원문은 다시 번역하지 않습니다.
+- **모드 전환과 캐시:** codex 설정은 보통 `TRANS_CACHE_THRESHOLD=1` 이라 (권장값, `transbasket_codex.conf`) 이미 저장된 원문은 다시 번역하지 않습니다.
   그래서 `model` 로 바꿔도 기존 행의 `script` 값은 그대로이고, 새로 번역되는 원문부터 모델 값이 쌓입니다.
   기록이 없는 기존 auto 행은 `cache_tool backfill-hints` 로 `script` 값을 채울 수 있습니다(모델 값은 덮어쓰지 않음).
 - **롤백:** 이 기능이 없는 바이너리도 같은 SQLite DB 를 그대로 엽니다(실측). 단 그 바이너리는 JSONL 을 저장할 때
@@ -582,7 +620,7 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
 | 요청 `text` 최소 길이 | 1 바이트 | `422` |
 | HTTP 요청 본문 전체 크기 | **상한 없음** | 서버가 메모리에 그대로 누적. 신뢰할 수 없는 클라이언트에 노출할 때는 앞단(리버스 프록시)에서 제한 필요 |
 | upstream 응답 본문 — `normal` (비스트리밍·스트리밍) | **4 MB** (`MAX_UPSTREAM_RESPONSE`) | 절단이 아니라 오류(`502`), 재시도·캐시 없음 |
-| 응답 길이 — `codex` | 사실상 제한 없음 | 결과가 **4 MB** (`CODEX_OUT_MAX`)를 넘으면 절단이 아니라 오류(`502`) |
+| 응답 길이 — `codex` | **4 MB** (`CODEX_OUT_MAX`) | 넘으면 절단이 아니라 오류(`502`). structured 모드는 JSON 전체가 이 한도 안에 들어야 함 |
 
 > **2026-11-06 이전**: `normal` 백엔드는 번역문을 **8,191 바이트에서 조용히** 잘라 200 으로 응답·캐시했고(문자 중간에서
 > 끊기기도 함), 스트리밍은 65,535 바이트에서 멈췄습니다. 지금은 후처리 버퍼를 입력 길이로 잡아 잘리지 않습니다
@@ -635,7 +673,8 @@ SSE 주석, 비스트리밍 본문의 루트 값 뒤 잔여 바이트. (SSE 의 
 - 클라이언트·upstream·codex 가 보낸 문자열 (거부된 필드 값, codex 오류 문구, codex 버전·config.toml 의 MCP 서버 이름, libmicrohttpd 메시지) 은
   제어 문자를 `\n`·`\xNN` 으로 바꿔 기록하므로 로그에 가짜 줄을 만들 수 없습니다. JSON 파싱 오류는 바이트 위치만 기록합니다.
 - `DEBUG=yes` trace (`./trace/`): API 키는 `<redacted>`, 파일 0600 (기존 이름은 덮어쓰지 않고 `-1`… 을 붙임, 심볼릭 링크를 따라가지 않음),
-  새로 만드는 디렉터리 0700, 그룹·기타가 접근 가능한 기존 디렉터리는 경고. trace 에는 여전히 **원문·번역문 전체**가 들어갑니다.
+  새로 만드는 디렉터리 0700, 그룹·기타가 접근 가능한 기존 디렉터리는 경고. trace 에는 평문이 들어갑니다: normal 은 upstream 요청
+  본문 (curl 명령, 원문 포함), codex 는 프롬프트 (원문 포함)·결과·codex stderr 꼬리.
   추적 템플릿의 기본값은 `DEBUG=no` 입니다.
 
 #### 시간 한계
@@ -643,9 +682,9 @@ SSE 주석, 비스트리밍 본문의 루트 값 뒤 잔여 바이트. (SSE 의 
 | 항목 | 값 | 비고 |
 |------|-----|------|
 | HTTP 연결 타임아웃 | 비활성 120초 (MHD) | 애플리케이션의 전체 작업 마감과 별개 |
-| 전체 번역 예산 | `TRANSLATION_TOTAL_TIMEOUT`, 기본 110초 | 슬롯 대기·초기화·재시도·백오프·호출에서 공유 |
+| 전체 번역 예산 | `TRANSLATION_TOTAL_TIMEOUT`, 기본 110초 | 슬롯 대기·재시도·백오프·호출에서 공유 |
 | `normal` upstream 호출 타임아웃 | 최대 60초/시도와 남은 전체 예산 중 작은 값 | 최대 3회 시도, 백오프 `2^attempt` 초, 전체 마감 후 추가 시도 없음 |
-| `codex` 호출 타임아웃 | `CODEX_TIMEOUT` (기본 100초) | 반드시 120초보다 작아야 함. 초과 시 `504` |
+| `codex` 호출 타임아웃 | `CODEX_TIMEOUT` (기본 100초) | 120 이상이면 기동 시 110 으로 줄이고 경고, 잘못된 값·0 이하는 100. 초과 시 `504` |
 | `codex` 동시 실행 슬롯 대기 | `CODEX_TIMEOUT`과 남은 전체 예산 이내 | 슬롯 대기 실패 `503`, 전체 작업 마감 `504` |
 | 캐시 정리 기간 | `TRANS_CACHE_CLEANUP_DAYS`, 기본 60일 | 64비트로 계산 (예전에는 24,856일 이상에서 전체 삭제 가능). `atoi` 와 같은 값으로 읽고, int 범위를 넘으면 최댓값으로 포화(사실상 만료 없음)하며 경고. 확인 주기는 기간의 1/10, 최소 1시간. 기동 로그 `Cache background thread started (... cleanup after N days)` 에 실효값 |
 
@@ -729,7 +768,7 @@ transbasket/
   Chinese BCP-47 tags folded to `zhs`/`zht`)
 - Source-only `auto` detection before general language normalization
 - UUID v4 validation (RFC 4122)
-- RFC 3339 timestamp validation
+- RFC 3339-shaped timestamp check (regex: format only, not calendar ranges)
 - Emoji and shortcode stripping
 - Text truncation utilities
 
@@ -856,17 +895,14 @@ make rebuild
 
 ### Code Style
 
-- C11 standard
-- POSIX compliant
-- No GNU extensions
-- Clear error messages to stderr
+- C11 with POSIX and a few GNU/Linux interfaces (`pipe2`, `posix_spawn_file_actions_addclosefrom_np`, `/proc/self/exe`)
+- Log lines go to stdout (and the `-l` file in daemon mode); only a few early parser diagnostics use stderr
 
 ## Performance Considerations
 
 - Thread-per-connection model handles multiple concurrent requests
 - Memory is carefully managed (no leaks)
-- Retry logic prevents temporary failures
-- Connection pooling in libcurl for efficiency
+- Retry with exponential backoff for upstream 5xx and transport errors (normal backend)
 
 ## Comparison with Python POC
 

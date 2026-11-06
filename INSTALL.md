@@ -63,7 +63,9 @@ make clean          # 산출물 삭제
 `auto` 요청은 내장 지시를 사용하므로 별도 파일이 필요하지 않습니다. 선택 설정
 `PROMPT_PREFIX_AUTO_FILE`을 사용하면 해당 파일도 배포해야 하며, 파일 오류는 서버 시작을 중단합니다.
 
-상대 경로는 설정 파일 기준으로 해석되므로, 다른 위치에서 실행할 때는 절대 경로 사용을 권장합니다.
+상대 경로의 기준은 키마다 다릅니다 (2026-11-06 실측): 설정 파일 자체와 `LANGUAGE_TABLE_FILE` 은 **실행 파일 디렉터리**,
+`PROMPT_PREFIX_FILE`·`PROMPT_PREFIX_AUTO_FILE`·`-p`·`-r` 은 **설정 파일 디렉터리**, `TRANS_CACHE_FILE`·`TRANS_CACHE_SQLITE_PATH`·
+`CODEX_RUN_DIR`·`./trace/` 는 **작업 디렉터리**. 다른 위치에서 실행할 때는 절대 경로를 권장합니다.
 
 ## 4. 실행
 
@@ -71,7 +73,7 @@ make clean          # 산출물 삭제
 ./transbasket                                   # transbasket.local.conf → 없으면 transbasket.conf
 ./transbasket -c /etc/transbasket/transbasket.conf
 ./transbasket -c transbasket_codex.conf         # codex 백엔드
-./transbasket -w 20                             # 워커 스레드 수 지정
+./transbasket -w 20                             # 워커 수 (codex 동시성·병합 키 한도의 기본값)
 MAX_WORKERS=20 ./transbasket                    # 환경변수로도 지정 가능
 ./transbasket -d -l transbasket.log -c /etc/transbasket.conf   # 데몬 모드, 로그는 파일로
 ```
@@ -82,7 +84,8 @@ MAX_WORKERS=20 ./transbasket                    # 환경변수로도 지정 가�
 `transbasket is running in the background (pid N)` 과 함께 종료 코드 0, 실패하면 원인 로그와 함께 1 입니다. 60초 안에 결과가 없으면
 ("may still be starting") 1 로 끝나지만 데몬은 계속 뜰 수 있습니다. 작업 디렉터리와 umask 는 실행한 쪽 그대로라 상대 경로가 전경과
 같은 곳을 가리킵니다. `-l` 이 없으면 기동 뒤의 로그는 버려집니다.
-환경변수: `TRANSBASKET_CONFIG`, `MAX_WORKERS`. 워커 수 권장값은 `2 * CPU_CORES + 1` 입니다.
+환경변수: `TRANSBASKET_CONFIG`, `MAX_WORKERS`. 워커 수는 스레드 풀·연결 수 한도가 아니라 (연결마다 스레드),
+`CODEX_MAX_CONCURRENCY`·`INFLIGHT_MAX_KEYS` 를 따로 정하지 않았을 때의 기본값입니다. 권장값은 `2 * CPU_CORES + 1` 입니다.
 
 ## 5. 동작 확인
 
@@ -103,7 +106,7 @@ curl -X POST http://localhost:8889/translate \
   }'
 ```
 
-응답은 요청의 `uuid` / `timestamp` 를 그대로 보존합니다.
+성공 응답은 요청의 `uuid` / `timestamp` 를 그대로 돌려줍니다. 오류 응답의 `timestamp` 는 응답 시각이고, 422 검증 오류에는 `uuid` 가 없습니다.
 
 자동 감지는 같은 엔드포인트에서 `from`만 `auto`로 지정합니다.
 
@@ -121,7 +124,8 @@ curl -X POST http://localhost:8889/translate \
 
 `auto`는 언어 테이블에 추가하지 않습니다. `to=auto`는 422이며,
 응답에 감지된 언어명이나 신뢰도는 추가되지 않습니다.
-2026-11-03의 오프라인 검증은 9개 통과했고 실제 TranslateGemma 호출은 503으로 실패했습니다.
+2026-11-03의 오프라인 검증은 9개 통과했고 실제 TranslateGemma 호출은 503으로 실패했습니다 (normal 실측은 아직 없음).
+실제 codex 로는 2026-11-06 에 32건을 돌려 원문 기준언어 24/24, 구조화 출력 실패 0, 번역문 오염 0 이었습니다 (번역 품질 자체는 채점하지 않음).
 배포 후 실제 대상 모델에서 자동 감지·번역 결과를 확인하세요. 세부 검증 기록은 [TEST_RESULTS.md](TEST_RESULTS.md)에 있습니다.
 
 ## 6. codex 백엔드 추가 준비
@@ -143,10 +147,11 @@ codex mcp list           # 이 계정의 MCP 서버 - 있으면 아래 CODEX_IGN
   `CODEX_MODEL` 을 지정하세요.
 
 - 서비스 계정이 쓰기 가능한 `CODEX_HOME`(기본 `~/.codex`)을 가져야 codex 호출이 성공합니다.
-- `CODEX_RUN_DIR`(요청별 임시 cwd 루트, 기본 `/var/lib/transbasket/run`)을 **미리 생성**하고 0700 으로 두세요.
-  없으면 `mkdtemp` 가 실패해 codex 가 서버의 작업 디렉터리에서 실행됩니다.
-- **`TRANS_CACHE_THRESHOLD="1"` 필수** — codex 출력은 비결정적이라 임계값이 2 이상이면
-  캐시 count 가 계속 1 로 리셋되어 캐시가 무효화되고 매 요청마다 codex 를 호출합니다.
+- `CODEX_RUN_DIR`(요청별 임시 cwd 루트, 기본 `/var/lib/transbasket/run`)은 없으면 기동 시 0700 으로 만들어 봅니다
+  (`Created CODEX_RUN_DIR: ...`). 서비스 계정이 만들 수 없는 위치면 경고 후 요청마다 `mkdtemp` 가 실패해, codex 가 임시 디렉터리 없이
+  서버의 작업 디렉터리에서 실행되고 structured 모드 (`SOURCE_HINT_MODE=model`) 도 쓰지 못합니다. 운영에서는 미리 만들어 두는 편이 안전합니다.
+- **`TRANS_CACHE_THRESHOLD="1"` 권장** (로더 기본값은 5) — codex 출력은 비결정적이라 임계값이 2 이상이면
+  캐시 count 가 대개 1 로 되돌아가 캐시가 사실상 쓰이지 않고 매 요청마다 codex 를 호출합니다 (실측: 임계값 3, 같은 요청 4번 → codex 4번).
 - `CODEX_MAX_CONCURRENCY` 로 동시 codex 프로세스 수를 제한하세요(요청당 프로세스 1개 spawn).
 
 운영/systemd 상세 점검표는 `PLAN_MODEL_TYPE_CODEX_MCP.md` §7.1 을 참고하세요.
@@ -217,7 +222,8 @@ auto는 내장 자동 감지 지시를 사용합니다. 선택 설정 `PROMPT_PR
 
 ```conf
 TRANSLATION_TOTAL_TIMEOUT="110"
-#INFLIGHT_MAX_KEYS="30"          # 생략하면 MAX_WORKERS 사용
+# INFLIGHT_MAX_KEYS: 생략하면 MAX_WORKERS 사용
+#INFLIGHT_MAX_KEYS="30"
 INFLIGHT_MAX_WAITERS="256"
 INFLIGHT_MAX_WAITERS_PER_KEY="64"
 ```
@@ -363,7 +369,7 @@ ls -ld <CODEX_RUN_DIR>                 # 임시 cwd 루트 존재/권한
 ```
 `502` 응답의 `errorMessage` 에는 codex 의 마지막 `ERROR:` 줄이 담깁니다(예: 지원하지 않는 모델).
 `DEBUG=yes` 이면 요청마다 `./trace/<timestamp>_<uuid>.codex.txt` 에 프롬프트/결과/codex stderr 트레이스가 남습니다
-(파일 0600, 같은 이름은 `-1` 등을 붙임, normal 의 curl trace 는 API 키를 `<redacted>` 로). 원문·번역문 평문이 저장되고
+(파일 0600, 같은 이름은 `-1` 등을 붙임, normal 의 curl trace 는 요청 본문만 담고 API 키는 `<redacted>`). 원문 (codex 는 번역문도) 평문이 저장되고
 파일이 정리 없이 쌓이므로 운영 환경에서는 `DEBUG=no` 를 권장합니다.
 
 **메모리 누수 점검**

@@ -236,13 +236,16 @@ curl -X POST http://localhost:8889/translate \
 
 ### Error 5: Translation Service Error (503 Service Unavailable)
 
-#### Response (when OpenAI API is down):
+#### Response (when OpenAI API is down; `errorMessage` is the actual cause, `timestamp` is the response time):
 {
   "errorCode": "TRANSLATION_ERROR",
-  "errorMessage": "Translation failed",
+  "errorMessage": "Server error",
   "uuid": "550e8400-e29b-41d4-a716-446655440000",
   "timestamp": "2025-10-10T10:00:01.234Z"
 }
+# "Server error": upstream 5xx after the last attempt. A transport failure carries curl's text
+# (e.g. "Couldn't connect to server", "Timeout was reached"); the total budget running out gives
+# "Translation deadline exceeded".
 
 #### Headers:
 HTTP/1.1 503 Service Unavailable
@@ -358,7 +361,9 @@ curl --max-time 30 \
    - Maximum: 10,000 UTF-8 bytes; larger text is rejected with 422
 
 5. **Response Preservation**:
-   The response always preserves the original timestamp and UUID from the request.
+   A successful response returns the request's timestamp and UUID unchanged (a timestamp is stored in
+   64 bytes, so one longer than 63 bytes comes back truncated). Error responses carry the UUID and the
+   current time; a 422 validation error has no UUID.
 
 6. **Error Handling**:
    - Malformed JSON currently returns 422 VALIDATION_ERROR, like other parser failures
