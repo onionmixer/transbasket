@@ -1,7 +1,7 @@
 /* Harness for tests/test_sse.py: the real handle_streaming_response() (static, so the
  * source is included). One request per stdin line:
  *   S <hex body>          -> "<status> <hex content or ->"
- *   F <k> <hex body>      -> same, with the k-th malloc() inside http_client.c failing
+ *   F <k> <hex body>      -> same, with the k-th malloc() inside backend_normal.c failing
  */
 #include <stdlib.h>
 static long tb_fail_at = -1, tb_mallocs = 0;
@@ -10,7 +10,7 @@ static void *tb_malloc(size_t n) {
     return malloc(n);
 }
 #define malloc(n) tb_malloc(n)
-#include "../src/http_client.c"
+#include "../src/backend_normal.c"
 #undef malloc
 
 int main(void) {

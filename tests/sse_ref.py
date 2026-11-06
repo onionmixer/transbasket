@@ -1,4 +1,4 @@
-"""Specification of handle_streaming_response() in src/http_client.c (PLAN_OPEN_ISSUES.md D/E).
+"""Specification of handle_streaming_response() in src/backend_normal.c (PLAN_OPEN_ISSUES.md D/E).
 
 Framing and classification are written here independently of the C code. Whether an
 event's data is one JSON value, where it ends and what its members hold is asked of the

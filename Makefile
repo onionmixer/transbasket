@@ -160,7 +160,7 @@ test-log-safety: all
 
 # handle_streaming_response() vs tests/sse_ref.py, allocation failure at every malloc, mutants.
 test-sse: directories
-	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_sse tests/test_sse.c $(filter-out $(SRC_DIR)/http_client.c $(SRC_DIR)/main.c, $(SERVER_SRCS)) $(LIBS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_sse tests/test_sse.c $(filter-out $(SRC_DIR)/backend_normal.c $(SRC_DIR)/main.c, $(SERVER_SRCS)) $(LIBS) $(LDFLAGS)
 	python3 -I tests/test_sse.py $(OBJ_DIR)/test_sse --mutants
 
 # normal backend reply handling through the real server with a fake upstream.
@@ -176,6 +176,12 @@ test-config-numbers: all
 # templates starting unmodified (server rows inside an unprivileged namespace).
 test-codex-interface: all
 	python3 -I tests/test_codex_interface.py $(abspath $(TARGET))
+
+# PLAN_BACKEND_MODULES.md V3b/V4/V5: compare against an earlier build, e.g. PARITY_OLD_BIN=/path/to/old/transbasket
+# (that binary needs language_tables.conf next to it: the language table resolves against the executable's directory).
+test-backend-parity: all
+	@if [ -z "$(PARITY_OLD_BIN)" ]; then echo "set PARITY_OLD_BIN=<earlier transbasket build>"; exit 2; fi
+	python3 -I tests/test_backend_parity.py $(abspath $(PARITY_OLD_BIN)) $(abspath $(TARGET))
 
 test-config-syntax: all
 	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -DWITH_CONFIG_LOADER -o $(OBJ_DIR)/test_config_line tests/test_listen_address.c src/listen_address.c src/utils.c -lcjson -luuid
@@ -207,4 +213,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity

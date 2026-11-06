@@ -5,7 +5,7 @@
 - fixed cases (hand-written, also checked against the specification) and generated bodies
 - allocation failure at every malloc() the function makes: it must end (no loop) with
   SSE_NO_MEMORY - the old chunk loop retried the same chunk forever
-- mutants of src/http_client.c must each be caught
+- mutants of src/backend_normal.c must each be caught
 """
 import os
 import subprocess
@@ -85,9 +85,9 @@ EQUIVALENT = {"content type unchecked": "only strings carry valuestring in parse
 
 
 def mutants(sample):
-    src = (ROOT / "src/http_client.c").read_text()
+    src = (ROOT / "src/backend_normal.c").read_text()
     survived = []
-    others = [str(p) for p in sorted((ROOT / "src").glob("*.c")) if p.name not in ("http_client.c", "main.c", "cache_tool.c")]
+    others = [str(p) for p in sorted((ROOT / "src").glob("*.c")) if p.name not in ("backend_normal.c", "main.c", "cache_tool.c")]
     with tempfile.TemporaryDirectory(prefix="sse-mutant-") as d:
         d = Path(d)
         (d / "src").mkdir()
@@ -96,7 +96,7 @@ def mutants(sample):
         (d / "tests/test_sse.c").write_text(harness_src)
         for name, old, new in MUTANTS:
             assert src.count(old) == 1, f"anchor: {name}"
-            (d / "src/http_client.c").write_text(src.replace(old, new))
+            (d / "src/backend_normal.c").write_text(src.replace(old, new))
             exe = d / "h"
             subprocess.run(["gcc", "-std=c11", "-O1", "-D_POSIX_C_SOURCE=200809L", "-D_DEFAULT_SOURCE", f"-I{ROOT}/include",
                             "-o", str(exe), str(d / "tests/test_sse.c"), *others, *LIBS], check=True)
