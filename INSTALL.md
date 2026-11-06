@@ -73,10 +73,15 @@ make clean          # 산출물 삭제
 ./transbasket -c transbasket_codex.conf         # codex 백엔드
 ./transbasket -w 20                             # 워커 스레드 수 지정
 MAX_WORKERS=20 ./transbasket                    # 환경변수로도 지정 가능
-./transbasket -d -c /etc/transbasket.conf       # 데몬 모드
+./transbasket -d -l transbasket.log -c /etc/transbasket.conf   # 데몬 모드, 로그는 파일로
 ```
 
-옵션: `-c/--config`, `-p/--prompt`, `-r/--role`, `-w/--workers`, `-d/--daemon`, `-h/--help`.
+옵션: `-c/--config`, `-p/--prompt`, `-r/--role`, `-w/--workers`, `-d/--daemon`, `-l/--log-file` (`-d` 와 함께), `-h/--help`.
+
+`-d` 는 서버가 실제로 바인드할 때까지 기다립니다. 그동안의 기동 로그가 실행한 터미널(stderr)에 보이고, 성공하면
+`transbasket is running in the background (pid N)` 과 함께 종료 코드 0, 실패하면 원인 로그와 함께 1 입니다. 60초 안에 결과가 없으면
+("may still be starting") 1 로 끝나지만 데몬은 계속 뜰 수 있습니다. 작업 디렉터리와 umask 는 실행한 쪽 그대로라 상대 경로가 전경과
+같은 곳을 가리킵니다. `-l` 이 없으면 기동 뒤의 로그는 버려집니다.
 환경변수: `TRANSBASKET_CONFIG`, `MAX_WORKERS`. 워커 수 권장값은 `2 * CPU_CORES + 1` 입니다.
 
 ## 5. 동작 확인
@@ -284,7 +289,7 @@ SIGTERM/SIGINT는 실행 취소와 대기 해제 후 종료하며, SIGHUP 캐시
    ```
    `localhost` 같은 호스트 이름은 `127.0.0.1`(또는 `::1`)로 바꿉니다. `LISTEN="127.0.0.1"` 을 넣어 두었던 설정은 이제
    정말로 로컬 전용이 되므로, 다른 호스트에서 접속하던 클라이언트가 있다면 끊깁니다.
-2. 새 바이너리를 **전경에서** 한 번 띄워 기동 로그를 봅니다 (`-d` 모드에서는 기동 오류가 보이지 않습니다).
+2. 새 바이너리를 **전경에서** 한 번 띄워 기동 로그를 봅니다 (§13 이전 바이너리의 `-d` 모드에서는 기동 오류가 보이지 않습니다).
    ```bash
    grep "HTTP server listening on" <로그>    # 예: 0.0.0.0:8889 (IPv4)
    ss -ltn | grep 8889
@@ -293,7 +298,27 @@ SIGTERM/SIGINT는 실행 취소와 대기 해제 후 종료하며, SIGHUP 캐시
 
 **롤백:** 이전 바이너리로 돌아가면 다시 `LISTEN` 을 무시하고 모든 IPv4 인터페이스에서 받습니다.
 
-## 13. 문제 해결
+## 13. 데몬 모드·로그·normal 출력·설정 수정으로 업그레이드
+
+스키마·캐시 형식은 그대로입니다. 바뀌는 동작 ([PLAN_OPEN_ISSUES.md](PLAN_OPEN_ISSUES.md)):
+
+1. **설정 문법**: 따옴표 값 뒤에 글자가 있으면 (`KEY="1" # 주석`, `KEY="a`) 기동 오류입니다. 새 바이너리를 전경에서 한 번 띄우면
+   `Error: line N: the value of KEY starts with a quote but does not end with the same quote` 로 줄 번호를 알려 줍니다 (주석은 자기 줄로).
+   추적 템플릿 `transbasket.conf`·`transbasket_codex.conf` 는 이 문제로 기동하지 못했었고, 이제 그대로 기동합니다.
+2. **숫자 설정**: 범위를 넘는 값은 감기지 않고 포화합니다 (`PORT=4294975185` 가 7889 가 되던 것 → 범위 오류). `nan`/`inf` 는 기동 오류.
+   `Warning: <KEY> '...' is not a plain integer` 가 보이면 값을 고칩니다.
+3. **`-d`**: 이제 기동 결과를 종료 코드로 알려 주고, 작업 디렉터리를 `/` 로 바꾸지 않으며 umask 도 0 으로 바꾸지 않습니다.
+   예전 `-d` 로는 상대 경로 캐시·`CODEX_RUN_DIR` (배포 설정 모두 상대 경로) 가 `/` 기준이라 동작하지 않았습니다. 로그가 필요하면 `-l`.
+4. **로그**: 요청 로그에 원문이 남지 않습니다 (`text_bytes=N`). 원문으로 검색하던 운영 절차가 있다면 uuid 로 바꿉니다.
+   거부된 요청 값은 `Error: Invalid UUID format: ...` 처럼 INFO 로그에 이스케이프되어 남습니다 (예전에는 stderr 에 그대로).
+5. **normal 백엔드**: 번역문이 8,191 바이트에서 잘리지 않고, 콜론(`10:30`, `http://`)이 보존됩니다. upstream 응답 본문 4 MB 초과,
+   깨진 SSE 이벤트, `error` 이벤트는 `502` 입니다 (예전에는 부분 번역 200). 예전 바이너리로 저장된 **잘리거나 콜론이 빠진 번역**은
+   캐시에 그대로 있으므로, normal 백엔드 캐시를 쓰고 있었다면 해당 항목을 지우는 것을 검토합니다 (`cache_tool`).
+6. **trace**: `DEBUG=yes` 파일은 0600, API 키 가림. 기존 `trace/` 디렉터리의 권한은 바꾸지 않고 경고만 합니다.
+
+**롤백:** 이전 바이너리로 돌아갈 수 있습니다 (형식 동일). 다만 따옴표 뒤 주석을 지운 설정은 이전 바이너리에서도 그대로 동작합니다.
+
+## 14. 문제 해결
 
 **빌드 실패 (라이브러리 없음)**
 ```bash
@@ -325,8 +350,9 @@ ls -ld <CODEX_RUN_DIR>                 # 임시 cwd 루트 존재/권한
 ```
 `502` 응답의 `errorMessage` 에는 codex 의 마지막 `ERROR:` 줄이 담깁니다(예: 지원하지 않는 모델).
 `codex MCP initialize failed` 라면 `CODEX_INTERFACE="mcp"` 로 신버전 codex 를 구동한 것입니다.
-`DEBUG=yes` 이면 요청마다 `./trace/<timestamp>_<uuid>.codex.txt` 에 프롬프트/결과/codex stderr 트레이스가 남습니다.
-운영 환경에서는 파일이 무한히 쌓이고 원문·번역문 평문이 저장되므로 `DEBUG=no` 를 권장합니다.
+`DEBUG=yes` 이면 요청마다 `./trace/<timestamp>_<uuid>.codex.txt` 에 프롬프트/결과/codex stderr 트레이스가 남습니다
+(파일 0600, 같은 이름은 `-1` 등을 붙임, normal 의 curl trace 는 API 키를 `<redacted>` 로). 원문·번역문 평문이 저장되고
+파일이 정리 없이 쌓이므로 운영 환경에서는 `DEBUG=no` 를 권장합니다.
 
 **메모리 누수 점검**
 ```bash

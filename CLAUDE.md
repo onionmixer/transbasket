@@ -77,6 +77,7 @@ The C implementation follows a clear separation of concerns across these core mo
 9. **source_hint.c**: script classifier for the from=auto base language (see "Source hint" below)
 10. **strict_json.c**: strict validator for codex structured output, run before cJSON
 11. **listen_address.c**: `LISTEN` parser and LISTEN line recognizer (see "LISTEN address" below)
+12. **daemon.c**: `-d` with a start report to the launcher (see "Open-issue fixes" below)
 
 (Cache and language-table concerns live in `trans_cache.c`, `cache_backend_*.c`, and `language_table.c`.)
 
@@ -238,8 +239,9 @@ and the C string is cut there (keys too). Invariants:
   behaviour as `cJSON_Parse`) followed by `json_decodes_nul(x, end - x)` - **only the consumed bytes**.
   Checking the whole buffer would newly reject SSE comments, ignored chunks and bytes after the root.
 - Request -> 422 before any engine call. MCP: the flag is computed on the matched line **before** the
-  `memmove` in `wait_for_id()`. SSE: a NUL chunk fails the whole response; the other `NULL` returns of
-  `parse_sse_chunk()` stay ignored. Plain codex output: `memchr(result, 0, result_len)`. All 502, never cached.
+  `memmove` in `wait_for_id()`. SSE: a NUL-decoding event fails the whole response - and since
+  PLAN_OPEN_ISSUES.md D/E so does every other bad event (see below). Plain codex output:
+  `memchr(result, 0, result_len)`. All 502, never cached.
 - Not guarded on purpose: the text-cache loader (only our own C strings are written) and the startup
   `mcp list --json` probe (server names for a log line).
 - `make test-cjson-nul`: spec `tests/cjson_nul_ref.py` vs the real libcjson through an allocator-hook
@@ -268,7 +270,41 @@ Until 2026-11-06 `MHD_start_daemon()` got only the port, so every `LISTEN` value
 - `make test-listen-parse` (C vs `tests/listen_address_ref.py`, real `parse_config_line()`, mutants) and
   `make test-listen-address` (real server inside `unshare -rn --pid --fork --kill-child=KILL --mount-proc`
   with a dummy 198.18.0.1 interface; `LISTEN_OLD_BIN=` also runs a pre-fix binary). Tests bind loopback only.
-- `-d` still daemonizes before the config is read, so startup errors are invisible there (separate task).
+- `-d` reports startup errors to the launcher since PLAN_OPEN_ISSUES.md A (see "Open-issue fixes").
+
+### Open-issue fixes - PLAN_OPEN_ISSUES.md
+
+Invariants added 2026-11-06 (each has a `make test-*` target):
+
+- **Config syntax** (`test-config-syntax`): `parse_config_line()` returns -3 when the right-hand side, as
+  written, starts with a quote and does not end with the same quote - inline comments are errors, not part
+  of the value. POSIX ERE `(.+?)` means `(.+)` optional: `KEY=` and `KEY=""` are empty assignments. The tracked
+  templates must start unmodified (the test runs them).
+- **Config numbers** (`test-config-numbers`): every key keeps its old meaning (atoi prefixes and fallbacks,
+  the strict strtol rules of `CODEX_TIMEOUT`/`CODEX_MAX_CONCURRENCY`) but saturates instead of wrapping
+  (`atoi_saturating()`, `long_to_int_saturating()`); nan/inf in temperature/top_p and nan in penalties fail.
+- **normal post-processing** (`test-strip`, `test-normal-output`): `unescape_string()` and
+  `strip_emoji_and_shortcodes()` never write more bytes than they read, so the caller sizes buffers from the
+  input and there is no 8 KB cap; both return -1 rather than truncate. A shortcode is `:[a-z0-9_+-]+:` with a
+  lowercase letter and no ASCII alnum touching either colon (spec `tests/strip_ref.py`). `utf8_decode()` is
+  strict RFC 3629 and never reads past an invalid byte. ctype calls get `unsigned char`.
+- **SSE** (`test-sse`): `handle_streaming_response(data, size, ...)` reads by size (a NUL anywhere is a 502),
+  skips a leading BOM, LF/CRLF/CR line ends, SSE field rules (a line without a colon is a field with an empty
+  value), joins `data` lines, still reads a last event that lacks the blank line (on purpose: dropping it would
+  return the reply without its end as a success), and fails the whole reply on bad JSON (or bytes after it), an
+  error event/member, or a non-string content; role/finish/usage/null/comment/[DONE]/empty-data events add
+  nothing. Spec `tests/sse_ref.py` (JSON via libcjson). Do not switch to `cJSON_ParseWithLengthOpts()`: it
+  accepts a raw NUL and returns the string cut there. Reply bodies are capped at `MAX_UPSTREAM_RESPONSE`
+  (4 MB); the cap and a write-callback allocation failure are 502 and never take the retry path.
+- **Logs** (`test-log-safety`): no source text in INFO (`text_bytes=N`). Every remote- or child-supplied string
+  goes through `log_escape()` before a log call; JSON parse errors log the byte offset (`cJSON_GetErrorPtr()` is
+  global). Trace files: `open_trace_file()` (0600, `O_EXCL|O_NOFOLLOW`, suffix on a clash, new dir 0700, loose
+  dir warned once), API key `<redacted>`. `log_message()` formats the whole line before writing it.
+- **Daemon** (`test-daemon`, needs `unshare`): `daemon_begin()` keeps the launcher until the daemon calls
+  `daemon_ready()` after `translation_server_start()`; any earlier exit makes the launcher exit 1. Never call
+  `daemon_ready()` before the listener exists, never `chdir("/")`/`umask(0)` again (deployment configs use
+  relative paths). `-l` tees startup lines into the log file (`log_set_tee()`), then stdout becomes the file.
+  `DAEMON_READY_TIMEOUT` (60 s; the test build uses 3) must cover three 15 s codex probes.
 
 ### Translation Cache Concurrency
 
@@ -299,7 +335,8 @@ the supported-code/name lists and Chinese tag parser, with a separate source-mod
   or an escape that cJSON would decode to U+0000 - see "cJSON NUL guard");
   `handle_translate()` maps every failed `parse_translation_request()` to this status
 - 500: Unexpected internal errors
-- 502: OpenAI API 4xx errors (non-retryable)
+- 502: OpenAI API 4xx errors (non-retryable); also a normal reply over 4 MB, a bad SSE event, an upstream
+  `error` event, or a reply cJSON would cut at U+0000 (none retried or cached)
 - 503: OpenAI API 5xx/timeout (retryable, includes `Retry-After: 5` header)
 - 504: Request timeout
 
@@ -361,12 +398,12 @@ Implementation in `json_handler.c:create_translation_response()`.
 
 **Normal backend only.** `strip_emoji_and_shortcodes()` runs in `translate_via_openai()` and nowhere
 else; the codex path deliberately skips it (re-processing already-decoded output would corrupt it) and
-only trims plus unwraps a whole-output code fence. Note this is also where normal-backend responses get
-truncated at 8,191 bytes - see "Hard Limits".
+only trims plus unwraps a whole-output code fence. Until 2026-11-06 this was also where normal replies were
+cut at 8,191 bytes and where every `:` was swallowed (`10:30` -> `10`); see "Open-issue fixes".
 
 Automatic removal of:
-- Unicode emoji (U+1F300–U+1FAFF range)
-- Shortcodes like `:smile:`, `:+1:`
+- Unicode emoji (the `is_emoji_codepoint()` ranges: U+1F300-U+1FAFF, U+2600-U+27BF)
+- Shortcodes such as `:smile:` (not `:+1:`, `10:30`, `http://`, `:)` - the rule is in "Open-issue fixes")
 - Extra whitespace normalization
 
 Implementation in `utils.c:strip_emoji_and_shortcodes()`:
@@ -383,16 +420,14 @@ Public-facing copies live in `README.md` → "한계와 보장"; keep both in sy
 |---|---|---|---|
 | `MAX_TEXT_LENGTH` | `json_handler.c` | 10,000 bytes | request rejected with 422 (explicit) |
 | `MIN_TEXT_LENGTH` | `json_handler.c` | 1 byte | 422 |
-| `MAX_TRANSLATION_BUFFER` | `http_client.c` | 16,384 | `unescape_string()` stops at 16,383 bytes and still returns 0 (**silent truncation**) |
-| `MAX_CLEANED_TEXT_BUFFER` | `http_client.c` | 8,192 | `strip_emoji_and_shortcodes()` stops at 8,191 bytes and returns 0 — **the effective response cap for `normal`**, silent, cached truncated |
-| `MAX_STREAM_BUFFER` | `http_client.c` | 65,536 | stream mode stops accumulating; only a `LOG_DEBUG` (invisible in release builds) |
+| `MAX_UPSTREAM_RESPONSE` | `http_client.c` | 4 MB | normal reply body (both modes) **errors** ("Upstream response too large" -> 502, not retried, not cached); post-processing buffers are sized from the reply, no other cap |
 | `CODEX_OUT_MAX` | `codex_exec.c` | 4 MB | exec path **errors** ("codex response too large" → 502) rather than truncating |
 | `MCP_RBUF_MAX` | `mcp_client.c` | 4 MB | legacy MCP path **errors** ("codex MCP response too large" → 502) rather than truncating |
 | MHD connection timeout | `http_server.c` | 120 s | connection closed |
 | curl timeout (`normal`) | `http_client.c` | min(60 s, remaining total budget), up to 3 attempts | 503 for timeout |
 | Total translation budget | `TRANSLATION_TOTAL_TIMEOUT` | default 110 s, configurable 1..110 | normal 503, codex 504; no follower deadline extension |
 
-The codex path deliberately bypasses `unescape_string()`/`strip_emoji_and_shortcodes()`, so it has **no 8 KB cap** — measured: a 10,533-byte translation came back whole while the same length would have been cut to 8,191 in `normal` mode.
+The codex path deliberately bypasses `unescape_string()`/`strip_emoji_and_shortcodes()`. The old `normal` caps (16 KB unescape, 8 KB cleaned, 64 KB stream - all silent) were removed on 2026-11-06; measured since: 40,000-byte replies and 96,000-byte streams come back whole.
 
 There is **no cap on the accumulated HTTP request body** (`handle_translate()` reallocs per chunk); only the parsed `text` field is length-checked. The accumulation also uses `strlen()` per chunk, so it is O(n²) in body size and stops at the first NUL byte.
 
@@ -401,7 +436,7 @@ There is **no cap on the accumulated HTTP request body** (`handle_translate()` r
 Audited 2026-08-21; none of these can put another request's translation into a response (per-request isolation was verified with 1,200 concurrent mixed-text requests, keep-alive reuse, and concurrent live codex calls — zero mismatches).
 
 - Timestamp formatting uses `gmtime_r`/`localtime_r` to avoid shared calendar buffers under concurrent completions.
-- Debug traces are named `<timestamp>_<uuid>.txt`; two in-flight requests sharing a uuid+timestamp overwrite each other's trace file.
+- Debug traces are named `<timestamp>_<uuid>.txt`; a request sharing a uuid+timestamp gets `-1`..`-9` instead of overwriting (since 2026-11-06).
 - The cache key is `SHA-256("from|to|text")` and does **not** include model, prompt, or backend — instances with different `MODEL_TYPE`/prompt must not share a cache DB.
 - Translation output is not reproducible: codex is non-deterministic, and explicit-language prompt rules can change the result kind (see `PROMPT_PREFIX_translategemma.txt`'s ASCII echo rule). Source `auto` uses its separate policy and optional override, not that template. Both still use the existing backend-specific output processing.
 
