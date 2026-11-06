@@ -47,7 +47,10 @@ class Upstream:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(outer.reply)))
                 self.end_headers()
-                self.wfile.write(outer.reply)
+                try:
+                    self.wfile.write(outer.reply)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass   # the client stopped reading (size limit)
 
             def log_message(self, *a):
                 pass
@@ -153,6 +156,55 @@ class NormalOutput(unittest.TestCase):
                 self.assertEqual(translated_bytes(body), ref.strip(ref.unescape(raw)), raw)
         finally:
             srv.close()
+
+    def test_stream(self):
+        srv = Server(stream=True)
+        try:
+            def sse(*events):
+                return b"".join(b"data: " + e + b"\n\n" for e in events) + b"data: [DONE]\n\n"
+
+            def delta(t):
+                return b'{"choices":[{"delta":{"content":' + json.dumps(t, ensure_ascii=False).encode() + b"}}]}"
+            piece = "가나다 10:30 " * 200                       # 3,200 bytes per event
+            body = sse(*[delta(piece) for _ in range(30)])     # 96,000 bytes of content, past the old 64 KB stop
+            UP.reply = body
+            status, out, calls = srv.translate("long stream")
+            want = ref.strip(ref.unescape((piece * 30).encode()))
+            self.assertEqual((status, translated_bytes(out) == want, calls), (200, True, 1), out[:200])
+            UP.reply = (b"data: " + delta("A") + b"\r\n\r\ndata: " + delta("B") + b"\r\n\r\n")
+            status, out, _ = srv.translate("crlf")
+            self.assertEqual((status, translated_bytes(out)), (200, b"AB"))
+            before = len(srv.rows())
+            for name, reply in [("error event", sse(delta("A"), b'{"error":{"message":"quota"}}')),
+                                ("junk after JSON", b"data: " + delta("A") + b"BROKEN\n\n"),
+                                ("raw NUL between events", sse(delta("A")) + b"\x00" + sse(delta("B"))),
+                                ("content not a string", sse(b'{"choices":[{"delta":{"content":5}}]}'))]:
+                UP.reply = reply
+                status, out, calls = srv.translate(name)
+                self.assertEqual((status, calls), (502, 1), f"{name}: {out[:200]}")
+            self.assertEqual(len(srv.rows()), before, "nothing cached")
+            print(f"  stream: {len(want)}-byte translation whole, CRLF framing, 4 failure kinds -> 502 uncached")
+        finally:
+            srv.close()
+
+    def test_size_limit(self):
+        for stream in (False, True):
+            srv = Server(stream=stream)
+            try:
+                big = "y" * (4 * 1024 * 1024)
+                UP.reply = chat(big) if not stream else b"data: " + b'{"choices":[{"delta":{"content":"' + big.encode() + b'"}}]}\n\n'
+                status, out, calls = srv.translate("big")
+                self.assertEqual((status, calls, srv.rows()), (502, 1, []), out[:200])   # one call: not retried
+                self.assertIn(b"Upstream response too large", out)
+                limit = 4 * 1024 * 1024
+                fits = "z" * (limit - len(chat("")) - 16)
+                UP.reply = chat(fits) if not stream else b'data: {"choices":[{"delta":{"content":"' + fits.encode() + b'"}}]}'
+                self.assertLessEqual(len(UP.reply), limit)
+                status, out, calls = srv.translate("fits")
+                self.assertEqual((status, calls), (200, 1), out[:200])
+            finally:
+                srv.close()
+        print("  size limit: 4 MB + n -> 502 once, uncached; just under 4 MB -> 200 (both modes)")
 
 
 if __name__ == "__main__":

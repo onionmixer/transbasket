@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
+#include <stdint.h>
 #include "http_client.h"
 #include "mcp_client.h"
 #include "codex_exec.h"
@@ -29,12 +30,15 @@
 
 #define DEFAULT_TIMEOUT 60
 #define DEFAULT_MAX_RETRIES 3
-#define MAX_STREAM_BUFFER 65536       /* 64KB for streaming response accumulation */
+/* Upper bound on a normal-backend reply body, as for codex (CODEX_OUT_MAX). */
+#define MAX_UPSTREAM_RESPONSE (4 * 1024 * 1024)
 
 /* Structure for curl response data */
 typedef struct {
     char *data;
     size_t size;
+    bool too_large;      /* body passed MAX_UPSTREAM_RESPONSE: 502, not retried */
+    bool alloc_failed;   /* realloc failed in the write callback: not retried */
 } CurlResponse;
 
 /* Curl calls this during transfer and while waiting for network progress. */
@@ -46,12 +50,21 @@ static int translation_progress(void *context, curl_off_t total_down, curl_off_t
 
 /* Curl write callback */
 static size_t transbasket_curl_write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
-    size_t realsize = size * nmemb;
     CurlResponse *response = (CurlResponse *)userp;
+    if (nmemb && size > SIZE_MAX / nmemb) {
+        response->too_large = true;
+        return 0;
+    }
+    size_t realsize = size * nmemb;
+    if (realsize > MAX_UPSTREAM_RESPONSE || response->size > MAX_UPSTREAM_RESPONSE - realsize) {
+        response->too_large = true;
+        return 0;
+    }
 
     char *ptr = realloc(response->data, response->size + realsize + 1);
     if (!ptr) {
         LOG_DEBUG( "Error: Memory allocation failed in curl callback");
+        response->alloc_failed = true;
         return 0;
     }
 
@@ -154,184 +167,187 @@ static char *str_replace(const char *orig, const char *rep, const char *with) {
 }
 
 /* Parse SSE (Server-Sent Events) chunk and extract content from delta */
-/* NULL = nothing to append (no data, [DONE], unparsable or no content - all
- * ignored as before). *nul_out = true additionally means the payload parsed but
- * cJSON cut a string at a decoded NUL: the whole response must fail. */
-static char *parse_sse_chunk(const char *chunk, const char *request_uuid, bool *nul_out) {
-    /* request_uuid is only referenced by LOG_DEBUG, which compiles out in
-     * release builds - keep the parameter live for `make debug`. */
-    (void)request_uuid;
+/* Outcome of reading an SSE reply (PLAN_OPEN_ISSUES.md D/E). Anything but SSE_OK
+ * fails the whole reply (502, not cached, not retried): returning the events that
+ * did parse would cache a translation with a hole in it. */
+typedef enum {
+    SSE_OK = 0,
+    SSE_NUL_ESCAPE,    /* an escape cJSON decodes to U+0000 */
+    SSE_RAW_NUL,       /* a NUL byte anywhere in the body */
+    SSE_BAD_JSON,      /* event data that is not exactly one JSON value */
+    SSE_ERROR_EVENT,   /* "event: error", or a JSON "error" member */
+    SSE_BAD_CONTENT,   /* delta.content neither a string nor null */
+    SSE_NO_MEMORY
+} SseStatus;
 
-    if (!chunk) {
-        return NULL;
+static const char *sse_status_message(SseStatus st) {
+    switch (st) {
+    case SSE_NUL_ESCAPE: return "Upstream response contains U+0000";
+    case SSE_RAW_NUL: return "Upstream response contains a NUL byte";
+    case SSE_BAD_JSON: return "Malformed event in upstream stream";
+    case SSE_ERROR_EVENT: return "Upstream stream reported an error";
+    case SSE_BAD_CONTENT: return "Unexpected content type in upstream stream";
+    case SSE_NO_MEMORY: return "Memory allocation failed";
+    default: return "Upstream stream error";
     }
-
-    /* SSE format: "data: {json}\n\n" */
-    const char *data_prefix = "data: ";
-    const char *line_start = strstr(chunk, data_prefix);
-
-    if (!line_start) {
-        return NULL;
-    }
-
-    line_start += strlen(data_prefix);
-
-    /* Check for [DONE] marker */
-    if (strncmp(line_start, "[DONE]", 6) == 0) {
-        return NULL;
-    }
-
-    /* Find end of JSON (newline or end of string) */
-    const char *line_end = strchr(line_start, '\n');
-    size_t json_len;
-
-    if (line_end) {
-        json_len = line_end - line_start;
-    } else {
-        json_len = strlen(line_start);
-    }
-
-    if (json_len == 0) {
-        return NULL;
-    }
-
-    /* Extract JSON string */
-    char *json_str = malloc(json_len + 1);
-    if (!json_str) {
-        LOG_DEBUG("[%s] Failed to allocate memory for SSE JSON\n", request_uuid);
-        return NULL;
-    }
-
-    strncpy(json_str, line_start, json_len);
-    json_str[json_len] = '\0';
-
-    /* Parse JSON (checked over the consumed bytes, before json_str is freed) */
-    const char *parse_end = NULL;
-    cJSON *json = cJSON_ParseWithOpts(json_str, &parse_end, 0);
-    bool nul = json && json_decodes_nul((const unsigned char *)json_str, (size_t)(parse_end - json_str));
-    free(json_str);
-
-    if (!json) {
-        LOG_DEBUG("[%s] Failed to parse SSE JSON chunk\n", request_uuid);
-        return NULL;
-    }
-    if (nul) {
-        if (nul_out) *nul_out = true;
-        cJSON_Delete(json);
-        return NULL;
-    }
-
-    /* Extract content from choices[0].delta.content */
-    char *content = NULL;
-    cJSON *choices = cJSON_GetObjectItem(json, "choices");
-
-    if (cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
-        cJSON *first_choice = cJSON_GetArrayItem(choices, 0);
-        cJSON *delta = cJSON_GetObjectItem(first_choice, "delta");
-
-        if (delta) {
-            cJSON *content_obj = cJSON_GetObjectItem(delta, "content");
-
-            if (cJSON_IsString(content_obj) && content_obj->valuestring) {
-                content = strdup(content_obj->valuestring);
-            }
-        }
-    }
-
-    cJSON_Delete(json);
-    return content;
 }
 
-/* Handle streaming response - accumulate delta content */
-static char *handle_streaming_response(const char *response_data, const char *request_uuid, bool *nul_out) {
-    if (nul_out) *nul_out = false;
-    if (!response_data || !request_uuid) {
-        return NULL;
+/* One event's data. "No content" (role-only first chunk, [DONE], usage chunk with
+ * empty choices, finish chunk with an empty delta or content:null, any JSON without
+ * choices) adds nothing; a content string is appended to acc, whose capacity is the
+ * whole body + 1 - decoded JSON strings are never longer than their source bytes. */
+static SseStatus sse_event(const char *data, size_t len, bool error_event,
+                           char *acc, size_t *acc_len, size_t acc_cap) {
+    if (error_event) {
+        return SSE_ERROR_EVENT;
+    }
+    if (len == 6 && memcmp(data, "[DONE]", 6) == 0) {
+        return SSE_OK;
+    }
+    char *buf = malloc(len + 1);
+    if (!buf) {
+        return SSE_NO_MEMORY;
+    }
+    memcpy(buf, data, len);
+    buf[len] = '\0';
+
+    const char *end = NULL;
+    cJSON *json = cJSON_ParseWithOpts(buf, &end, 0);
+    if (!json) {
+        free(buf);
+        return SSE_BAD_JSON;
+    }
+    for (const char *q = end; *q; q++) {
+        if (*q != ' ' && *q != '\t' && *q != '\r' && *q != '\n') {
+            cJSON_Delete(json);
+            free(buf);
+            return SSE_BAD_JSON;   /* bytes after the JSON value */
+        }
+    }
+    bool nul = json_decodes_nul((const unsigned char *)buf, (size_t)(end - buf));
+    free(buf);
+    if (nul) {
+        cJSON_Delete(json);
+        return SSE_NUL_ESCAPE;
     }
 
-    char *accumulated_text = calloc(MAX_STREAM_BUFFER, 1);
-    if (!accumulated_text) {
-        LOG_DEBUG("[%s] Failed to allocate buffer for streaming response\n", request_uuid);
-        return NULL;
-    }
-
-    size_t accumulated_len = 0;
-    const char *chunk_start = response_data;
-
-    /* Process each SSE chunk */
-    while (*chunk_start) {
-        /* Find the next "data: " prefix */
-        const char *next_chunk = strstr(chunk_start, "data: ");
-
-        if (!next_chunk) {
-            break;
-        }
-
-        /* Find the end of this chunk (double newline or end of string) */
-        const char *chunk_end = strstr(next_chunk, "\n\n");
-        size_t chunk_len;
-
-        if (chunk_end) {
-            chunk_len = chunk_end - next_chunk + 2;
-        } else {
-            chunk_len = strlen(next_chunk);
-        }
-
-        /* Create null-terminated chunk string */
-        char *chunk_str = malloc(chunk_len + 1);
-        if (!chunk_str) {
-            LOG_DEBUG("[%s] Failed to allocate memory for chunk\n", request_uuid);
-            continue;
-        }
-
-        strncpy(chunk_str, next_chunk, chunk_len);
-        chunk_str[chunk_len] = '\0';
-
-        /* Parse this chunk */
-        bool chunk_nul = false;
-        char *content = parse_sse_chunk(chunk_str, request_uuid, &chunk_nul);
-        free(chunk_str);
-
-        if (chunk_nul) {
-            /* Skipping only this chunk would return a translation with a hole. */
-            free(content);
-            free(accumulated_text);
-            if (nul_out) *nul_out = true;
-            return NULL;
-        }
-
-        if (content) {
-            size_t content_len = strlen(content);
-
-            /* Check buffer overflow */
-            if (accumulated_len + content_len >= MAX_STREAM_BUFFER - 1) {
-                LOG_DEBUG("[%s] Stream buffer overflow, truncating\n", request_uuid);
-                free(content);
-                break;
+    SseStatus st = SSE_OK;
+    cJSON *err = cJSON_GetObjectItem(json, "error");
+    if (err && !cJSON_IsNull(err)) {
+        st = SSE_ERROR_EVENT;
+    } else {
+        cJSON *choices = cJSON_GetObjectItem(json, "choices");
+        cJSON *first = cJSON_IsArray(choices) ? cJSON_GetArrayItem(choices, 0) : NULL;
+        cJSON *delta = first ? cJSON_GetObjectItem(first, "delta") : NULL;
+        cJSON *content = delta ? cJSON_GetObjectItem(delta, "content") : NULL;
+        if (content && !cJSON_IsNull(content)) {
+            if (!cJSON_IsString(content) || !content->valuestring) {
+                st = SSE_BAD_CONTENT;
+            } else {
+                size_t n = strlen(content->valuestring);
+                if (n >= acc_cap - *acc_len) {
+                    st = SSE_NO_MEMORY;   /* cannot happen: see the capacity note above */
+                } else {
+                    memcpy(acc + *acc_len, content->valuestring, n);
+                    *acc_len += n;
+                    acc[*acc_len] = '\0';
+                }
             }
-
-            /* Append content */
-            memcpy(accumulated_text + accumulated_len, content, content_len);
-            accumulated_len += content_len;
-            accumulated_text[accumulated_len] = '\0';
-
-            free(content);
-        }
-
-        /* Move to next chunk */
-        if (chunk_end) {
-            chunk_start = chunk_end + 2;
-        } else {
-            break;
         }
     }
+    cJSON_Delete(json);
+    return st;
+}
 
-    if (accumulated_len == 0) {
-        free(accumulated_text);
+/* Handle a streaming response: an SSE body of `size` bytes (not a C string - a NUL
+ * byte must not end the scan early). Lines end in LF, CRLF or CR; a blank line ends
+ * an event; "data:" lines (one optional space after the colon) are joined with LF;
+ * ":" comment lines and other fields are ignored; a last event without a blank line
+ * is still read. Returns the concatenated content, or NULL with *status set. */
+static char *handle_streaming_response(const char *data, size_t size, const char *request_uuid,
+                                       SseStatus *status) {
+    (void)request_uuid;
+    *status = SSE_OK;
+    if (!data) {
         return NULL;
     }
+    if (memchr(data, 0, size)) {
+        *status = SSE_RAW_NUL;
+        return NULL;
+    }
+    char *acc = malloc(size + 1);
+    char *ev = malloc(size + 1);
+    if (!acc || !ev) {
+        free(acc);
+        free(ev);
+        *status = SSE_NO_MEMORY;
+        return NULL;
+    }
+    acc[0] = '\0';
+    size_t acc_len = 0, ev_len = 0;
+    bool ev_data = false, ev_error = false;
+    size_t i = 0;
 
-    return accumulated_text;
+    for (;;) {
+        size_t j = i;
+        while (j < size && data[j] != '\n' && data[j] != '\r') {
+            j++;
+        }
+        bool last = j >= size;
+        const char *line = data + i;
+        size_t line_len = j - i;
+
+        if (line_len == 0 || last) {
+            if (line_len > 0) {
+                /* final line without a terminator: treat as a line, then dispatch */
+                if (line_len >= 5 && memcmp(line, "data:", 5) == 0) {
+                    size_t off = (line_len > 5 && line[5] == ' ') ? 6 : 5;
+                    if (ev_data) ev[ev_len++] = '\n';
+                    memcpy(ev + ev_len, line + off, line_len - off);
+                    ev_len += line_len - off;
+                    ev_data = true;
+                } else if (line_len >= 6 && memcmp(line, "event:", 6) == 0) {
+                    size_t off = (line_len > 6 && line[6] == ' ') ? 7 : 6;
+                    ev_error = line_len - off == 5 && memcmp(line + off, "error", 5) == 0;
+                }
+            }
+            /* an event whose data is empty is not dispatched (SSE; also what the old code did) */
+            if ((ev_data && ev_len > 0) || ev_error) {
+                SseStatus st = sse_event(ev, ev_len, ev_error, acc, &acc_len, size + 1);
+                if (st != SSE_OK) {
+                    *status = st;
+                    free(acc);
+                    free(ev);
+                    return NULL;
+                }
+            }
+            ev_len = 0;
+            ev_data = ev_error = false;
+        } else if (line[0] == ':') {
+            /* comment */
+        } else if (line_len >= 5 && memcmp(line, "data:", 5) == 0) {
+            size_t off = (line_len > 5 && line[5] == ' ') ? 6 : 5;
+            if (ev_data) ev[ev_len++] = '\n';
+            memcpy(ev + ev_len, line + off, line_len - off);
+            ev_len += line_len - off;
+            ev_data = true;
+        } else if (line_len >= 6 && memcmp(line, "event:", 6) == 0) {
+            size_t off = (line_len > 6 && line[6] == ' ') ? 7 : 6;
+            ev_error = line_len - off == 5 && memcmp(line + off, "error", 5) == 0;
+        }
+
+        if (last) {
+            break;
+        }
+        i = (data[j] == '\r' && j + 1 < size && data[j + 1] == '\n') ? j + 2 : j + 1;
+    }
+    free(ev);
+
+    if (acc_len == 0) {
+        free(acc);
+        return NULL;
+    }
+    return acc;
 }
 
 /* Handle non-streaming response - extract from message.content */
@@ -876,6 +892,18 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
                    request_uuid, attempt, translator->max_retries, curl_easy_strerror(res));
             free(response.data);
 
+            if (response.too_large || response.alloc_failed) {
+                /* our own limit or memory, not the network: retrying cannot help */
+                LOG_INFO("[%s] %s\n", request_uuid, response.too_large
+                         ? "upstream response larger than 4 MB" : "memory allocation failed reading the upstream response");
+                if (error) {
+                    error->message = strdup(response.too_large ? "Upstream response too large" : "Memory allocation failed");
+                    error->retryable = false;
+                    error->status_code = 502;
+                }
+                break;
+            }
+
             if (attempt < translator->max_retries) {
                 int backoff = (int)pow(2, attempt);
                 LOG_DEBUG( "[%s] Retrying in %d seconds...\n", request_uuid, backoff);
@@ -927,16 +955,29 @@ static char *translate_via_openai(OpenAITranslator *translator, const char *from
         /* Parse response based on streaming mode */
         char *raw_translation = NULL;
         bool upstream_nul = false;
+        SseStatus sse = SSE_OK;
 
         if (translator->config->stream) {
             /* Handle streaming response */
-            raw_translation = handle_streaming_response(response.data, request_uuid, &upstream_nul);
+            raw_translation = handle_streaming_response(response.data, response.size, request_uuid, &sse);
+            upstream_nul = sse == SSE_NUL_ESCAPE;
         } else {
             /* Handle non-streaming response */
             raw_translation = handle_non_streaming_response(response.data, request_uuid, &upstream_nul);
         }
 
         free(response.data);
+
+        if (sse != SSE_OK && sse != SSE_NUL_ESCAPE) {
+            free(raw_translation);
+            LOG_INFO("[%s] %s\n", request_uuid, sse_status_message(sse));
+            if (error) {
+                error->message = strdup(sse_status_message(sse));
+                error->retryable = false;
+                error->status_code = 502;
+            }
+            break;
+        }
 
         if (upstream_nul) {
             /* cJSON would have cut the reply at a decoded NUL; never cache that. */

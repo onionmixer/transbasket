@@ -148,6 +148,11 @@ test-strip: directories
 	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_strip tests/test_strip.c src/utils.c -luuid
 	python3 -I tests/test_strip.py $(OBJ_DIR)/test_strip --mutants
 
+# handle_streaming_response() vs tests/sse_ref.py, allocation failure at every malloc, mutants.
+test-sse: directories
+	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_sse tests/test_sse.c $(filter-out $(SRC_DIR)/http_client.c $(SRC_DIR)/main.c, $(SERVER_SRCS)) $(LIBS) $(LDFLAGS)
+	python3 -I tests/test_sse.py $(OBJ_DIR)/test_sse --mutants
+
 # normal backend reply handling through the real server with a fake upstream.
 test-normal-output: all
 	python3 -I tests/test_normal_output.py $(abspath $(TARGET))
@@ -189,4 +194,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse

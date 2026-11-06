@@ -193,9 +193,11 @@ class NulGuard(unittest.TestCase):
         UP.reply = sse(delta(b'"A"'), delta(bs('"~u0000"')), delta(b'"B"'))
         status, _, rows, calls = self.run_case("normal", self.body(), stream=True)
         self.assertEqual((status, rows, len(calls)), (502, [], 1), "good -> NUL -> good")
+        # PLAN_OPEN_ISSUES.md D/E: a malformed event used to be skipped (200 "AB", cached with a hole);
+        # it now fails the whole reply like the NUL case.
         UP.reply = sse(delta(b'"A"'), b'{"choices":[{"delta":{"content":"broken"', delta(b'"B"'))
-        status, out, rows, _ = self.run_case("normal", self.body(), stream=True)
-        self.assertEqual((status, out.get("translatedText")), (200, "AB"), "good -> malformed -> good")
+        status, out, rows, calls = self.run_case("normal", self.body(), stream=True)
+        self.assertEqual((status, rows, len(calls)), (502, [], 1), "good -> malformed -> good")
         UP.reply = b": diagnostic " + bs("~u0000") + b"\n\n" + sse(delta(b'"OK"'))
         status, out, rows, _ = self.run_case("normal", self.body(), stream=True)
         self.assertEqual((status, out.get("translatedText")), (200, "OK"), "SSE comment")
