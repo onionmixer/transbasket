@@ -1,7 +1,7 @@
 /* Harness for tests/test_listen_parse.py. One request per stdin line, hex encoded:
  *   A <port> <hex>            -> "ok <mode> <family> <address hex> <port>" | "err <why>"
  *   S <hex>[,<hex>...]        -> "1" | "0"   (the chunks are fed one after another)
- *   P <hex>                   -> "<rc> <key> <scan>" with the real parse_config_line()
+ *   P <hex>                   -> "<rc> <key> <scan> v<value hex>|-" with the real parse_config_line()
  *                                (only when built with -DWITH_CONFIG_LOADER)
  */
 #include <arpa/inet.h>
@@ -91,7 +91,14 @@ int main(void) {
             listen_scan_feed(&scan, buf, k);
             char key[512] = "", value[512] = "";
             int rc = parse_config_line(buf, key, sizeof key, value, sizeof value);
-            printf("%d %s %d\n", rc, rc == 1 ? key : "-", listen_scan_matched(&scan) ? 1 : 0);
+            printf("%d %s %d ", rc, (rc == 1 || (rc == -3 && key[0])) ? key : "-", listen_scan_matched(&scan) ? 1 : 0);
+            if (rc == 1) {
+                printf("v");   /* "v" + hex, so an empty value is still a field */
+                hex_out((const unsigned char *)value, strlen(value));
+            } else {
+                printf("-");
+            }
+            printf("\n");
 #endif
         } else {
             fprintf(stderr, "bad request\n");

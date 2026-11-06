@@ -87,7 +87,7 @@ def config_loader_invariant(harness):
     assert len(got) == len(lines)
     violations, table = [], {}
     for ln, g in zip(lines, got):
-        rc, key, scanned = g.split()
+        rc, key, scanned = g.split()[:3]
         if rc == "1" and key == "LISTEN" and scanned != "1":
             violations.append(ln)
         if (scanned == "1") != ref.scan(ln):

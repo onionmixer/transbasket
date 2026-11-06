@@ -44,7 +44,10 @@ static char *trim_whitespace(char *str) {
 
 /* Parse a single configuration line. Returns 1 for KEY=value, 0 for an empty
  * line or comment, -1 if it does not parse, -2 if the key or the value does not
- * fit its buffer (it used to be copied anyway: a stack buffer overflow). */
+ * fit its buffer (it used to be copied anyway: a stack buffer overflow), -3 if
+ * the value starts with a quote but does not end with the same quote - an inline
+ * comment or a stray character after the closing quote, which used to become part
+ * of the value (PLAN_OPEN_ISSUES.md H). For -3 the key is filled in when it fits. */
 static int parse_config_line(const char *line, char *key, size_t key_size, char *value, size_t value_size) {
     if (!line || !key || !value) {
         return -1;
@@ -74,6 +77,20 @@ static int parse_config_line(const char *line, char *key, size_t key_size, char 
 
     size_t key_len = (size_t)(matches[1].rm_eo - matches[1].rm_so);
     size_t value_len = (size_t)(matches[3].rm_eo - matches[3].rm_so);
+
+    /* Judged on the right-hand side as written, before any quote is removed. */
+    const char *rhs = trimmed + matches[1].rm_eo + 1;
+    size_t rhs_len = strlen(rhs);
+    if (rhs_len > 0 && (rhs[0] == '"' || rhs[0] == '\'') && rhs[rhs_len - 1] != rhs[0]) {
+        if (key_len < key_size) {
+            memcpy(key, trimmed + matches[1].rm_so, key_len);
+            key[key_len] = '\0';
+        } else {
+            key[0] = '\0';
+        }
+        return -3;
+    }
+
     if (key_len >= key_size || value_len >= value_size) {
         return -2;
     }
@@ -457,6 +474,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     /* A line that tries to set LISTEN but is not read as LISTEN=<value> must not leave
      * the 0.0.0.0 default in place (PLAN_LISTEN_ADDRESS.md 3.3): it stops startup. */
     bool listen_line_bad = false;
+    bool quote_line_bad = false;   /* PLAN_OPEN_ISSUES.md H / Q8 */
 
     ListenScan listen_scan;
     bool too_long, has_nul;
@@ -475,6 +493,13 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             continue;
         }
         int parse_result = parse_config_line(line, key, sizeof(key), value, sizeof(value));
+
+        if (parse_result == -3) {
+            LOG_INFO("Error: line %d: the value of %s starts with a quote but does not end with the same quote "
+                     "(comments must be on their own line)", line_num, key[0] ? key : "(overlong key)");
+            quote_line_bad = true;
+            continue;
+        }
 
         if (listen_scan_matched(&listen_scan) && !(parse_result == 1 && strcmp(key, "LISTEN") == 0)) {
             if (parse_result == -2) {
@@ -709,8 +734,10 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
 
     fclose(fp);
 
-    if (listen_line_bad) {
-        LOG_INFO("Error: refusing to start with the default LISTEN address while a LISTEN line is unreadable");
+    if (listen_line_bad || quote_line_bad) {
+        if (listen_line_bad) {
+            LOG_INFO("Error: refusing to start with the default LISTEN address while a LISTEN line is unreadable");
+        }
         free(resolved_config_path);
         free_config(config);
         return NULL;
