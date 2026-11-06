@@ -375,7 +375,7 @@ curl --max-time 30 \
    See README.md for output limits and guarantees.
 
 8. **Offline Verification**:
-   make test-auto uses temporary caches and local fake HTTP/exec/MCP endpoints.
+   make test-auto uses temporary caches and local fake HTTP/exec endpoints.
    It validates protocol and persistence, not actual model translation quality.
 
 9. **Cache Upgrade**:

@@ -7,7 +7,7 @@ Production-ready C implementation of the Transbasket translation server for opti
 - High-performance HTTP server using libmicrohttpd
 - Pluggable translation backend via `MODEL_TYPE`:
   - **normal**: OpenAI-compatible API client using libcurl (default)
-  - **codex**: drives the installed `codex` CLI (`codex exec` per request; legacy `codex mcp-server` optional)
+  - **codex**: drives the installed `codex` CLI (`codex exec` per request)
 - JSON handling with cJSON
 - Thread-per-connection model for concurrent requests
 - Translation cache (text / SQLite backends), keyed per language pair
@@ -62,12 +62,13 @@ brew install \
 The `codex` translation backend shells out to the installed Codex CLI (`codex exec`,
 one process per request). It is **not** needed for the default `normal` backend.
 
-> **codex-cli 0.154.0 removed `codex mcp-server`.** With a current CLI that subcommand
-> is parsed as an interactive prompt and exits with `Error: stdin is not a terminal`, so
-> the old MCP route answered every request with `502 codex MCP initialize failed`.
-> `CODEX_INTERFACE="exec"` (the default) uses the supported `codex exec` surface instead;
-> `CODEX_INTERFACE="mcp"` remains only for hosts pinned to an older CLI. The startup log
-> prints the detected version and warns if the chosen interface is missing.
+> **The legacy `CODEX_INTERFACE="mcp"` route was removed on 2026-11-06.** It drove
+> `codex mcp-server`, which codex-cli 0.154.0 dropped (a current CLI answered every request
+> with `502 codex MCP initialize failed`). `codex exec` is the only interface now. A config
+> that still says `CODEX_INTERFACE="mcp"` **does not start** in codex mode (`Error: CODEX_INTERFACE
+> "mcp" was removed ...`); in normal mode the line is ignored with a warning. Delete the line or
+> set `"exec"`. The startup log prints the detected codex version and warns if `codex exec` or a
+> flag it needs is missing.
 
 ```bash
 # Verify codex is installed and on PATH
@@ -201,7 +202,7 @@ MODEL_TYPE="normal"   # normal (default) | codex
 
 ```
 MODEL_TYPE="codex"
-#CODEX_INTERFACE="exec"         # exec (default) | mcp (legacy, codex-cli < 0.154.0 only)
+#CODEX_INTERFACE="exec"         # the only value; "mcp" was removed and stops startup
 #CODEX_BIN="codex"              # codex executable (PATH-searched)
 #CODEX_MODEL="gpt-5.2"          # optional model override (unset = codex default)
 #CODEX_TIMEOUT="100"            # seconds (must be < MHD 120s)
@@ -242,7 +243,7 @@ repeated source text is re-worded on every call, which resets the cache entry's 
 to 1 — with a higher threshold the cache never reaches it and every request re-invokes
 codex. The ready-made `transbasket_codex.conf` already sets this.
 
-codex mode requires the running user to have completed `codex login` and to have a writable `CODEX_HOME`. The endpoint translates untrusted text, so `sandbox` is forced to `read-only` and `approval_policy` to `never` unless `CODEX_ALLOW_UNSAFE=true`; `CODEX_APPROVAL_POLICY` and `CODEX_REASONING_EFFORT` must match `[A-Za-z0-9._-]{1,64}` because they are passed as TOML `-c` overrides. See `PLAN_MODEL_TYPE_CODEX_MCP.md` for design and the operator/systemd checklist.
+codex mode requires the running user to have completed `codex login` and to have a writable `CODEX_HOME`. The endpoint translates untrusted text, so `sandbox` is forced to `read-only` and `approval_policy` to `never` unless `CODEX_ALLOW_UNSAFE=true`; `CODEX_APPROVAL_POLICY` and `CODEX_REASONING_EFFORT` must match `[A-Za-z0-9._-]{1,64}` because they are passed as TOML `-c` overrides. See `PLAN_MODEL_TYPE_CODEX_MCP.md` for the original design (its MCP route has since been removed) and the operator/systemd checklist.
 
 ### 2. PROMPT_PREFIX.txt
 
@@ -581,7 +582,7 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
 | 요청 `text` 최소 길이 | 1 바이트 | `422` |
 | HTTP 요청 본문 전체 크기 | **상한 없음** | 서버가 메모리에 그대로 누적. 신뢰할 수 없는 클라이언트에 노출할 때는 앞단(리버스 프록시)에서 제한 필요 |
 | upstream 응답 본문 — `normal` (비스트리밍·스트리밍) | **4 MB** (`MAX_UPSTREAM_RESPONSE`) | 절단이 아니라 오류(`502`), 재시도·캐시 없음 |
-| 응답 길이 — `codex` | 사실상 제한 없음 | 결과가 **4 MB** (`exec`: `CODEX_OUT_MAX`, `mcp`: `MCP_RBUF_MAX`)를 넘으면 절단이 아니라 오류(`502`) |
+| 응답 길이 — `codex` | 사실상 제한 없음 | 결과가 **4 MB** (`CODEX_OUT_MAX`)를 넘으면 절단이 아니라 오류(`502`) |
 
 > **2026-11-06 이전**: `normal` 백엔드는 번역문을 **8,191 바이트에서 조용히** 잘라 200 으로 응답·캐시했고(문자 중간에서
 > 끊기기도 함), 스트리밍은 65,535 바이트에서 멈췄습니다. 지금은 후처리 버퍼를 입력 길이로 잡아 잘리지 않습니다
@@ -597,7 +598,6 @@ cJSON 1.7.15 는 `\u0000` 과, 뒤 4바이트가 16진수가 아닌 모든 `\u` 
 |------|------|
 | 요청 본문 (값·키·`uuid`·언어 필드 모두) | `422 VALIDATION_ERROR`, upstream·codex 호출 없음 |
 | `normal` 응답 (비스트리밍 본문, 각 SSE `data:` 페이로드) | `502`, 재시도·캐시 없음. 한 청크라도 걸리면 응답 전체가 실패합니다 |
-| codex MCP `tools/call` 응답 | `502`, 캐시 없음 |
 | codex exec 출력(plain)에 원시 NUL 바이트 | `502`, 캐시 없음 |
 | codex structured 출력 | 기존대로 `strict_json_validate()` 가 거부 (`502`) |
 
@@ -632,7 +632,7 @@ SSE 주석, 비스트리밍 본문의 루트 값 뒤 잔여 바이트. (SSE 의 
 #### 로그
 
 - 요청 로그는 원문 대신 `text_bytes=<바이트 수>` 만 남깁니다.
-- 클라이언트·upstream·codex 가 보낸 문자열 (거부된 필드 값, codex/MCP 오류 문구, codex 버전·MCP 서버 이름, libmicrohttpd 메시지) 은
+- 클라이언트·upstream·codex 가 보낸 문자열 (거부된 필드 값, codex 오류 문구, codex 버전·config.toml 의 MCP 서버 이름, libmicrohttpd 메시지) 은
   제어 문자를 `\n`·`\xNN` 으로 바꿔 기록하므로 로그에 가짜 줄을 만들 수 없습니다. JSON 파싱 오류는 바이트 위치만 기록합니다.
 - `DEBUG=yes` trace (`./trace/`): API 키는 `<redacted>`, 파일 0600 (기존 이름은 덮어쓰지 않고 `-1`… 을 붙임, 심볼릭 링크를 따라가지 않음),
   새로 만드는 디렉터리 0700, 그룹·기타가 접근 가능한 기존 디렉터리는 경고. trace 에는 여전히 **원문·번역문 전체**가 들어갑니다.
@@ -698,13 +698,13 @@ transbasket/
 ├── PLAN_SOURCE_LANGUAGE_AUTO.md # auto design, implementation and validation status
 ├── include/                    # Header files
 │   ├── utils.h  config_loader.h  json_handler.h
-│   ├── http_client.h  http_server.h  codex_exec.h  mcp_client.h
+│   ├── http_client.h  http_server.h  codex_exec.h
 │   ├── inflight_translation.h  translation_control.h
 │   ├── language_table.h
 │   └── trans_cache.h  cache_backend_text.h  cache_backend_sqlite.h
 ├── src/                        # Source files
 │   ├── main.c  utils.c  config_loader.c  json_handler.c
-│   ├── http_client.c  http_server.c  codex_exec.c  mcp_client.c
+│   ├── http_client.c  http_server.c  codex_exec.c
 │   ├── inflight_translation.c   # Shared running translations and waiter lifetime
 │   ├── language_table.c
 │   ├── trans_cache.c  cache_backend_text.c  cache_backend_sqlite.c
@@ -712,7 +712,7 @@ transbasket/
 ├── tests/
 │   ├── test_client.py          # Manual client (uses the configured real server)
 │   ├── test_source_auto.py     # Offline integration tests (make test-auto)
-│   ├── fake_codex_auto.py      # exec/MCP fixture; no external model calls
+│   ├── fake_codex_auto.py      # codex exec fixture; no external model calls
 │   ├── test_request_coalescing.py # Concurrent HTTP/codex integration tests
 │   └── test_inflight_translation.c # Lifecycle, limits, failure and race checks
 ├── obj/                        # Object files (generated)
@@ -757,17 +757,10 @@ transbasket/
 - Error handling and status code mapping
 
 ### codex_exec.c
-- Default codex interface: one `codex exec` child per request, prompt on stdin
+- The codex interface: one `codex exec` child per request, prompt on stdin
 - Startup probe: `codex --version`, `codex exec --help` (flag detection), `codex mcp list --json`
 - Spawns codex in its own process group, kills the whole group on timeout
 - Collects the final message from `--output-last-message` (stdout fallback), bounded at 4 MB
-
-### mcp_client.c
-- Legacy (`CODEX_INTERFACE="mcp"`): MCP stdio JSON-RPC 2.0 client for `codex mcp-server`,
-  which only exists in codex-cli < 0.154.0
-- Spawns codex in its own process group (`posix_spawnp`), reaps the whole tree
-- initialize handshake + `tools/call` (name="codex"), id-matched responses
-- Drains stdout/stderr concurrently (deadlock-safe), EINTR-tolerant, bounded buffers
 
 ### http_server.c
 - HTTP server with libmicrohttpd

@@ -1,9 +1,26 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
+> 최신 기록은 바로 아래의 **레거시 MCP 제거 검증 2026-11-06** 이고, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## 레거시 MCP 제거 검증 2026-11-06
+
+설계·결정 (D1~D8)·codex 판정은 [PLAN_REMOVE_LEGACY_MCP.md](PLAN_REMOVE_LEGACY_MCP.md) 에 있다. 수정 전 대조는 `79a109b` 빌드.
+`src/`·`include/` 는 +41 / −769줄 (`mcp_client.[ch]` 674줄 삭제 포함). exec 경로는 `if` 를 벗긴 것 외에 바뀌지 않았다.
+
+| 대상 | 명령 | 결과 |
+|---|---|---|
+| `CODEX_INTERFACE` 처리 | `make test-codex-interface` | 13행: codex 모드 `mcp`/`MCP`/키 순서 반대/`exec` 뒤 `mcp` → 종료 코드 1·포트 닫힘·이유, `mcp` 뒤 `exec`·잘못된 값 → 기동 (마지막 줄 우선), normal 모드 `mcp` → 경고 1회 후 기동, 기동하는 행은 해당 백엔드 초기화 줄까지 확인. 수정 전 바이너리는 6행 실패, 매 줄 덮어쓰지 않는 돌연변이 (`|=`) 는 3행 실패. ASan/UBSan 서버로도 13행 통과 |
+| `-d` | `make test-daemon` | 실패 기동 목록에 `CODEX_INTERFACE="mcp"` 추가: 실행한 쪽 종료 코드 1 + 이유 |
+| 기존 회귀 | `make test-*` 21종 (`test-inflight-unit` 은 `test-coalescing` 이 돌림), `test_config_limits.py` | 모두 통과, 빌드 경고 0. MCP 하위 케이스는 코드와 함께 삭제 (같은 공유 경로는 exec 하위 케이스가 덮음) |
+| 프롬프트 회귀 | `tests/test_prompt_regression.py <79a109b> <신규>` | 24건 바이트 동일 (exec·normal × 템플릿 2 × 모드 2 × 요청 3; MCP 12건은 대상에서 빠짐) |
+| 메모리 | ASan/UBSan 서버 (`test_codex_interface`, `test_nul_guard`, `test_log_safety`), valgrind | 보고 0. valgrind: `mcp` 기동 거부 경로, exec 번역 4건 (kor 3·auto 1) 모두 오류 0 |
+| 배포 설정 3개 | 사본을 네임스페이스 안에서 수정 전·후 바이너리로 기동 | 모두 기동, 경고·오류 0, 수정 전과 같은 줄 |
+| 실제 codex | pge4 설정 사본, `-d -l`, 호스트 codex-cli **0.167.0** | 실행한 쪽 종료 코드 0, `kor→eng` 200 3.62 s, `auto→eng` 200 10.29 s (structured), 로그에 원문 0줄, 임시 디렉터리 0, SIGTERM 정상 종료 |
+
+codex 교차검토: 계획 3건 (모두 채택), 구현 diff 2건 (시험 보강 2건 채택, 제품 코드 지적 0).
 
 ## 열린 이슈 수정 검증 2026-11-06
 

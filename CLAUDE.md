@@ -72,12 +72,11 @@ The C implementation follows a clear separation of concerns across these core mo
 4. **json_handler.c**: JSON request/response handling using cJSON
 5. **http_client.c**: Translation dispatch — `normal` (OpenAI API via libcurl, retry/backoff) and `codex` backends
 6. **http_server.c**: HTTP server using libmicrohttpd with thread-per-connection model
-7. **codex_exec.c**: `codex exec` driver — the codex backend's default interface, plus the startup CLI probe
-8. **mcp_client.c**: Minimal MCP stdio JSON-RPC 2.0 client for the legacy `codex mcp-server` interface (codex-cli < 0.154.0)
-9. **source_hint.c**: script classifier for the from=auto base language (see "Source hint" below)
-10. **strict_json.c**: strict validator for codex structured output, run before cJSON
-11. **listen_address.c**: `LISTEN` parser and LISTEN line recognizer (see "LISTEN address" below)
-12. **daemon.c**: `-d` with a start report to the launcher (see "Open-issue fixes" below)
+7. **codex_exec.c**: `codex exec` driver — the codex backend's only interface, plus the startup CLI probe
+8. **source_hint.c**: script classifier for the from=auto base language (see "Source hint" below)
+9. **strict_json.c**: strict validator for codex structured output, run before cJSON
+10. **listen_address.c**: `LISTEN` parser and LISTEN line recognizer (see "LISTEN address" below)
+11. **daemon.c**: `-d` with a start report to the launcher (see "Open-issue fixes" below)
 
 (Cache and language-table concerns live in `trans_cache.c`, `cache_backend_*.c`, and `language_table.c`.)
 
@@ -116,7 +115,7 @@ Followers block on a monotonic condition variable without starting their own eng
 4. Cache miss or below threshold → join/register a shared translation group, rechecking cache before registration
 5. Owner → `openai_translate()` dispatches on `MODEL_TYPE` with a shared deadline/cancellation context:
    - **normal**: builds prompt, calls OpenAI API via libcurl (retry: max 3, exponential backoff), unescapes + strips emoji/shortcodes
-   - **codex**: builds a delimiter-isolated prompt, acquires a concurrency slot, then either runs `codex exec` with the prompt on stdin and reads `--output-last-message` (default), or spawns `codex mcp-server` and runs initialize + `tools/call` (legacy); trim + whole-fence unwrap only
+   - **codex**: builds a delimiter-isolated prompt, acquires a concurrency slot, then runs `codex exec` with the prompt on stdin and reads `--output-last-message`; trim + whole-fence unwrap only
 6. Owner → updates cache once, publishes result/error, broadcasts and detaches group
 7. Each participant → creates its own response preserving its UUID/timestamp, then releases its reference
 8. Last reference → frees the detached group and result; connection thread returns
@@ -137,11 +136,11 @@ Same-key matching uses normalized from/to and cleaned text, excluding UUID/times
 Configuration: `TRANSLATION_TOTAL_TIMEOUT=110` (1..110 seconds), `INFLIGHT_MAX_KEYS` defaults to
 `MAX_WORKERS`, `INFLIGHT_MAX_WAITERS=256`, `INFLIGHT_MAX_WAITERS_PER_KEY=64`. Explicit limits must
 be positive integers. Capacity rejection is 503 with Retry-After; cache hits bypass admission.
-The total budget spans retries, backoff, slots, MCP initialization and calls. Normal total timeout is 503;
+The total budget spans retries, backoff, slots and calls. Normal total timeout is 503;
 codex total timeout is 504, with shutdown mapped to 503. Non-streaming missing/empty normal replies now
 fail with 502 instead of being cached as an empty string or the old `nothing contents` sentinel.
 
-Run `make test-coalescing` for unit and local HTTP/exec/MCP checks. Sanitizer examples:
+Run `make test-coalescing` for unit and local HTTP/exec checks. Sanitizer examples:
 
 ```bash
 make test-inflight-unit INFLIGHT_TEST_BIN=obj/test_inflight_asan TEST_SANITIZERS='-fsanitize=address,undefined -fno-omit-frame-pointer -g'
@@ -181,28 +180,30 @@ Two configuration files:
 `MODEL_TYPE` selects how translations are produced (see `config_loader.c`, `http_client.c:openai_translate()` dispatch):
 
 - **`normal`** (default): existing OpenAI-compatible HTTP API path (`/v1/chat/completions` via libcurl). Uses `OPENAI_BASE_URL/MODEL/API_KEY`. Behavior unchanged.
-- **`codex`**: drives the installed `codex` CLI. `OPENAI_*` are unused; `CODEX_*` settings apply. `CODEX_INTERFACE` picks how:
-  - **`exec`** (default, `codex_exec.c`): `codex exec --skip-git-repo-check --color never [--ephemeral] [--ignore-user-config] -s … -c approval_policy="…" [-c model_reasoning_effort="…"] [-m …] -C <tmp> -o <tmp>/last-message.txt -`
-  - **`mcp`** (legacy, `mcp_client.c`): `codex mcp-server` over stdio JSON-RPC 2.0, result from `structuredContent.content`
+- **`codex`**: drives the installed `codex` CLI. `OPENAI_*` are unused; `CODEX_*` settings apply. One run per request (`codex_exec.c`):
+  `codex exec --skip-git-repo-check --color never [--ephemeral] [--ignore-user-config] -s … -c approval_policy="…" [-c model_reasoning_effort="…"] [-m …] -C <tmp> -o <tmp>/last-message.txt -`
 
-⚠ **codex-cli 0.154.0 removed `codex mcp-server`** (0 occurrences in the 0.166.0 binary). A current CLI parses it as
-an interactive prompt and exits with `Error: stdin is not a terminal`; with `CODEX_INTERFACE="mcp"` every request
-then fails with `502 codex MCP initialize failed`. Keep `exec` unless the host is pinned to an older CLI. The codex
-CLI surface keeps moving, which is why `openai_translator_init()` runs `codex_cli_probe()` at startup (version,
-`exec --help` flag detection, `mcp list --json`) and logs a `Warning:` when the chosen interface or flag is missing.
+⚠ **The legacy MCP interface was removed on 2026-11-06** (PLAN_REMOVE_LEGACY_MCP.md). It drove `codex mcp-server`, which
+codex-cli 0.154.0 dropped (a current CLI parses it as an interactive prompt: `Error: stdin is not a terminal`). Invariants:
+`CODEX_INTERFACE` accepts only `exec`; `mcp` (any case) is recorded in `Config.codex_interface_mcp` and `validate_config()`
+refuses it in codex mode and warns in normal mode - decided after the whole file is read, the last `CODEX_INTERFACE` line
+wins (a later `exec`/invalid value clears it), other invalid values still warn and use exec. Do not bring back a silent
+fallback from `mcp` to exec (`make test-codex-interface`). The `codex mcp list --json` probe is **not** part of the removed
+route: it counts the MCP servers in the codex user's config.toml for the warning below. The codex CLI surface keeps moving,
+which is why `openai_translator_init()` runs `codex_cli_probe()` at startup (version, `exec --help` flag detection,
+`mcp list --json`) and logs a `Warning:` when `codex exec` or a flag it needs is missing.
 
 codex backend specifics:
 - One codex child is spawned per request (`posix_spawnp`, in its own process group so the node wrapper **and** the real codex grandchild are reaped on stop). Note codex itself starts MCP-server helpers in *their own* process groups, so a timeout kill does not reach them; codex reaps them when it exits.
 - exec: the prompt goes on **stdin, never argv** (argv is world-readable via `ps`/`/proc/<pid>/cmdline`). codex echoes the full prompt on **stderr**, so stderr must never be copied into client-facing errors — only the last `ERROR:` line is (`last_error_line()`); the full tail goes to the DEBUG trace only.
 - exec: `CODEX_APPROVAL_POLICY` / `CODEX_REASONING_EFFORT` become TOML `-c key="value"` overrides, so `validate_config()` restricts them to `[A-Za-z0-9._-]{1,64}`.
 - exec: `--ephemeral` is passed only if `codex exec --help` advertises it (keeps `$CODEX_HOME/sessions` from growing).
-- **MCP servers / plugins from the codex user's `config.toml` start on every translation** and their tools are not covered by `sandbox=read-only`, so untrusted text could steer codex into calling them (measured: 5 configured servers → 9 helper processes per request). `CODEX_IGNORE_USER_CONFIG=true` (exec only) passes `--ignore-user-config`, which also drops the config's `model`, so `CODEX_MODEL` must be set — codex's built-in default model rejected `model_reasoning_effort="none"`. Default is `false` so existing deployments keep working; startup logs a warning listing the servers.
+- **MCP servers / plugins from the codex user's `config.toml` start on every translation** and their tools are not covered by `sandbox=read-only`, so untrusted text could steer codex into calling them (measured: 5 configured servers → 9 helper processes per request). `CODEX_IGNORE_USER_CONFIG=true` passes `--ignore-user-config`, which also drops the config's `model`, so `CODEX_MODEL` must be set — codex's built-in default model rejected `model_reasoning_effort="none"`. Default is `false` so existing deployments keep working; startup logs a warning listing the servers.
 - Concurrency is capped by a semaphore in `OpenAITranslator` (`CODEX_MAX_CONCURRENCY`, default = `MAX_WORKERS`); exhaustion → 503, call timeout → 504.
 - Untrusted text is isolated with a per-request random delimiter (uuid-based); `sandbox=read-only`/`approval-policy=never` are force-validated unless `CODEX_ALLOW_UNSAFE=true`.
 - Each request runs in a fresh `mkdtemp` cwd under `CODEX_RUN_DIR` (default `/var/lib/transbasket/run`), removed afterward.
 - codex output is **not** re-unescaped or emoji-stripped (would corrupt it), only trimmed + whole-output code-fence unwrapped.
-- Requires the host (service user) to have `codex login` done and a writable `CODEX_HOME`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` §7.1 for the systemd/operator checklist (that plan describes the now-legacy MCP route; the operator steps still apply).
-- `mcp_client.c:wait_for_id()` must consume the matched line from `rbuf` before returning. It used to leave it there with its `\n` already turned into `\0`, so the next wait parsed the stale line and swallowed the following one; with the real `codex mcp-server` that was a `codex/event` notification, so it only failed against servers that answer without notifications (fixed 2026-10-31).
+- Requires the host (service user) to have `codex login` done and a writable `CODEX_HOME`. See `PLAN_MODEL_TYPE_CODEX_MCP.md` §7.1 for the systemd/operator checklist (that plan describes the removed MCP route; the operator steps still apply).
 - **`TRANS_CACHE_THRESHOLD` must be `1` in codex mode.** codex output is non-deterministic, so the same source text comes back slightly reworded on each call; `handle_translate()` then treats it as a changed translation and resets the entry's `count` to 1. With any threshold above 1 the count never reaches it, the cache never serves a hit, and every request pays for a codex call. Verified: threshold 3 → 4 identical requests all took ~4 s and re-invoked codex; threshold 1 → second request served from cache in ~0.01 s.
 
 ### Source hint (from=auto base language) - PLAN_SOURCE_HINT_METADATA.md
@@ -223,7 +224,7 @@ codex backend specifics:
   reply passes `strict_json_validate()` **before** cJSON - cJSON 1.7.15 decodes invalid `\u` escapes to NUL,
   accepts control bytes/raw LF/`01`/BOM and its default lookup ignores case. Structural violations -> 502,
   nothing cached; semantic hint errors -> keep the translation, use the script classifier.
-- Plain-mode prompts (explicit requests, auto with script mode, MCP, normal) are byte-identical to the
+- Plain-mode prompts (explicit requests, auto with script mode, normal) are byte-identical to the
   pre-hint binary: `python3 tests/test_prompt_regression.py <old> <new>`.
 - C <-> spec differential tests: `make test-source-hint` (classifier vs `tests/source_hint_ref.py`, table
   generated by `tests/source_hint_gen.py --c`) and `make test-strict-json` (vs `tests/strict_json_ref.py`).
@@ -238,8 +239,7 @@ and the C string is cut there (keys too). Invariants:
 - Every parse of a request or a translation-carrying reply is `cJSON_ParseWithOpts(x, &end, 0)` (same
   behaviour as `cJSON_Parse`) followed by `json_decodes_nul(x, end - x)` - **only the consumed bytes**.
   Checking the whole buffer would newly reject SSE comments, ignored chunks and bytes after the root.
-- Request -> 422 before any engine call. MCP: the flag is computed on the matched line **before** the
-  `memmove` in `wait_for_id()`. SSE: a NUL-decoding event fails the whole response - and since
+- Request -> 422 before any engine call. SSE: a NUL-decoding event fails the whole response - and since
   PLAN_OPEN_ISSUES.md D/E so does every other bad event (see below). Plain codex output:
   `memchr(result, 0, result_len)`. All 502, never cached.
 - Not guarded on purpose: the text-cache loader (only our own C strings are written) and the startup
@@ -422,7 +422,6 @@ Public-facing copies live in `README.md` → "한계와 보장"; keep both in sy
 | `MIN_TEXT_LENGTH` | `json_handler.c` | 1 byte | 422 |
 | `MAX_UPSTREAM_RESPONSE` | `http_client.c` | 4 MB | normal reply body (both modes) **errors** ("Upstream response too large" -> 502, not retried, not cached); post-processing buffers are sized from the reply, no other cap |
 | `CODEX_OUT_MAX` | `codex_exec.c` | 4 MB | exec path **errors** ("codex response too large" → 502) rather than truncating |
-| `MCP_RBUF_MAX` | `mcp_client.c` | 4 MB | legacy MCP path **errors** ("codex MCP response too large" → 502) rather than truncating |
 | MHD connection timeout | `http_server.c` | 120 s | connection closed |
 | curl timeout (`normal`) | `http_client.c` | min(60 s, remaining total budget), up to 3 attempts | 503 for timeout |
 | Total translation budget | `TRANSLATION_TOTAL_TIMEOUT` | default 110 s, configurable 1..110 | normal 503, codex 504; no follower deadline extension |

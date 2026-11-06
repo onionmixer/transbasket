@@ -5,6 +5,10 @@
 상태: **구현 완료(IMPLEMENTED) & 검증됨** — codex↔claude 교차검토 10회(§10) 후 구현. normal/codex 양 백엔드 end-to-end 동작 확인. 신규 모듈 `mcp_client.[ch]` 추가.
 재검증: 2026-08-21 (codex-cli 0.148.0) — kor↔eng/jpn→kor 번역, 델리미터 인젝션 방어, 동시 6요청(제한 4), 프로세스·임시디렉터리 누수 0 확인. 캐시 임계값 이슈 발견 및 조치(§3.2).
 
+> **2026-11-06: 이 문서의 MCP 경로 (`mcp_client.[ch]`, `CODEX_INTERFACE="mcp"`) 는 제거되었다** —
+> codex-cli 0.154.0 이 `codex mcp-server` 를 없앤 뒤로 쓸 수 없었다. 현재 codex 백엔드는 `codex exec` 하나이며,
+> `"mcp"` 설정은 codex 모드에서 기동 오류다. §7.1 운영 점검표는 그대로 유효하다. [제거 기록](PLAN_REMOVE_LEGACY_MCP.md).
+
 > 2026-11-03 후속 변경: `from=auto`는 원문 언어 조회 전에 분기하며, 내장 자동 감지 지시와
 > 선택적인 `PROMPT_PREFIX_AUTO_FILE`을 사용한다. exec·MCP는 같은 지시 생성 경로를 사용하고
 > 원문 구분자 격리를 유지한다. 가짜 exec·MCP를 포함한 오프라인 9개 테스트는 통과했으며,

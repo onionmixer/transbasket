@@ -1,7 +1,7 @@
 # Transbasket Installation Guide
 
 > 이 문서는 **C 구현** 기준입니다. 초기 Python POC(`poc/`)는 폐기되었고 저장소에서 제거되었습니다.
-> 설정 키 전체 목록과 API 스펙은 `README.md`, codex 백엔드 설계는 `PLAN_MODEL_TYPE_CODEX_MCP.md` 를 참고하세요.
+> 설정 키 전체 목록과 API 스펙은 `README.md`, codex 백엔드의 처음 설계는 `PLAN_MODEL_TYPE_CODEX_MCP.md` (그 MCP 경로는 제거됨) 를 참고하세요.
 
 ## 1. 사전 요구사항
 
@@ -127,22 +127,22 @@ curl -X POST http://localhost:8889/translate \
 ## 6. codex 백엔드 추가 준비
 
 ```bash
-codex --version          # CLI 설치 확인 (exec: 0.166.0, 레거시 mcp: 0.148.0 에서 검증)
+codex --version          # CLI 설치 확인 (0.166.0, 0.167.0 에서 검증)
 codex login status       # 서버를 '실행하는 계정'이 로그인되어 있어야 함
-codex exec --help        # 기본 인터페이스(exec)가 있는지
+codex exec --help        # 사용하는 인터페이스(exec)가 있는지
 codex mcp list           # 이 계정의 MCP 서버 - 있으면 아래 CODEX_IGNORE_USER_CONFIG 참고
 ```
 
 체크 포인트:
 
-- **codex-cli 0.154.0 부터 `codex mcp-server` 가 없습니다.** 기본값 `CODEX_INTERFACE="exec"` 를
-  유지하세요. `mcp` 는 그 이전 버전에 고정된 호스트에서만 동작합니다. 기동 로그의
-  `codex CLI: codex-cli X.Y.Z (interface=...)` 줄과 그 아래 `Warning:` 으로 확인할 수 있습니다.
+- 인터페이스는 `codex exec` 하나뿐입니다. 레거시 `CODEX_INTERFACE="mcp"` (`codex mcp-server`, codex-cli 0.154.0 에서 제거됨)
+  는 2026-11-06 에 지웠고, codex 모드에서 그 값이면 기동하지 않습니다 (§14). 기동 로그의
+  `codex CLI: codex-cli X.Y.Z (interface=exec)` 줄과 그 아래 `Warning:` 으로 CLI 상태를 확인할 수 있습니다.
 - 서비스 계정의 `config.toml` 에 MCP 서버/플러그인이 있으면 매 번역마다 함께 기동되고, 그 도구는
   read-only 샌드박스 밖입니다. 번역 전용 계정을 쓰거나 `CODEX_IGNORE_USER_CONFIG="true"` +
   `CODEX_MODEL` 을 지정하세요.
 
-- 서비스 계정이 쓰기 가능한 `CODEX_HOME`(기본 `~/.codex`)을 가져야 핸드셰이크가 성공합니다.
+- 서비스 계정이 쓰기 가능한 `CODEX_HOME`(기본 `~/.codex`)을 가져야 codex 호출이 성공합니다.
 - `CODEX_RUN_DIR`(요청별 임시 cwd 루트, 기본 `/var/lib/transbasket/run`)을 **미리 생성**하고 0700 으로 두세요.
   없으면 `mkdtemp` 가 실패해 codex 가 서버의 작업 디렉터리에서 실행됩니다.
 - **`TRANS_CACHE_THRESHOLD="1"` 필수** — codex 출력은 비결정적이라 임계값이 2 이상이면
@@ -222,7 +222,7 @@ INFLIGHT_MAX_WAITERS="256"
 INFLIGHT_MAX_WAITERS_PER_KEY="64"
 ```
 
-전체 예산은 1~110초이며 슬롯 대기·MCP 초기화·재시도·백오프·호출에 함께 적용합니다.
+전체 예산은 1~110초이며 슬롯 대기·재시도·백오프·호출에 함께 적용합니다.
 기존 normal의 60초×3회 호출이 110초 이상 지속되던 경우 이제 전체 마감으로 503이 될 수 있습니다.
 codex의 전체 마감은 504입니다. 대기 한도 초과는 503·Retry-After로 반환합니다.
 `MAX_WORKERS`는 연결 수 제한이 아니지만, 이제 미설정 `INFLIGHT_MAX_KEYS`의 기본값도 결정합니다.
@@ -318,7 +318,20 @@ SIGTERM/SIGINT는 실행 취소와 대기 해제 후 종료하며, SIGHUP 캐시
 
 **롤백:** 이전 바이너리로 돌아갈 수 있습니다 (형식 동일). 다만 따옴표 뒤 주석을 지운 설정은 이전 바이너리에서도 그대로 동작합니다.
 
-## 14. 문제 해결
+## 14. 레거시 MCP 인터페이스 제거로 업그레이드
+
+스키마·캐시 형식·exec 동작은 그대로입니다 ([PLAN_REMOVE_LEGACY_MCP.md](PLAN_REMOVE_LEGACY_MCP.md)).
+
+1. 설정에 `CODEX_INTERFACE="mcp"` (대소문자 무관) 가 있으면 **codex 모드에서 기동하지 않습니다**:
+   ``Error: CODEX_INTERFACE "mcp" was removed (codex-cli 0.154.0 dropped `codex mcp-server`); use CODEX_INTERFACE="exec" or delete the line``.
+   `-d` 로 띄우면 실행한 쪽이 이 줄을 보여 주고 종료 코드 1 로 끝납니다. 그 줄을 지우거나 `"exec"` 로 바꿉니다.
+2. normal 모드에서는 같은 줄이 경고 한 줄과 함께 무시됩니다.
+3. 같은 키가 여러 줄이면 예전처럼 마지막 줄이 정합니다 (`mcp` 다음 `exec` 면 기동).
+4. 배포 전에 확인: `grep -n 'CODEX_INTERFACE' <설정 파일>`. `"exec"` 이거나 줄이 없으면 할 일이 없습니다.
+
+**롤백:** 이전 바이너리로 돌아갈 수 있습니다 (형식 동일).
+
+## 15. 문제 해결
 
 **빌드 실패 (라이브러리 없음)**
 ```bash
@@ -349,7 +362,6 @@ ls -ld "${CODEX_HOME:-$HOME/.codex}"   # 쓰기 가능 여부
 ls -ld <CODEX_RUN_DIR>                 # 임시 cwd 루트 존재/권한
 ```
 `502` 응답의 `errorMessage` 에는 codex 의 마지막 `ERROR:` 줄이 담깁니다(예: 지원하지 않는 모델).
-`codex MCP initialize failed` 라면 `CODEX_INTERFACE="mcp"` 로 신버전 codex 를 구동한 것입니다.
 `DEBUG=yes` 이면 요청마다 `./trace/<timestamp>_<uuid>.codex.txt` 에 프롬프트/결과/codex stderr 트레이스가 남습니다
 (파일 0600, 같은 이름은 `-1` 등을 붙임, normal 의 curl trace 는 API 키를 `<redacted>` 로). 원문·번역문 평문이 저장되고
 파일이 정리 없이 쌓이므로 운영 환경에서는 `DEBUG=no` 를 권장합니다.
