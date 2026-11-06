@@ -143,6 +143,12 @@ test-listen-parse: directories
 	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -DWITH_CONFIG_LOADER -o $(LISTEN_PARSE_BIN)_cl tests/test_listen_address.c src/listen_address.c src/utils.c -lcjson -luuid
 	python3 -I tests/test_listen_parse.py $(LISTEN_PARSE_BIN) $(LISTEN_PARSE_BIN)_cl --mutants
 
+# LISTEN through the real server, inside an unprivileged network + PID namespace
+# (loopback rows only where unshare is unavailable). LISTEN_OLD_BIN=<pre-fix binary>
+# also checks that the old binary fails the same tables.
+test-listen-address: all
+	python3 -I tests/test_listen_address.py $(abspath $(TARGET)) $(if $(LISTEN_OLD_BIN),--old $(abspath $(LISTEN_OLD_BIN)))
+
 # Structured mode through the real server; a TRANSBASKET_TEST_HOOKS build covers
 # the schema-write and prompt-construction failure paths (hooks never compiled into $(TARGET)).
 TEST_HOOKS_BIN ?= $(OBJ_DIR)/transbasket_test_hooks
@@ -163,4 +169,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address

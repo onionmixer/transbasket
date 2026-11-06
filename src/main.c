@@ -182,7 +182,8 @@ int main(int argc, char *argv[]) {
             LOG_INFO("  Base URL: %s", config->openai_base_url);
             LOG_INFO("  Model: %s", config->openai_model);
         }
-        LOG_INFO("  Listen: %s:%d", config->listen, config->port);
+        LOG_INFO(strchr(config->listen, ':') ? "  Listen (configured): [%s]:%d" : "  Listen (configured): %s:%d",
+                 config->listen, config->port);
         LOG_INFO("  Workers: %d", max_workers);
         printf("\n");
     }

@@ -8,9 +8,15 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdarg.h>
+#include <stdatomic.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <microhttpd.h>
+#include "listen_address.h"
 #include "http_server.h"
 #include "json_handler.h"
 #include "language_table.h"
@@ -515,6 +521,62 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
     return server;
 }
 
+/* libmicrohttpd messages. Until MHD_start_daemon() returns they explain a failed
+ * start (bind errors and the like) and go to INFO; afterwards they are per-connection
+ * noise and go to DEBUG only (PLAN_LISTEN_ADDRESS.md 3.2). The text is never used
+ * as a format string. */
+static atomic_bool mhd_start_returned = false;
+
+static void mhd_log(void *cls, const char *fmt, va_list ap) {
+    (void)cls;
+    char msg[512];
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    size_t n = strlen(msg);
+    while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r')) {
+        msg[--n] = '\0';
+    }
+    if (atomic_load(&mhd_start_returned)) {
+        LOG_DEBUG("libmicrohttpd: %s", msg);
+    } else {
+        LOG_INFO("libmicrohttpd: %s", msg);
+    }
+}
+
+/* What the listening socket is actually bound to, which is what matters, not
+ * what the configuration says. */
+static void log_bound_address(struct MHD_Daemon *daemon) {
+    const union MHD_DaemonInfo *info = MHD_get_daemon_info(daemon, MHD_DAEMON_INFO_LISTEN_FD);
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    char host[INET6_ADDRSTRLEN] = "";
+
+    if (!info || getsockname(info->listen_fd, (struct sockaddr *)&ss, &len) != 0) {
+        LOG_INFO("HTTP server listening on (unknown)");
+        return;
+    }
+    if (ss.ss_family == AF_INET) {
+        const struct sockaddr_in *s4 = (const struct sockaddr_in *)&ss;
+        if (!inet_ntop(AF_INET, &s4->sin_addr, host, sizeof(host))) {
+            snprintf(host, sizeof(host), "?");
+        }
+        LOG_INFO("HTTP server listening on %s:%u (IPv4)", host, (unsigned)ntohs(s4->sin_port));
+    } else if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)&ss;
+        if (!inet_ntop(AF_INET6, &s6->sin6_addr, host, sizeof(host))) {
+            snprintf(host, sizeof(host), "?");
+        }
+        int v6only = -1;
+        socklen_t olen = sizeof(v6only);
+        if (getsockopt(info->listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, &olen) != 0) {
+            v6only = -1;
+        }
+        LOG_INFO("HTTP server listening on [%s]:%u (%s)", host, (unsigned)ntohs(s6->sin6_port),
+                 v6only == 0 ? "IPv4+IPv6" : v6only == 1 ? "IPv6" : "IPv6, mode unknown");
+    } else {
+        LOG_INFO("HTTP server listening on (unknown address family %d)", (int)ss.ss_family);
+    }
+}
+
 /* Start translation server */
 int translation_server_start(TranslationServer *server) {
     if (!server) {
@@ -522,26 +584,50 @@ int translation_server_start(TranslationServer *server) {
         return -1;
     }
 
-    LOG_INFO("Starting HTTP server on %s:%d...",
+    struct sockaddr_storage addr;
+    ListenMode mode;
+    const char *why = "missing value";
+    if (!server->config->listen ||
+        parse_listen_address(server->config->listen, server->config->port, &addr, &mode, &why) != 0) {
+        LOG_INFO("Error: LISTEN \"%s\" %s",
+                 server->config->listen ? server->config->listen : "", why);
+        return -1;
+    }
+
+    /* MHD_USE_INTERNAL_POLLING_THREAD is what MHD adds on its own (with a warning)
+     * when only THREAD_PER_CONNECTION is given, so the threading is unchanged. */
+    unsigned int flags = MHD_USE_THREAD_PER_CONNECTION | MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG;
+    if (mode == LISTEN_IPV6_ONLY) {
+        flags |= MHD_USE_IPv6;
+    } else if (mode == LISTEN_DUAL_STACK) {
+        flags |= MHD_USE_DUAL_STACK;
+    }
+
+    LOG_INFO("Starting HTTP server (LISTEN %s, PORT %d)...",
             server->config->listen, server->config->port);
 
+    atomic_store(&mhd_start_returned, false);
+    /* The bind uses the port inside addr; the port argument only appears in MHD's
+     * error messages, so it gets the same value. The logger must be the first option. */
     server->daemon = MHD_start_daemon(
-        MHD_USE_THREAD_PER_CONNECTION,
-        server->config->port,
+        flags,
+        (uint16_t)server->config->port,
         NULL, NULL,
         &request_handler, server,
+        MHD_OPTION_EXTERNAL_LOGGER, &mhd_log, NULL,
+        MHD_OPTION_SOCK_ADDR, (struct sockaddr *)&addr,
         MHD_OPTION_NOTIFY_COMPLETED, &request_completed, NULL,
         MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)120,
         MHD_OPTION_END
     );
+    atomic_store(&mhd_start_returned, true);
 
     if (!server->daemon) {
         LOG_INFO("Error: Failed to start HTTP server");
         return -1;
     }
 
-    LOG_INFO("HTTP server started successfully on %s:%d",
-            server->config->listen, server->config->port);
+    log_bound_address(server->daemon);
 
     return 0;
 }

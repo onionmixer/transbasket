@@ -16,6 +16,7 @@
 #include <errno.h>
 #include "config_loader.h"
 #include "utils.h"
+#include "listen_address.h"
 
 #define MAX_LINE_LENGTH 1024
 #define MAX_VALUE_LENGTH 512
@@ -86,6 +87,35 @@ static int parse_config_line(const char *line, char *key, size_t key_size, char 
     value[value_len] = '\0';
 
     return 1;
+}
+
+/* Read one physical line. Keeps at most size-1 bytes (NUL-terminated, without the
+ * '\n'), and feeds every byte, kept or not, to the LISTEN recognizer. fgets() could
+ * not tell a NUL byte from the end of the data, so a line holding a NUL used to be
+ * taken for an overlong one and the *next* line was discarded with it.
+ * Returns false at end of file with nothing read. */
+static bool read_config_line(FILE *fp, char *buf, size_t size, bool *too_long, bool *has_nul,
+                             ListenScan *scan) {
+    size_t kept = 0, total = 0;
+    int ch;
+    *too_long = false;
+    *has_nul = false;
+    listen_scan_init(scan);
+    while ((ch = fgetc(fp)) != EOF && ch != '\n') {
+        char c = (char)ch;
+        listen_scan_feed(scan, &c, 1);
+        total++;
+        if (ch == 0) {
+            *has_nul = true;
+        }
+        if (kept + 1 < size) {
+            buf[kept++] = c;
+        } else {
+            *too_long = true;
+        }
+    }
+    buf[kept] = '\0';
+    return ch != EOF || total > 0;
 }
 
 /* Load text file content */
@@ -265,9 +295,13 @@ int validate_config(const Config *config) {
         return -1;
     }
 
-    /* Validate LISTEN */
-    if (!config->listen || strlen(config->listen) == 0) {
-        LOG_INFO( "Error: LISTEN address is required");
+    /* Validate LISTEN: the same parser the server binds with (PLAN_LISTEN_ADDRESS.md 3.2) */
+    struct sockaddr_storage listen_addr;
+    ListenMode listen_mode;
+    const char *listen_why = "missing value";
+    if (!config->listen ||
+        parse_listen_address(config->listen, config->port, &listen_addr, &listen_mode, &listen_why) != 0) {
+        LOG_INFO("Error: LISTEN \"%s\" %s", config->listen ? config->listen : "", listen_why);
         return -1;
     }
 
@@ -415,22 +449,43 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->codex_allow_unsafe = false;
 
     /* Parse config file */
+    _Static_assert(MAX_LINE_LENGTH == 1024, "the overlong-line message says 1023 bytes");
     char line[MAX_LINE_LENGTH];
     char key[MAX_VALUE_LENGTH];
     char value[MAX_VALUE_LENGTH];
     int line_num = 0;
+    /* A line that tries to set LISTEN but is not read as LISTEN=<value> must not leave
+     * the 0.0.0.0 default in place (PLAN_LISTEN_ADDRESS.md 3.3): it stops startup. */
+    bool listen_line_bad = false;
 
-    while (fgets(line, sizeof(line), fp)) {
+    ListenScan listen_scan;
+    bool too_long, has_nul;
+    while (read_config_line(fp, line, sizeof(line), &too_long, &has_nul, &listen_scan)) {
         line_num++;
-        /* A physical line longer than the buffer would otherwise be split and its
-         * remainder parsed as a line of its own: skip the whole line instead. */
-        if (!strchr(line, '\n') && !feof(fp)) {
-            int ch;
-            while ((ch = fgetc(fp)) != EOF && ch != '\n') { /* discard the rest */ }
-            LOG_INFO("Warning: line %d is longer than %d bytes and was ignored\n", line_num, MAX_LINE_LENGTH - 1);
+        /* A physical line longer than the buffer is skipped whole (its remainder is
+         * never parsed as a line of its own); so is a line holding a NUL byte. */
+        if (too_long || has_nul) {
+            const char *what = too_long ? "is longer than 1023 bytes" : "contains a NUL byte";
+            if (listen_scan_matched(&listen_scan)) {
+                LOG_INFO("Error: line %d sets LISTEN but %s", line_num, what);
+                listen_line_bad = true;
+            } else {
+                LOG_INFO("Warning: line %d %s and was ignored\n", line_num, what);
+            }
             continue;
         }
         int parse_result = parse_config_line(line, key, sizeof(key), value, sizeof(value));
+
+        if (listen_scan_matched(&listen_scan) && !(parse_result == 1 && strcmp(key, "LISTEN") == 0)) {
+            if (parse_result == -2) {
+                LOG_INFO("Error: line %d: LISTEN value longer than %d bytes", line_num, MAX_VALUE_LENGTH - 1);
+            } else {
+                LOG_INFO("Error: line %d sets LISTEN but does not parse; write LISTEN=\"<address>\" "
+                         "(upper case, no blanks around '=', no 'export'): %s", line_num, line);
+            }
+            listen_line_bad = true;
+            continue;
+        }
 
         if (parse_result == -2) {
             LOG_INFO("Warning: line %d: key or value longer than %d bytes, ignored\n", line_num, MAX_VALUE_LENGTH - 1);
@@ -653,6 +708,13 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     }
 
     fclose(fp);
+
+    if (listen_line_bad) {
+        LOG_INFO("Error: refusing to start with the default LISTEN address while a LISTEN line is unreadable");
+        free(resolved_config_path);
+        free_config(config);
+        return NULL;
+    }
 
     /* Load prompt prefix - use command line arg if provided, otherwise use config file setting */
     const char *actual_prompt_path = prompt_prefix_from_cmdline ? prompt_prefix_path : config->prompt_prefix_file;
