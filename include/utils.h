@@ -19,6 +19,9 @@
 /* Log message with timestamp and level */
 void log_message(const char *level, const char *format, ...);
 
+/* Also append every log line to fd (-1 = off); daemon startup only (daemon.c). */
+void log_set_tee(int fd);
+
 /* Get current timestamp for logging */
 void get_log_timestamp(char *buffer, size_t size);
 
@@ -80,8 +83,5 @@ int strip_ansi_codes(const char *input, char *output, size_t output_size);
 
 /* Strip control characters (0x00-0x1F) from text, except CR and LF */
 int strip_control_characters(const char *input, char *output, size_t output_size);
-
-/* Daemonize the process */
-int daemonize(void);
 
 #endif /* UTILS_H */

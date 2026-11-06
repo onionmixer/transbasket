@@ -95,19 +95,60 @@ void get_log_timestamp(char *buffer, size_t size) {
 }
 
 /* Log message with timestamp and level */
+/* Daemon startup: every log line is also appended here (daemon.c), -1 = off. */
+static volatile int g_log_tee_fd = -1;
+
+void log_set_tee(int fd) {
+    g_log_tee_fd = fd;
+}
+
+/* The whole line is formatted first and written in one call, to stdout and to the
+ * tee file if one is set. */
 void log_message(const char *level, const char *format, ...) {
     char timestamp[32];
     get_log_timestamp(timestamp, sizeof(timestamp));
 
-    fprintf(stdout, "%s[%s] ", timestamp, level);
-
+    char stack[4096];
+    char *line = stack;
+    int head = snprintf(stack, sizeof(stack), "%s[%s] ", timestamp, level);
+    if (head < 0) {
+        return;
+    }
     va_list args;
     va_start(args, format);
-    vfprintf(stdout, format, args);
+    va_list again;
+    va_copy(again, args);
+    int body = vsnprintf(stack + head, sizeof(stack) - (size_t)head, format, args);
     va_end(args);
+    if (body < 0) {
+        va_end(again);
+        return;
+    }
+    size_t len = (size_t)head + (size_t)body;
+    if (len + 2 > sizeof(stack)) {
+        line = malloc(len + 2);
+        if (line) {
+            memcpy(line, stack, (size_t)head);
+            vsnprintf(line + head, (size_t)body + 1, format, again);
+        } else {
+            line = stack;   /* keep what fits */
+            len = sizeof(stack) - 2;
+        }
+    }
+    va_end(again);
+    line[len] = '\n';
+    line[len + 1] = '\0';
 
-    fprintf(stdout, "\n");
+    fputs(line, stdout);
     fflush(stdout);
+    int tee = g_log_tee_fd;
+    if (tee >= 0) {
+        ssize_t w = write(tee, line, len + 1);
+        (void)w;
+    }
+    if (line != stack) {
+        free(line);
+    }
 }
 
 /* ISO 639-2 language codes */
@@ -866,71 +907,5 @@ int strip_control_characters(const char *input, char *output, size_t output_size
     }
 
     output[out_pos] = '\0';
-    return 0;
-}
-
-/* Daemonize the process */
-int daemonize(void) {
-    pid_t pid, sid;
-
-    /* Fork the parent process */
-    pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "Error: fork() failed\n");
-        return -1;
-    }
-
-    /* Exit the parent process */
-    if (pid > 0) {
-        exit(0);
-    }
-
-    /* Create a new session */
-    sid = setsid();
-    if (sid < 0) {
-        fprintf(stderr, "Error: setsid() failed\n");
-        return -1;
-    }
-
-    /* Fork again to ensure we're not a session leader */
-    pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "Error: second fork() failed\n");
-        return -1;
-    }
-
-    /* Exit the first child */
-    if (pid > 0) {
-        exit(0);
-    }
-
-    /* Change working directory to root */
-    if (chdir("/") < 0) {
-        fprintf(stderr, "Error: chdir() failed\n");
-        return -1;
-    }
-
-    /* Reset file mode creation mask */
-    umask(0);
-
-    /* Close standard file descriptors */
-    close(STDIN_FILENO);
-    close(STDOUT_FILENO);
-    close(STDERR_FILENO);
-
-    /* Redirect standard file descriptors to /dev/null */
-    int fd = open("/dev/null", O_RDWR);
-    if (fd < 0) {
-        return -1;
-    }
-
-    dup2(fd, STDIN_FILENO);
-    dup2(fd, STDOUT_FILENO);
-    dup2(fd, STDERR_FILENO);
-
-    if (fd > 2) {
-        close(fd);
-    }
-
     return 0;
 }

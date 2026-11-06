@@ -148,6 +148,11 @@ test-strip: directories
 	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_strip tests/test_strip.c src/utils.c -luuid
 	python3 -I tests/test_strip.py $(OBJ_DIR)/test_strip --mutants
 
+# -d start report, cwd/umask, -l log file, launcher deadline (a 3 s build), inside a namespace.
+test-daemon: all
+	$(CC) $(CFLAGS) -DDAEMON_READY_TIMEOUT=3 $(INCLUDES) $(LDFLAGS) -o $(OBJ_DIR)/transbasket_daemon3 $(SERVER_SRCS) $(LIBS)
+	python3 -I tests/test_daemon.py $(abspath $(TARGET)) $(OBJ_DIR)/transbasket_daemon3
+
 # Forged log lines, source text in the log, codex error text, trace file safety; log_escape() vs python.
 test-log-safety: all
 	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_log_escape tests/test_log_escape.c src/utils.c -luuid
@@ -199,4 +204,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon

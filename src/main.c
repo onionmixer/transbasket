@@ -13,6 +13,7 @@
 #include "http_server.h"
 #include "trans_cache.h"
 #include "utils.h"
+#include "daemon.h"
 
 /* Global server instance for signal handler */
 static TranslationServer *g_server = NULL;
@@ -64,7 +65,8 @@ static void print_usage(const char *program_name) {
     printf("  -p, --prompt PATH       Path to prompt prefix file (default: PROMPT_PREFIX.txt)\n");
     printf("  -r, --role PATH         Path to system role file (default: ROLS.txt)\n");
     printf("  -w, --workers NUM       Number of worker threads (default: 30)\n");
-    printf("  -d, --daemon            Run as daemon in background\n");
+    printf("  -d, --daemon            Run in the background; exits 0 once the server listens, 1 on a failed start\n");
+    printf("  -l, --log-file PATH     With -d: append the daemon's log to PATH (default: discarded)\n");
     printf("  -h, --help              Show this help message\n\n");
     printf("Environment Variables:\n");
     printf("  TRANSBASKET_CONFIG      Config file path\n");
@@ -72,7 +74,7 @@ static void print_usage(const char *program_name) {
     printf("Examples:\n");
     printf("  %s\n", program_name);
     printf("  %s -c /etc/transbasket.conf -w 20\n", program_name);
-    printf("  %s -d -c /etc/transbasket.conf\n", program_name);
+    printf("  %s -d -l /var/log/transbasket.log -c /etc/transbasket.conf\n", program_name);
     printf("  MAX_WORKERS=20 %s\n\n", program_name);
 }
 
@@ -83,6 +85,7 @@ int main(int argc, char *argv[]) {
     const char *system_role_path = NULL;
     int max_workers = 0;
     bool run_as_daemon = false;
+    const char *log_file = NULL;
 
     /* Parse command line arguments */
     for (int i = 1; i < argc; i++) {
@@ -104,12 +107,19 @@ int main(int argc, char *argv[]) {
             }
         } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--daemon") == 0) {
             run_as_daemon = true;
+        } else if ((strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--log-file") == 0) && i + 1 < argc) {
+            log_file = argv[++i];
         } else {
             LOG_INFO("Error: Unknown option: %s", argv[i]);
             printf("\n");
             print_usage(argv[0]);
             return 1;
         }
+    }
+
+    if (log_file && !run_as_daemon) {
+        LOG_INFO("Error: -l/--log-file is only used with -d (in the foreground the log is stdout)");
+        return 1;
     }
 
     /* Get from environment if not set via command line */
@@ -141,42 +151,35 @@ int main(int argc, char *argv[]) {
         printf("===========================================\n\n");
     }
 
-    /* Daemonize if requested */
+    /* Daemonize if requested: only the daemon returns; the launcher waits for its
+     * start report and exits 0/1 (PLAN_OPEN_ISSUES.md A). Startup messages below are
+     * the same as in the foreground and reach the launcher's terminal. */
     if (run_as_daemon) {
         LOG_INFO("Starting transbasket in daemon mode...");
-        if (daemonize() != 0) {
+        if (daemon_begin(log_file) != 0) {
             LOG_INFO("Error: Failed to daemonize process");
             return 1;
         }
-        /* After daemonizing, we can't use stderr anymore */
     }
 
     /* Setup signal handlers */
     if (setup_signal_handlers() != 0) {
-        if (!run_as_daemon) {
-            LOG_INFO("Error: Failed to setup signal handlers");
-        }
+        LOG_INFO("Error: Failed to setup signal handlers");
         return 1;
     }
 
-    if (!run_as_daemon) {
-        LOG_INFO("Signal handlers initialized");
-    }
+    LOG_INFO("Signal handlers initialized");
 
     /* Load configuration */
-    if (!run_as_daemon) {
-        LOG_INFO("Loading configuration...");
-    }
+    LOG_INFO("Loading configuration...");
 
     Config *config = load_config(config_path, prompt_prefix_path, system_role_path);
     if (!config) {
-        if (!run_as_daemon) {
-            LOG_INFO("Error: Failed to load configuration");
-        }
+        LOG_INFO("Error: Failed to load configuration");
         return 1;
     }
 
-    if (!run_as_daemon) {
+    {
         LOG_INFO("Configuration loaded successfully:");
         LOG_INFO("  Model Type: %s", config->model_type_str ? config->model_type_str : "normal");
         if (config->model_type == MODEL_TYPE_CODEX) {
@@ -198,30 +201,31 @@ int main(int argc, char *argv[]) {
     }
 
     /* Initialize server */
-    if (!run_as_daemon) {
-        LOG_INFO("Initializing translation server...");
-    }
+    LOG_INFO("Initializing translation server...");
 
     g_server = translation_server_init(config, max_workers);
     if (!g_server) {
-        if (!run_as_daemon) {
-            LOG_INFO("Error: Failed to initialize server");
-        }
+        LOG_INFO("Error: Failed to initialize server");
         free_config(config);
         return 1;
     }
 
     /* Start server */
     if (translation_server_start(g_server) != 0) {
-        if (!run_as_daemon) {
-            LOG_INFO("Error: Failed to start server");
-        }
+        LOG_INFO("Error: Failed to start server");
         translation_server_free(g_server);
         free_config(config);
         return 1;
     }
 
-    if (!run_as_daemon) {
+    if (run_as_daemon) {
+        if (g_shutdown) {
+            LOG_INFO("Stop requested during startup; not reporting the daemon as started");
+        } else if (daemon_ready() != 0) {
+            LOG_INFO("Error: could not switch the daemon's output; stopping");
+            g_shutdown = 1;
+        }
+    } else {
         printf("\n===========================================\n");
         printf("  Server is running\n");
         printf("  Press Ctrl+C to stop\n");
@@ -241,18 +245,14 @@ int main(int argc, char *argv[]) {
     }
 
     /* Cleanup */
-    if (!run_as_daemon) {
-        LOG_INFO("Shutting down server...");
-    }
+    LOG_INFO("Shutting down server...");
 
     translation_server_free(g_server);
     g_server = NULL;
 
     free_config(config);
 
-    if (!run_as_daemon) {
-        LOG_INFO("Server shutdown complete");
-    }
+    LOG_INFO("Server shutdown complete");
 
     return 0;
 }
