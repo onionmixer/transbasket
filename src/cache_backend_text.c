@@ -449,9 +449,11 @@ static int text_backend_update_translation(void *backend_ctx,
 }
 
 /* Engine result + hint as one operation (see trans_cache_store_result()).
- * In memory there is nothing between the caller's deadline check and the
- * mutation that could block, so `control` needs no second check here. Every
- * allocation happens before the first mutation. */
+ * Nothing in memory can block, but the lookups below scan the whole cache, so
+ * `control` is checked again right before the first mutation (the caller checked
+ * it once after taking the lock). The copies for the caller and for a stored row are
+ * allocated before that check; a new row's own allocations happen in
+ * text_backend_add(), which changes nothing but next_id when one of them fails. */
 static int text_backend_store_result(void *backend_ctx, const char *from_lang, const char *to_lang,
                                      const char *source_text, const char *translated_text,
                                      CacheEntry *cached, const SourceHint *hint,

@@ -753,6 +753,7 @@ typedef struct {
     int count;
     time_t last_used;
     bool translation_changed;
+    bool reinserted;          /* the row vanished since the lookup: its old hint went with it */
 } StagedParent;
 
 static int step_done(sqlite3_stmt *stmt) {
@@ -784,6 +785,7 @@ static int mutate_parent(SqliteBackendContext *ctx, const char *hash, const char
                          const CacheEntry *cached, StagedParent *staged) {
     time_t now = time(NULL);
     staged->last_used = now;
+    staged->reinserted = false;
     staged->translation_changed = cached && strcmp(cached->translated_text, translated_text) != 0;
     if (!cached) {
         staged->count = 1;
@@ -809,6 +811,7 @@ static int mutate_parent(SqliteBackendContext *ctx, const char *hash, const char
     if (step_done(st) != 0) return -1;
     if (sqlite3_changes(ctx->db) == 0) {
         staged->count = 1;
+        staged->reinserted = true;
         staged->translation_changed = strcmp(cached->translated_text, translated_text) != 0;
         return insert_parent(ctx, hash, from_lang, to_lang, source_text, translated_text, now);
     }
@@ -856,6 +859,19 @@ static int sqlite_backend_store_result(void *backend_ctx, const char *from_lang,
     SqliteBackendContext *ctx = (SqliteBackendContext *)backend_ctx;
     char hash[65];
     trans_cache_calculate_hash(from_lang, to_lang, source_text, hash);
+
+    /* A ROLLBACK that failed before (rollback_all() logged "stuck") leaves this shared
+     * connection inside that transaction, holding the write lock, and every later
+     * BEGIN fails until a restart: end it first (PLAN_FAULT_INJECTION.md Q1). This
+     * store is then skipped: `cached` may come from a lookup that saw the writes just
+     * rolled back (measured: it would commit A x2 while the copy says B x2). From the
+     * next lookup on, everything is read from the committed state again. */
+    if (!sqlite3_get_autocommit(ctx->db)) {
+        rollback_all(ctx);
+        LOG_INFO("Cache write skipped: ended a transaction an earlier failure left open%s",
+                 sqlite3_get_autocommit(ctx->db) ? "" : " (still open)");
+        return -1;
+    }
 
     char *caller_copy = NULL;          /* allocated before anything is written */
     if (cached && strcmp(cached->translated_text, translated_text) != 0) {
@@ -915,6 +931,7 @@ static int sqlite_backend_store_result(void *backend_ctx, const char *from_lang,
             cached->count = staged.count;
             cached->last_used = staged.last_used;
             if (hint_written) cached->hint = *want_hint;
+            else if (staged.reinserted) memset(&cached->hint, 0, sizeof(cached->hint));   /* the old hint was deleted with the row */
         }
         free(caller_copy);
         return 0;

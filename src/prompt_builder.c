@@ -134,6 +134,17 @@ static char *build_auto_instruction(OpenAITranslator *translator, const char *to
     return instruction;
 }
 
+/* Replace every `token` in *instruction. str_replace() returns NULL only when it
+ * cannot allocate (a missing token gives an unchanged copy), and going on with the
+ * placeholder still in the prompt would translate - and cache - the wrong thing
+ * (PLAN_FAULT_INJECTION.md Q2): then *instruction is freed and set to NULL. */
+static bool substitute(char **instruction, const char *token, const char *value) {
+    char *next = str_replace(*instruction, token, value);
+    free(*instruction);
+    *instruction = next;
+    return next != NULL;
+}
+
 /* Build translation instruction message from PROMPT_PREFIX
  * Supports both legacy format and TranslateGemma format with placeholders:
  * - {SOURCE_LANG}: Source language name (e.g., "Korean")
@@ -205,42 +216,18 @@ char *build_instruction_message(OpenAITranslator *translator,
         if (!target_name) target_name = to_lang;
         if (!target_iso639_1) target_iso639_1 = to_lang;
 
-        char *temp;
-
-        /* Replace {SOURCE_LANG} */
-        temp = str_replace(instruction, "{SOURCE_LANG}", source_name);
-        if (temp) {
-            free(instruction);
-            instruction = temp;
-        }
-
-        /* Replace {SOURCE_CODE} */
-        temp = str_replace(instruction, "{SOURCE_CODE}", source_iso639_1);
-        if (temp) {
-            free(instruction);
-            instruction = temp;
-        }
-
-        /* Replace {TARGET_LANG} */
-        temp = str_replace(instruction, "{TARGET_LANG}", target_name);
-        if (temp) {
-            free(instruction);
-            instruction = temp;
-        }
-
-        /* Replace {TARGET_CODE} */
-        temp = str_replace(instruction, "{TARGET_CODE}", target_iso639_1);
-        if (temp) {
-            free(instruction);
-            instruction = temp;
+        /* Replace {SOURCE_LANG}, {SOURCE_CODE}, {TARGET_LANG}, {TARGET_CODE}, in this order */
+        if (!substitute(&instruction, "{SOURCE_LANG}", source_name) ||
+            !substitute(&instruction, "{SOURCE_CODE}", source_iso639_1) ||
+            !substitute(&instruction, "{TARGET_LANG}", target_name) ||
+            !substitute(&instruction, "{TARGET_CODE}", target_iso639_1)) {
+            return NULL;
         }
 
         /* Replace {TEXT} with actual text if provided */
         if (text) {
-            temp = str_replace(instruction, "{TEXT}", text);
-            if (temp) {
-                free(instruction);
-                instruction = temp;
+            if (!substitute(&instruction, "{TEXT}", text)) {
+                return NULL;
             }
             /* Signal that single message format should be used */
             if (is_single_message) {
@@ -252,20 +239,11 @@ char *build_instruction_message(OpenAITranslator *translator,
         const char *to_name = get_language_name(to_lang);
         if (!to_name) to_name = to_lang;
 
-        char *temp;
-
-        /* Replace [TARGET LANGUAGE] with actual target language name */
-        temp = str_replace(instruction, "[TARGET LANGUAGE]", to_name);
-        if (temp) {
-            free(instruction);
-            instruction = temp;
-        }
-
-        /* Also try replacing {{LANGUAGE_TO}} for backward compatibility */
-        temp = str_replace(instruction, "{{LANGUAGE_TO}}", to_name);
-        if (temp) {
-            free(instruction);
-            instruction = temp;
+        /* Replace [TARGET LANGUAGE] with actual target language name, then
+         * {{LANGUAGE_TO}} for backward compatibility */
+        if (!substitute(&instruction, "[TARGET LANGUAGE]", to_name) ||
+            !substitute(&instruction, "{{LANGUAGE_TO}}", to_name)) {
+            return NULL;
         }
     }
 

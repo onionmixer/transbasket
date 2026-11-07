@@ -218,6 +218,24 @@ test-codex-backend: directories
 	$(CC) $(CFLAGS) -DTRANSBASKET_TEST_HOOKS $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_codex_backend tests/test_codex_backend.c $(filter-out $(SRC_DIR)/main.c, $(SERVER_SRCS)) $(LIBS) $(LDFLAGS)
 	d=$$(mktemp -d) && $(OBJ_DIR)/test_codex_backend $$d $(abspath language_tables.conf); rc=$$?; rm -rf $$d; exit $$rc
 
+# PLAN_FAULT_INJECTION.md F1/F3 through the real server: no per-request temp cwd, and the exec
+# driver's state allocation failing at startup (TRANSBASKET_TEST_HOOKS build).
+test-fault-server: all directories
+	$(CC) $(CFLAGS) -DTRANSBASKET_TEST_HOOKS $(INCLUDES) $(LDFLAGS) -o $(TEST_HOOKS_BIN) $(SERVER_SRCS) $(LIBS)
+	python3 -I tests/test_fault_server.py $(abspath $(TARGET)) $(abspath $(TEST_HOOKS_BIN))
+
+# PLAN_FAULT_INJECTION.md F4/F5/F6/Q1: failures inside the result + hint store of both backends
+# (SQL statements refused, SQLite's and the backends' own allocations failed, the backend's deadline check).
+test-fault-store: directories
+	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_fault_store tests/test_fault_store.c src/trans_cache.c src/utils.c src/source_hint.c -lcjson -lcrypto -luuid -lsqlite3
+	$(OBJ_DIR)/test_fault_store
+
+# PLAN_FAULT_INJECTION.md F2/Q2: every allocation in prompt_builder.c and backend_codex.c failed in turn
+# (the two sources are included by the harness, so they are left out of the link list).
+test-fault-codex: directories
+	$(CC) $(CFLAGS) -DTRANSBASKET_TEST_HOOKS $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_fault_codex tests/test_fault_codex.c $(filter-out $(SRC_DIR)/main.c $(SRC_DIR)/prompt_builder.c $(SRC_DIR)/backend_codex.c, $(SERVER_SRCS)) $(LIBS) $(LDFLAGS)
+	d=$$(mktemp -d) && $(OBJ_DIR)/test_fault_codex $$d $(abspath language_tables.conf); rc=$$?; rm -rf $$d; exit $$rc
+
 # PLAN_BACKEND_MODULES.md V3b/V4/V5: compare against an earlier build, e.g. PARITY_OLD_BIN=/path/to/old/transbasket
 # (that binary needs language_tables.conf next to it: the language table resolves against the executable's directory).
 test-backend-parity: all
@@ -254,4 +272,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity test-codex-backend test-timestamp test-sqlite-pragmas test-timestamp-server test-slot-gate test-cache-tool-journal test-request-body test-normal-unescape test-codex-fifo
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity test-codex-backend test-timestamp test-sqlite-pragmas test-timestamp-server test-slot-gate test-cache-tool-journal test-request-body test-normal-unescape test-codex-fifo test-fault-codex test-fault-store test-fault-server
