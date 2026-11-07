@@ -10,8 +10,9 @@
 -- Differences from what the server creates:
 --   - CHECK(last_used >= created_at) below exists only in this script;
 --   - the PRAGMAs below are suggestions: the server opens every database with
---     journal_mode=WAL, synchronous=NORMAL, cache_size=2000 (pages) and
---     mmap_size=268435456, and does not set temp_store or foreign_keys.
+--     TRANS_CACHE_SQLITE_JOURNAL_MODE / _SYNC (default WAL / NORMAL),
+--     cache_size=2000 (pages) and mmap_size=268435456, and does not set
+--     temp_store or foreign_keys.
 
 -- Main cache table
 CREATE TABLE IF NOT EXISTS trans_cache (

@@ -15,7 +15,7 @@ Production-ready C implementation of the Transbasket translation server for opti
 - Automatic source language: `from: "auto"` (normal and codex backends)
 - Concurrent duplicate requests share one translation and retain their own response IDs
 - Emoji and shortcode stripping (normal backend only - codex output is passed through)
-- Timestamp (RFC 3339 shape) and UUID v4 validation
+- RFC 3339 timestamp (ranges checked) and UUID v4 validation
 - Graceful shutdown with signal handling
 - Retry logic with exponential backoff
 
@@ -177,7 +177,7 @@ PORT="8889"
 | `TRANS_CACHE_TYPE` | `text` | `text` (JSONL) 또는 `sqlite`. `mongodb`·`redis` 는 미구현이라 경고 후 `text` |
 | `TRANS_CACHE_FILE` | `./trans_dictionary.txt` | text 캐시 파일 (cwd 기준) |
 | `TRANS_CACHE_SQLITE_PATH` | `./trans_cache.db` | SQLite 캐시 파일 (cwd 기준) |
-| `TRANS_CACHE_SQLITE_JOURNAL_MODE`, `TRANS_CACHE_SQLITE_SYNC` | `WAL`, `NORMAL` | **현재 읽기만 하고 적용하지 않습니다** — SQLite 는 항상 `WAL`/`NORMAL` 로 엽니다 (`cache_backend_sqlite.c`) |
+| `TRANS_CACHE_SQLITE_JOURNAL_MODE`, `TRANS_CACHE_SQLITE_SYNC` | `WAL`, `NORMAL` | journal: `DELETE` `TRUNCATE` `PERSIST` `MEMORY` `WAL` `OFF`, synchronous: `OFF` `NORMAL` `FULL` `EXTRA` (대소문자 무시, 그 밖의 값은 경고 후 기본값). 기동 로그 `SQLite journal_mode=..., synchronous=...` 에 실효값. SQLite 가 요청한 모드로 바꾸지 못하면 경고. `MEMORY`·`OFF`·synchronous `OFF` 는 충돌 시 캐시가 깨질 수 있다는 경고. 파일에 남는 것은 WAL 뿐이라, `cache_tool` (항상 WAL/NORMAL 로 엶) 은 다른 모드의 DB 를 WAL 로 바꾸려 합니다 (2026-11-07 전에는 이 두 키가 적용되지 않았음) |
 | `TRANS_CACHE_THRESHOLD` | `5` | 같은 번역 결과가 나온 횟수 (캐시 사용 포함) 가 이 값 이상이어야 캐시를 씀. 결과가 달라지면 1 로 되돌아감. 1 미만은 5. codex 는 1 권장 |
 | `TRANS_CACHE_CLEANUP_ENABLED` | 켬 | `yes`·`1`·`true` 면 켬. 기간은 `TRANS_CACHE_CLEANUP_DAYS` (아래 "시간 한계") |
 
@@ -428,7 +428,7 @@ curl -X POST http://localhost:8889/translate \
 ```
 
 **Request Body:**
-- `timestamp` (string, required): RFC 3339 모양의 타임스탬프 — 정규식으로 형식만 봅니다 (`T`·`Z` 는 대문자, 날짜·시각 범위는 검사하지 않음)
+- `timestamp` (string, required): RFC 3339 타임스탬프 — 월 01-12, 그 달의 날짜 (윤년 포함), 시 00-23, 분 00-59, 초 00-60, 선택 소수부 (`.` 뒤 숫자 1개 이상), `Z` 또는 `±HH:MM` (00-23, 00-59). `T`·`Z` 는 대문자만, **63바이트 이하** (넘으면 422). 초 `60` 은 실제 윤초 시각인지 보지 않습니다
 - `uuid` (string, required): RFC 4122 UUID v4 형식의 고유 식별자
 - `from` (string, required): 원본 언어 코드 또는 `auto` (아래 "언어 코드" 참조)
 - `to` (string, required): 대상 언어 코드 (아래 "언어 코드" 참조)
@@ -515,7 +515,7 @@ SQLite의 기존 버전 0/1 DB는 시작 시 버전 2로 이전하며, 기존 �
 ```
 
 **Response Body:**
-- `timestamp` (string): 요청의 타임스탬프 (그대로 반환. 단 63바이트까지만 저장하므로, 소수점 자리가 아주 많아 더 긴 값은 잘린 채 돌아옵니다)
+- `timestamp` (string): 요청의 타임스탬프 (원본 그대로 반환)
 - `uuid` (string): 요청의 UUID (원본 그대로 반환)
 - `translatedText` (string): 번역된 텍스트
   - `MODEL_TYPE="normal"`: 이스케이프 해제 + 이모지/단축코드 제거 + 공백 정규화. 길이로 잘리지 않습니다 (upstream 응답 본문이 4 MB 를 넘으면 `502`, 아래 한계 표)
@@ -617,6 +617,7 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
 | 항목 | 값 | 초과 시 동작 |
 |------|-----|--------------|
 | 요청 `text` 길이 | **10,000 바이트** (`MAX_TEXT_LENGTH`) | `422 VALIDATION_ERROR` (명시적 거부) |
+| 요청 `timestamp` 길이 | **63 바이트** (`TIMESTAMP_MAX_LEN`) | `422` (2026-11-07 전에는 63바이트로 잘린 값이 응답에 들어갔음) |
 | 요청 `text` 최소 길이 | 1 바이트 | `422` |
 | HTTP 요청 본문 전체 크기 | **상한 없음** | 서버가 메모리에 그대로 누적. 신뢰할 수 없는 클라이언트에 노출할 때는 앞단(리버스 프록시)에서 제한 필요 |
 | upstream 응답 본문 — `normal` (비스트리밍·스트리밍) | **4 MB** (`MAX_UPSTREAM_RESPONSE`) | 절단이 아니라 오류(`502`), 재시도·캐시 없음 |
@@ -768,7 +769,7 @@ transbasket/
   Chinese BCP-47 tags folded to `zhs`/`zht`)
 - Source-only `auto` detection before general language normalization
 - UUID v4 validation (RFC 4122)
-- RFC 3339-shaped timestamp check (regex: format only, not calendar ranges)
+- RFC 3339 timestamp check: fixed-position parser with calendar/clock/offset ranges, at most 63 bytes (spec `tests/timestamp_ref.py`)
 - Emoji and shortcode stripping
 - Text truncation utilities
 

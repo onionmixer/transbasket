@@ -55,6 +55,8 @@
 
 ## 코드 문제 (문서 작업 범위 밖, 보고만)
 
+> 2026-11-07: 아래 4건은 [PLAN_CODE_ISSUES_4.md](PLAN_CODE_ISSUES_4.md) 로 수정했다. 위 판정표의 해당 문서 문구도 그때 바꿨다.
+
 - `TRANS_CACHE_SQLITE_JOURNAL_MODE`/`SYNC` 를 읽기만 하고 적용하지 않음 (`cache_backend_sqlite.c:448` 고정값).
 - `timestamp` 는 길이 제한 없이 검증한 뒤 63바이트로 잘라 저장 (`json_handler.c:66`) — 응답이 요청과 달라질 수 있음.
 - timestamp 검증은 형식만 (`utils.c:269-284`).

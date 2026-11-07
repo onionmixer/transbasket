@@ -304,6 +304,22 @@ Until 2026-11-06 `MHD_start_daemon()` got only the port, so every `LISTEN` value
   addresses inside that namespace.
 - `-d` reports startup errors to the launcher since PLAN_OPEN_ISSUES.md A (see "Open-issue fixes").
 
+### Code issue fixes - PLAN_CODE_ISSUES_4.md
+
+Four defects found by the 2026-11-06 documentation review, fixed 2026-11-07:
+
+- **SQLite pragmas** (`make test-sqlite-pragmas`): `TRANS_CACHE_SQLITE_JOURNAL_MODE`/`_SYNC` reach the backend through
+  `SqliteCacheOptions` (`trans_cache.h`; NULL = WAL/NORMAL, which `cache_tool` and the tests use). The loader's lists are
+  unchanged (invalid values still warn and fall back); the backend checks them again and puts only the canonical
+  literals into SQL. Pragmas still run after `apply_schema()`. The mode SQLite returns is logged
+  (`SQLite journal_mode=..., synchronous=...`); a different mode than requested is a warning, an SQL error (also when
+  `synchronous` cannot be read back) fails cache init as before. `synchronous` is per connection, so only the backend's
+  own connection can show it (the test harness reads `ctx->db`). Only WAL persists in the file.
+- **Timestamps** (`make test-timestamp`, `make test-timestamp-server`): range-checked parser, at most 63 bytes, C =
+  `tests/timestamp_ref.py` on 60,000+ inputs, nothing accepted that the old regex refused. Validation runs before the
+  cache lookup, so a cached source text with a bad timestamp is a 422 too.
+- `load_config()` logs the prompt path it actually tried (it logged the `-p` argument, NULL without `-p`).
+
 ### Open-issue fixes - PLAN_OPEN_ISSUES.md
 
 Invariants added 2026-11-06 (each has a `make test-*` target):
@@ -350,16 +366,18 @@ Text-backend `add()` skips insertion when the hash is already stored (two thread
 ### Validation Standards
 
 **Strictly enforced formats:**
-- Timestamps: RFC 3339 shape (e.g., `2025-10-10T01:23:45.678Z`) - the regex checks the format only (upper-case `T`/`Z`,
-  any number of fraction digits); calendar and clock ranges are not checked (`2026-99-99T99:99:99Z` passes). The value is
-  stored in 64 bytes, so a longer one comes back truncated to 63
+- Timestamps: RFC 3339 (e.g., `2025-10-10T01:23:45.678Z`) with ranges - month, day of that month (Gregorian leap
+  years, 0000 included), hour 00-23, minute 00-59, second 00-60 (60 at any time: looser than RFC 3339 section 5.7),
+  optional `.` + 1 or more digits, `Z` or `+/-HH:MM` (00-23, 00-59, `-00:00` allowed); upper-case `T`/`Z` only;
+  at most `TIMESTAMP_MAX_LEN` (63) bytes, so the 64-byte request field never cuts a value
 - UUIDs: RFC 4122 UUID v4 with regex validation
 - Language codes: ISO 639-2 3-letter codes (e.g., `kor`, `eng`, `jpn`), English language names,
   and Chinese BCP-47 tags (`zh-Hans`/`zh-Hant`, see "Chinese Script Codes")
 - Source-only mode: case-insensitive `auto`, canonicalized before general language validation;
   target `auto`, omitted source and surrounding whitespace are rejected with 422
 
-Timestamp/UUID validation uses POSIX regex in `utils.c`. Language validation uses
+UUID validation uses a POSIX regex, timestamp validation a fixed-position parser (`utils.c`; spec
+`tests/timestamp_ref.py`, `make test-timestamp`). Language validation uses
 the supported-code/name lists and Chinese tag parser, with a separate source-mode check.
 
 ### Error Handling Strategy
@@ -425,8 +443,8 @@ delimiter instead of substituting it blindly.
 
 ### Response Preservation
 
-Critical requirement: a successful response carries the request's UUID and timestamp unchanged (timestamps longer
-than 63 bytes are truncated, see "Validation Standards"). An error response carries the UUID and the current time;
+Critical requirement: a successful response carries the request's UUID and timestamp unchanged (a timestamp over
+63 bytes is a 422, see "Validation Standards"). An error response carries the UUID and the current time;
 a 422 validation error has no UUID. This enables client-side request/response correlation.
 
 Implementation in `json_handler.c:create_translation_response()`.
@@ -456,6 +474,7 @@ Public-facing copies live in `README.md` → "한계와 보장"; keep both in sy
 | Constant | File | Value | Behaviour at the limit |
 |---|---|---|---|
 | `MAX_TEXT_LENGTH` | `json_handler.c` | 10,000 bytes | request rejected with 422 (explicit) |
+| `TIMESTAMP_MAX_LEN` | `utils.h` | 63 bytes | request rejected with 422 (the field is `char[64]`; a `_Static_assert` ties them) |
 | `MIN_TEXT_LENGTH` | `json_handler.c` | 1 byte | 422 |
 | `MAX_UPSTREAM_RESPONSE` | `backend_normal.c` | 4 MB | normal reply body (both modes) **errors** ("Upstream response too large" -> 502, not retried, not cached); post-processing buffers are sized from the reply, no other cap |
 | `CODEX_OUT_MAX` | `codex_exec.c` | 4 MB | exec path **errors** ("codex response too large" → 502) rather than truncating |

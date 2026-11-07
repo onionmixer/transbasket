@@ -1,9 +1,25 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **번역 백엔드 모듈 분리 검증 2026-11-06** 이고, 그 아래가 **레거시 MCP 제거 검증 2026-11-06**, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
+> 최신 기록은 바로 아래의 **코드 문제 4건 수정 검증 2026-11-07** 이고, 그 아래가 **번역 백엔드 모듈 분리 검증 2026-11-06**, 그 아래가 **레거시 MCP 제거 검증 2026-11-06**, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## 코드 문제 4건 수정 검증 2026-11-07
+
+설계·결정 (사용자: 긴 timestamp 는 422, 소문자 `t`/`z` 는 계속 거부)·codex 판정 (계획 1회, 구현 1회) 은 [PLAN_CODE_ISSUES_4.md](PLAN_CODE_ISSUES_4.md).
+수정 전 대조는 이전 빌드 (`cfde092`, 이 영역의 코드는 `c9dab19` 와 같음).
+
+| 대상 | 명령 | 결과 |
+|---|---|---|
+| SQLite journal/sync 적용 | `make test-sqlite-pragmas` | 백엔드 자신의 연결에서 journal 6 × synchronous 4 = 24 조합 모두 실효, NULL 옵션 → WAL/NORMAL, 메모리 DB 의 WAL 요청 → 경고 후 `memory`, 다시 열면 WAL 만 유지, 위험 모드 경고, 목록 밖 이름·SQL 조각은 백엔드에서도 거부 (미리 넣은 행 유지). 서버 8건 (값 전달·기동 줄·잘못된 값은 기존 경고 후 기본값·마지막 줄 우선·text 캐시 무시). 수정 전 바이너리는 `DELETE` 설정에도 파일이 `wal`. 돌연변이 4/4 |
+| timestamp 검증 | `make test-timestamp` | 손 판정 47건 = 명세, C = 명세 61,415건 (4,331 허용), 옛 정규식이 거부하던 값을 새로 허용 0 (반대로 거부로 바뀐 것 1,954), 돌연변이 10/10. ASan/UBSan 통과 |
+| 서버 종단 | `make test-timestamp-server` | normal·codex: 63바이트 (`Z`·`+HH:MM`) 는 응답·trace 파일 이름에 그대로, 64바이트·2월 30일·오프셋 24:00 은 422 (캐시에 있는 원문도), 캐시 저장·적중을 엔진 호출 수로 확인, 병합 owner·waiter 2·캐시 적중이 각자 자기 timestamp. 프롬프트 경로 로그가 시도한 경로 (수정 전: `(null)`). 수정 전 바이너리는 64바이트·2월 30일·24:00 을 200 |
+| 회귀 | `make test-*` 25종 (+ `test-inflight-unit`), `test_config_limits.py`, 프롬프트 회귀 24건, parity 13 시나리오 (일반·ASan), ASan 서버 3종, ASan `test-codex-backend` | 모두 통과, 빌드 경고 0 |
+| 메모리 | valgrind | pragma 하네스 3경우, timestamp 하네스, 서버 (SQLite `DELETE`/`FULL`, 64바이트·2월 30일 요청 422) 오류 0 |
+| 배포 설정 3개 | 사본을 네임스페이스에서 수정 전·후 바이너리로 기동 | 경고·오류 0 (수정 전과 같음), 캐시 초기화 성공, `SQLite journal_mode=wal, synchronous=NORMAL` |
+
+동작 변화: 불가능한 날짜·시각·오프셋과 63바이트를 넘는 timestamp 는 422 (캐시 적중 포함). `WAL`/`NORMAL` 이 아닌 SQLite 설정이 이제 적용됨.
 
 ## 번역 백엔드 모듈 분리 검증 2026-11-06
 

@@ -361,9 +361,9 @@ curl --max-time 30 \
    - Maximum: 10,000 UTF-8 bytes; larger text is rejected with 422
 
 5. **Response Preservation**:
-   A successful response returns the request's timestamp and UUID unchanged (a timestamp is stored in
-   64 bytes, so one longer than 63 bytes comes back truncated). Error responses carry the UUID and the
-   current time; a 422 validation error has no UUID.
+   A successful response returns the request's timestamp and UUID unchanged (a timestamp longer than
+   63 bytes, or with an impossible date or time, is rejected with 422). Error responses carry the UUID
+   and the current time; a 422 validation error has no UUID.
 
 6. **Error Handling**:
    - Malformed JSON currently returns 422 VALIDATION_ERROR, like other parser failures
