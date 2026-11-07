@@ -2,7 +2,7 @@
 #define HTTP_CLIENT_H
 
 #include <stdbool.h>
-#include <semaphore.h>
+#include "slot_gate.h"
 #include "config_loader.h"
 #include "language_table.h"
 #include "translation_control.h"
@@ -18,8 +18,8 @@ typedef struct {
     int timeout;
 
     /* codex backend: limit concurrent codex processes (codex mode only) */
-    sem_t codex_sem;
-    bool  codex_sem_inited;
+    SlotGate codex_slots;    /* FIFO slots (slot_gate.h), CODEX_MAX_CONCURRENCY */
+    bool  codex_slots_inited;
     const struct CodexDriver *codex_driver;  /* how codex is run (codex_driver.h) */
     void *codex_driver_state;                /* the driver's own; read-only after init */
     bool  codex_structured_output;           /* the driver can follow a JSON schema */

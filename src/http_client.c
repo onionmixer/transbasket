@@ -51,7 +51,7 @@ OpenAITranslator *openai_translator_init(Config *config, LanguageTable *lang_tab
     translator->lang_table = lang_table;
     translator->max_retries = max_retries > 0 ? max_retries : DEFAULT_MAX_RETRIES;
     translator->timeout = timeout > 0 ? timeout : DEFAULT_TIMEOUT;
-    translator->codex_sem_inited = false;
+    translator->codex_slots_inited = false;
 
     /* Initialize curl */
     curl_global_init(CURL_GLOBAL_DEFAULT);

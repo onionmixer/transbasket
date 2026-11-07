@@ -46,6 +46,10 @@ static struct MHD_Response *create_json_response(const char *json_str) {
     return response;
 }
 
+/* Largest accepted /translate body (PLAN_OUT_OF_SCOPE.md A1): 17.5x the largest
+ * legitimate one (10,000 text bytes written as \u00XX escapes = 60,000 bytes). */
+#define MAX_REQUEST_BODY (1024 * 1024)
+
 /* Helper function to send JSON response and cleanup */
 static int send_json_response(struct MHD_Connection *connection,
                               char *json_str, int status_code, bool add_retry_header) {
@@ -157,50 +161,128 @@ static bool script_source_hint(const Config *config, const TranslationRequest *r
     return true;
 }
 
+/* The accumulated /translate body (PLAN_OUT_OF_SCOPE.md A). The length is kept,
+ * not recomputed, and the capacity doubles, so accumulation is linear; past
+ * MAX_REQUEST_BODY the data is dropped and only counted, so memory stays bounded. */
+typedef struct {
+    char  *data;        /* NUL-terminated after len bytes; NULL once too_large */
+    size_t len;
+    size_t cap;         /* allocated bytes, at most MAX_REQUEST_BODY + 1 */
+    bool   too_large;
+    bool   has_nul;     /* a raw NUL byte arrived: never valid JSON */
+} RequestBody;
+
+static void request_body_free(RequestBody *b) {
+    if (b) {
+        free(b->data);
+        free(b);
+    }
+}
+
+/* Append one upload chunk. false only when memory runs out. */
+static bool request_body_append(RequestBody *b, const char *chunk, size_t n) {
+    if (b->too_large) {
+        return true;                               /* drained, not kept */
+    }
+    if (n > MAX_REQUEST_BODY - b->len) {          /* len <= MAX, so no wrap */
+        b->too_large = true;
+        free(b->data);
+        b->data = NULL;
+        b->len = b->cap = 0;
+        return true;
+    }
+    size_t need = b->len + n + 1;                  /* <= MAX_REQUEST_BODY + 1 */
+    if (need > b->cap) {
+        size_t cap = b->cap ? b->cap : 4096;
+        while (cap < need) {
+            cap = cap > (MAX_REQUEST_BODY + 1) / 2 ? MAX_REQUEST_BODY + 1 : cap * 2;
+        }
+        char *grown = realloc(b->data, cap);
+        if (!grown) {
+            return false;
+        }
+        b->data = grown;
+        b->cap = cap;
+    }
+    if (memchr(chunk, '\0', n)) {
+        b->has_nul = true;
+    }
+    memcpy(b->data + b->len, chunk, n);
+    b->len += n;
+    b->data[b->len] = '\0';
+    return true;
+}
+
+static int send_body_too_large(struct MHD_Connection *connection) {
+    char *error_json = create_error_response("PAYLOAD_TOO_LARGE",
+                                             "Request body larger than 1 MiB", NULL);
+    return send_json_response(connection, error_json, MHD_HTTP_CONTENT_TOO_LARGE, false);
+}
+
 /* Translation endpoint handler */
 static int handle_translate(struct MHD_Connection *connection, const char *upload_data,
                            size_t *upload_data_size, void **con_cls,
                            TranslationServer *server) {
-    /* First call - setup connection */
+    /* First call - headers only. A client that sent "Expect: 100-continue" with a
+     * Content-Length over the limit is refused right away: it has not sent the body
+     * yet, MHD skips it (no "100 Continue") and closes the connection. Any other
+     * client may already be sending, and closing on it could lose the 413 to a
+     * reset, so its body is drained (counted, not kept) and answered at the end. */
     if (*con_cls == NULL) {
-        char *buffer = malloc(1);
-        if (!buffer) {
+        const char *cl = MHD_lookup_connection_value(connection, MHD_HEADER_KIND,
+                                                     MHD_HTTP_HEADER_CONTENT_LENGTH);
+        const char *expect = MHD_lookup_connection_value(connection, MHD_HEADER_KIND,
+                                                         MHD_HTTP_HEADER_EXPECT);
+        if (cl && expect && strcasecmp(expect, "100-continue") == 0) {
+            char *end = NULL;
+            errno = 0;
+            unsigned long long declared = strtoull(cl, &end, 10);
+            if (end != cl && *end == '\0' && (errno == ERANGE || declared > MAX_REQUEST_BODY)) {
+                LOG_INFO("Request body refused: Content-Length %s exceeds %d bytes", cl, MAX_REQUEST_BODY);
+                return send_body_too_large(connection);
+            }
+        }
+        RequestBody *body = calloc(1, sizeof(*body));
+        if (!body || !request_body_append(body, "", 0)) {   /* allocate the empty string */
+            request_body_free(body);
             return MHD_NO;
         }
-        buffer[0] = '\0';
-        *con_cls = buffer;
+        *con_cls = body;
         return MHD_YES;
     }
 
-    /* Accumulate POST data */
+    /* Accumulate POST data (every chunk is consumed, also once over the limit) */
     if (*upload_data_size != 0) {
-        char *buffer = *con_cls;
-        size_t current_size = strlen(buffer);
-        char *new_buffer = realloc(buffer, current_size + *upload_data_size + 1);
-
-        if (!new_buffer) {
-            free(buffer);
+        RequestBody *body = *con_cls;
+        if (!request_body_append(body, upload_data, *upload_data_size)) {
+            request_body_free(body);
             *con_cls = NULL;
             return MHD_NO;
         }
-
-        memcpy(new_buffer + current_size, upload_data, *upload_data_size);
-        new_buffer[current_size + *upload_data_size] = '\0';
-
-        *con_cls = new_buffer;
         *upload_data_size = 0;
-
         return MHD_YES;
     }
 
     /* Process request */
-    char *request_data = *con_cls;
+    RequestBody *body = *con_cls;
+    *con_cls = NULL;
     char *request_uuid = NULL;
 
-    /* Parse translation request */
-    TranslationRequest *req = parse_translation_request(request_data);
-    free(request_data);
-    *con_cls = NULL;
+    if (body->too_large) {
+        LOG_INFO("Request body refused: more than %d bytes", MAX_REQUEST_BODY);
+        request_body_free(body);
+        return send_body_too_large(connection);
+    }
+
+    /* A raw NUL byte cannot be part of JSON; parsing would stop there and
+     * silently drop the rest (the request used to succeed). */
+    TranslationRequest *req = NULL;
+    if (body->has_nul) {
+        LOG_INFO("Error: request body contains a NUL byte");
+    } else {
+        req = parse_translation_request(body->data);
+    }
+    request_body_free(body);
 
     if (!req) {
         char *error_json = create_error_response("VALIDATION_ERROR",
@@ -393,7 +475,7 @@ static void request_completed(void *cls, struct MHD_Connection *connection,
     (void)toe;
 
     if (*con_cls != NULL) {
-        free(*con_cls);
+        request_body_free(*con_cls);     /* only /translate sets con_cls */
         *con_cls = NULL;
     }
 }
@@ -494,7 +576,9 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
 
     if (cache_path) {
         /* TRANS_CACHE_SQLITE_JOURNAL_MODE / _SYNC (validated by the loader); ignored by text */
-        SqliteCacheOptions sqlite_opts = { config->cache_sqlite_journal_mode, config->cache_sqlite_sync };
+        SqliteCacheOptions sqlite_opts = { .journal_mode = config->cache_sqlite_journal_mode,
+                                           .synchronous = config->cache_sqlite_sync,
+                                           .keep_journal_mode = false };
         server->cache = trans_cache_init_with_backend(config->cache_type, cache_path, &sqlite_opts);
         if (!server->cache) {
             LOG_INFO("Warning: Failed to initialize cache, continuing without cache");

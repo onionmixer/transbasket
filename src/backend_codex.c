@@ -237,16 +237,11 @@ char *translate_via_codex(OpenAITranslator *translator, const char *from_lang,
     LOG_INFO("[%s] Starting codex translation: %s -> %s\n", request_uuid, from_lang, to_lang);
 
     /* 1. Acquire a slot with a monotonic budget and prompt shutdown checks. */
-    if (translator->codex_sem_inited) {
+    if (translator->codex_slots_inited) {
+        /* First come, first served (slot_gate.h); same deadline and cancellation
+         * checks as the sem_trywait loop it replaces. */
         int64_t slot_deadline = translation_now_ms() + cfg->codex_timeout * 1000L;
-        int acq;
-        for (;;) {
-            acq = sem_trywait(&translator->codex_sem);
-            if (acq == 0) break;
-            if ((errno != EAGAIN && errno != EINTR) ||
-                translation_now_ms() >= slot_deadline || !translation_pause(control, 20)) break;
-        }
-        if (acq != 0) {
+        if (slot_gate_acquire(&translator->codex_slots, slot_deadline, control) != 0) {
             LOG_INFO("[%s] codex concurrency limit reached (slot wait timed out)\n", request_uuid);
             if (error) { error->message = strdup("codex concurrency limit reached"); error->retryable = true; error->status_code = 503; }
             return NULL;   /* nothing acquired yet */
@@ -340,7 +335,7 @@ char *translate_via_codex(OpenAITranslator *translator, const char *from_lang,
 
 cleanup:
     /* 7. Release slot, the schema file and the temp dir (in that order). */
-    if (sem_held) sem_post(&translator->codex_sem);
+    if (sem_held) slot_gate_release(&translator->codex_slots);
     if (schema_created && unlink(schema_path) != 0) {
         LOG_DEBUG("[%s] failed to remove schema file %s: %s\n", request_uuid, schema_path, strerror(errno));
     }
@@ -434,11 +429,11 @@ cleanup:
  * caller cleans up curl and the translator. */
 int codex_backend_init(OpenAITranslator *translator, const Config *config, int max_concurrency) {
     int conc = max_concurrency > 0 ? max_concurrency : 1;
-    if (sem_init(&translator->codex_sem, 0, (unsigned int)conc) == 0) {
-        translator->codex_sem_inited = true;
+    if (slot_gate_init(&translator->codex_slots, conc) == 0) {
+        translator->codex_slots_inited = true;
     } else {
         /* codex mode requires the limiter; fail init */
-        LOG_INFO("Error: failed to init codex concurrency semaphore: %s", strerror(errno));
+        LOG_INFO("Error: failed to init codex concurrency slots (CODEX_MAX_CONCURRENCY %d)", conc);
         return -1;
     }
     /* How codex is run (codex_driver.h). CODEX_INTERFACE accepts only "exec"
@@ -450,8 +445,8 @@ int codex_backend_init(OpenAITranslator *translator, const Config *config, int m
     CodexDriverCaps caps = { 0 };
     if (!translator->codex_driver ||
         translator->codex_driver->init(config, &translator->codex_driver_state, &caps) != 0) {
-        sem_destroy(&translator->codex_sem);
-        translator->codex_sem_inited = false;
+        slot_gate_destroy(&translator->codex_slots);
+        translator->codex_slots_inited = false;
         translator->codex_driver = NULL;
         return -1;
     }
@@ -468,7 +463,7 @@ void codex_backend_free(OpenAITranslator *translator) {
     if (translator->codex_driver && translator->codex_driver->free) {
         translator->codex_driver->free(translator->codex_driver_state);
     }
-    if (translator->codex_sem_inited) {
-        sem_destroy(&translator->codex_sem);
+    if (translator->codex_slots_inited) {
+        slot_gate_destroy(&translator->codex_slots);
     }
 }

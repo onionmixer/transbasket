@@ -144,6 +144,29 @@ test-listen-parse: directories
 	python3 -I tests/test_listen_parse.py $(LISTEN_PARSE_BIN) $(LISTEN_PARSE_BIN)_cl --mutants
 
 # strip_emoji_and_shortcodes()/unescape_string() vs tests/strip_ref.py, properties, mutants.
+# PLAN_OUT_OF_SCOPE.md V1/V2/V3: request body limit, NORMAL_UNESCAPE, FIFO codex slots through the server
+# (BODY_OLD_BIN= / FIFO_OLD_BIN=<pre-fix build> optional: the old behaviour is reported)
+test-request-body: all
+	python3 -I tests/test_request_body.py $(abspath $(TARGET)) $(BODY_OLD_BIN)
+
+test-normal-unescape: all
+	python3 -I tests/test_normal_unescape.py $(abspath $(TARGET))
+
+test-codex-fifo: all
+	python3 -I tests/test_codex_fifo.py $(abspath $(TARGET)) $(FIFO_OLD_BIN)
+
+# PLAN_OUT_OF_SCOPE.md V4: cache_tool keeps a database's journal mode (TOOL_OLD_BIN=<pre-fix cache_tool> optional)
+test-cache-tool-journal: all
+	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) -o $(OBJ_DIR)/test_sqlite_pragmas tests/test_sqlite_pragmas.c src/trans_cache.c src/cache_backend_text.c src/cache_backend_sqlite.c src/utils.c -lcjson -lcrypto -luuid -lsqlite3
+	python3 -I tests/test_cache_tool_journal.py $(abspath $(CACHE_TOOL)) $(OBJ_DIR)/test_sqlite_pragmas $(abspath $(TARGET)) $(TOOL_OLD_BIN)
+
+# PLAN_OUT_OF_SCOPE.md V3: the FIFO slot gate, plain (or TEST_SANITIZERS) and under ThreadSanitizer
+test-slot-gate: directories
+	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_slot_gate tests/test_slot_gate.c src/slot_gate.c -lpthread
+	$(OBJ_DIR)/test_slot_gate
+	$(CC) $(CFLAGS) $(INCLUDES) -fsanitize=thread -fno-omit-frame-pointer -g -o $(OBJ_DIR)/test_slot_gate_tsan tests/test_slot_gate.c src/slot_gate.c -lpthread
+	TSAN_OPTIONS=halt_on_error=1 $(OBJ_DIR)/test_slot_gate_tsan
+
 # PLAN_CODE_ISSUES_4.md V3/V4: timestamps and the prompt-path log through the server (TS_OLD_BIN=<pre-fix build> optional)
 test-timestamp-server: all
 	python3 -I tests/test_timestamp_server.py $(abspath $(TARGET)) $(TS_OLD_BIN)
@@ -231,4 +254,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity test-codex-backend test-timestamp test-sqlite-pragmas test-timestamp-server
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity test-codex-backend test-timestamp test-sqlite-pragmas test-timestamp-server test-slot-gate test-cache-tool-journal test-request-body test-normal-unescape test-codex-fifo

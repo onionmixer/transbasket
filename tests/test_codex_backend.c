@@ -68,7 +68,7 @@ static char *fake_run(void *state, const Config *c, const CodexRunRequest *r, si
     (void)state; (void)c;
     struct stat st;
     g_runs++;
-    sem_getvalue(&g_t->codex_sem, &g_sem_in_run);
+    g_sem_in_run = slot_gate_free(&g_t->codex_slots);
     snprintf(g_prompt, sizeof g_prompt, "%s", r->prompt);
     snprintf(g_cwd, sizeof g_cwd, "%s", r->cwd ? r->cwd : "");
     g_cwd_existed = r->cwd && stat(r->cwd, &st) == 0 && S_ISDIR(st.st_mode);
@@ -131,8 +131,7 @@ static void row(OpenAITranslator *t, const char *run_dir, int conc, const Row *w
     SourceHint hint;
     char *r = openai_translate(t, w->from, "eng", "明日の会議", "550e8400-e29b-41d4-a716-446655440001",
                                "2026-11-06T01:02:03.456Z", &e, ctl, &hint);
-    int sem = -1;
-    sem_getvalue(&t->codex_sem, &sem);
+    int sem = slot_gate_free(&t->codex_slots);
     CHECK(g_runs == 1, "%s: driver called %d times", w->name, g_runs);
     if (w->want_text) {
         CHECK(r && strcmp(r, w->want_text) == 0, "%s: result \"%s\", want \"%s\"", w->name, r ? r : "NULL", w->want_text);

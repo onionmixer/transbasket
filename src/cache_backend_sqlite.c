@@ -276,7 +276,7 @@ static const char *canonical_name(const char *v, const char *const *names, size_
 static const char *const JOURNAL_MODES[] = { "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF" };
 static const char *const SYNC_MODES[] = { "OFF", "NORMAL", "FULL", "EXTRA" };
 
-static int apply_pragmas(sqlite3 *db, const char *journal_mode, const char *sync_mode) {
+static int apply_pragmas(sqlite3 *db, const char *journal_mode, const char *sync_mode, bool keep_journal) {
     char *err_msg = NULL;
     char pragma_sql[256];
     int rc;
@@ -297,7 +297,11 @@ static int apply_pragmas(sqlite3 *db, const char *journal_mode, const char *sync
      * switch, which is a warning, not a failure; an SQL error still fails the
      * cache initialisation as before. */
     char actual_jm[32] = "";
-    snprintf(pragma_sql, sizeof(pragma_sql), "PRAGMA journal_mode=%s;", jm);
+    if (keep_journal) {   /* read only: the file keeps the mode it has */
+        snprintf(pragma_sql, sizeof(pragma_sql), "PRAGMA journal_mode;");
+    } else {
+        snprintf(pragma_sql, sizeof(pragma_sql), "PRAGMA journal_mode=%s;", jm);
+    }
     sqlite3_stmt *st = NULL;
     rc = sqlite3_prepare_v2(db, pragma_sql, -1, &st, NULL);
     if (rc == SQLITE_OK) {
@@ -316,7 +320,7 @@ static int apply_pragmas(sqlite3 *db, const char *journal_mode, const char *sync
         return -1;
     }
     sqlite3_finalize(st);
-    if (strcasecmp(actual_jm, jm) != 0) {
+    if (!keep_journal && strcasecmp(actual_jm, jm) != 0) {
         LOG_INFO("Warning: SQLite journal_mode is %s, not the configured %s", actual_jm[0] ? actual_jm : "unknown", jm);
     }
 
@@ -506,7 +510,8 @@ TransCache *sqlite_backend_init(const char *db_path, const SqliteCacheOptions *o
     }
 
     /* Apply PRAGMA settings after the schema work, as before (configured, else WAL / NORMAL) */
-    if (apply_pragmas(ctx->db, opts ? opts->journal_mode : NULL, opts ? opts->synchronous : NULL) != 0) {
+    if (apply_pragmas(ctx->db, opts ? opts->journal_mode : NULL, opts ? opts->synchronous : NULL,
+                      opts && opts->keep_journal_mode) != 0) {
         LOG_DEBUG("Error: Failed to apply PRAGMA settings\n");
         sqlite3_close(ctx->db);
         free(ctx->db_path);

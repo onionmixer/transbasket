@@ -102,6 +102,8 @@ struct TransCache {
 typedef struct {
     const char *journal_mode;   /* DELETE TRUNCATE PERSIST MEMORY WAL OFF */
     const char *synchronous;    /* OFF NORMAL FULL EXTRA */
+    bool keep_journal_mode;     /* do not set the journal mode, keep the file's own (cache_tool:
+                                 * it does not know the server's setting; PLAN_OUT_OF_SCOPE.md D) */
 } SqliteCacheOptions;
 
 /* Initialize translation cache with specified backend type

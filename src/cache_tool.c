@@ -12,6 +12,8 @@
 #include <getopt.h>
 #include <errno.h>
 #include <limits.h>
+#include <libgen.h>
+#include <sys/stat.h>
 #include "trans_cache.h"
 #include "cache_backend_text.h"
 #include "cache_backend_sqlite.h"
@@ -686,6 +688,36 @@ static int migrate_entry_callback(void *ctx, CacheEntry *entry, void *user_data)
 }
 
 /* Migrate cache between backends */
+/* Whether two paths name the same file. Both existing: same device and inode
+ * (symlinks, hard links, relative paths). Neither existing (the source open
+ * would create it): the resolved parent directory plus the last component.
+ * Exactly one existing: different files. */
+static void canonical_new_path(const char *path, char *out, size_t out_size) {
+    char *d = strdup(path), *b = strdup(path);
+    char dir[PATH_MAX];
+    out[0] = '\0';
+    if (d && b && realpath(dirname(d), dir)) {
+        snprintf(out, out_size, "%s/%s", dir, basename(b));
+    }
+    free(d);
+    free(b);
+}
+
+static bool same_file(const char *a, const char *b) {
+    struct stat sa, sb;
+    bool ea = stat(a, &sa) == 0, eb = stat(b, &sb) == 0;
+    if (ea && eb) {
+        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+    }
+    if (ea || eb) {
+        return false;
+    }
+    char ca[PATH_MAX + NAME_MAX + 2], cb[PATH_MAX + NAME_MAX + 2];
+    canonical_new_path(a, ca, sizeof(ca));
+    canonical_new_path(b, cb, sizeof(cb));
+    return ca[0] && strcmp(ca, cb) == 0;
+}
+
 static int cmd_migrate(int argc, char *argv[]) {
     /* Parse arguments */
     const char *from_backend = NULL;
@@ -769,9 +801,22 @@ static int cmd_migrate(int argc, char *argv[]) {
     printf("Destination: %s (%s)\n", get_backend_name(to_type), to_config);
     printf("\n");
 
+    /* The same SQLite file on both sides cannot work: the source query stays open
+     * while the destination writes, and outside WAL mode that blocks itself
+     * (measured: a hard link to a DELETE database failed every entry). */
+    if (from_type == CACHE_BACKEND_SQLITE && to_type == CACHE_BACKEND_SQLITE &&
+        same_file(from_config, to_config)) {
+        fprintf(stderr, "Error: source and destination are the same SQLite file (%s)\n", to_config);
+        return -1;
+    }
+
+    /* cache_tool does not know the server's TRANS_CACHE_SQLITE_JOURNAL_MODE, so it
+     * leaves each database's journal mode alone (PLAN_OUT_OF_SCOPE.md D). */
+    SqliteCacheOptions keep = { .keep_journal_mode = true };
+
     /* Initialize source cache */
     printf("Initializing source cache...\n");
-    TransCache *source_cache = trans_cache_init_with_backend(from_type, from_config, NULL);
+    TransCache *source_cache = trans_cache_init_with_backend(from_type, from_config, &keep);
     if (!source_cache) {
         fprintf(stderr, "Error: Failed to initialize source cache\n");
         return -1;
@@ -779,11 +824,25 @@ static int cmd_migrate(int argc, char *argv[]) {
 
     /* Initialize destination cache */
     printf("Initializing destination cache...\n");
-    TransCache *dest_cache = trans_cache_init_with_backend(to_type, to_config, NULL);
+    TransCache *dest_cache = trans_cache_init_with_backend(to_type, to_config, &keep);
     if (!dest_cache) {
         fprintf(stderr, "Error: Failed to initialize destination cache\n");
         trans_cache_free(source_cache);
         return -1;
+    }
+
+    /* Again with the files SQLite actually opened: it folds "dir/.." by itself,
+     * so "./missing/../a.db" opens a.db although the path check above could not
+     * resolve it (measured). Both files exist now, so this is an inode compare. */
+    if (from_type == CACHE_BACKEND_SQLITE && to_type == CACHE_BACKEND_SQLITE) {
+        const char *fa = sqlite3_db_filename(((SqliteBackendContext *)source_cache->backend_ctx)->db, "main");
+        const char *fb = sqlite3_db_filename(((SqliteBackendContext *)dest_cache->backend_ctx)->db, "main");
+        if (fa && fb && same_file(fa, fb)) {
+            fprintf(stderr, "Error: source and destination are the same SQLite file (%s)\n", fb);
+            trans_cache_free(source_cache);
+            trans_cache_free(dest_cache);
+            return -1;
+        }
     }
 
     /* Prepare migration context */
@@ -936,7 +995,8 @@ static int cmd_backfill_hints(int argc, char *argv[]) {
         fprintf(stderr, "Error: backfill-hints supports text and sqlite\n");
         return 1;
     }
-    TransCache *cache = trans_cache_init_with_backend(type, config, NULL);
+    SqliteCacheOptions keep = { .keep_journal_mode = true };   /* journal mode left alone (D) */
+    TransCache *cache = trans_cache_init_with_backend(type, config, &keep);
     if (!cache) {
         fprintf(stderr, "Error: Failed to initialize cache from %s\n", config);
         return 1;

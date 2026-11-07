@@ -453,6 +453,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     config->top_p = 1.0;
     config->seed = 42;
     config->stream = false;
+    config->normal_unescape = true;   /* PLAN_OUT_OF_SCOPE.md B1: unchanged by default */
     config->frequency_penalty = 0.0;
     config->presence_penalty = 0.0;
     config->reasoning_effort = strdup("none");
@@ -573,6 +574,15 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             config->top_p = config_finite(key, value, &number_bad);
         } else if (strcmp(key, "SEED") == 0) {
             config->seed = config_int(key, value);
+        } else if (strcmp(key, "NORMAL_UNESCAPE") == 0) {
+            if (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0) {
+                config->normal_unescape = true;
+            } else if (strcasecmp(value, "no") == 0 || strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0) {
+                config->normal_unescape = false;
+            } else {
+                LOG_INFO("Warning: Invalid NORMAL_UNESCAPE '%s', using 'yes'\n", value);
+                config->normal_unescape = true;
+            }
         } else if (strcmp(key, "STREAM") == 0) {
             config->stream = (strcasecmp(value, "yes") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
         } else if (strcmp(key, "FREQUENCY_PENALTY") == 0) {

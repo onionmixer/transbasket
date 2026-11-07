@@ -41,6 +41,7 @@ typedef struct {
     double top_p;            /* Default: 1.0 */
     int seed;                /* Default: 42 */
     bool stream;             /* Default: false */
+    bool normal_unescape;    /* NORMAL_UNESCAPE: undo \n \t \r \\ \" \' once more in normal replies (default: true) */
     double frequency_penalty; /* Default: 0.0, range: -2.0 to 2.0 */
     double presence_penalty;  /* Default: 0.0, range: -2.0 to 2.0 */
     char *reasoning_effort;  /* Default: "none", options: "none", "low", "medium", "high" */

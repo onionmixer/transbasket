@@ -655,8 +655,12 @@ char *translate_via_openai(OpenAITranslator *translator, const char *from_lang,
             break;
         }
 
-        /* First unescape \\n to \n, \\t to \t, etc. */
-        if (unescape_string(raw_translation, unescaped_text, raw_len + 1) != 0) {
+        /* First unescape \\n to \n, \\t to \t, etc. - a second pass over text cJSON
+         * has already decoded, so a backslash the model meant literally is changed too
+         * (NORMAL_UNESCAPE=no keeps the reply as decoded; PLAN_OUT_OF_SCOPE.md B). */
+        if (!translator->config->normal_unescape) {
+            memcpy(unescaped_text, raw_translation, raw_len + 1);
+        } else if (unescape_string(raw_translation, unescaped_text, raw_len + 1) != 0) {
             LOG_DEBUG("[%s] Failed to unescape translation text\n", request_uuid);
             free(unescaped_text);
             free(cleaned_text);
