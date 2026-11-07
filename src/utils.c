@@ -265,23 +265,62 @@ bool validate_uuid(const char *uuid_str) {
     return result == 0;
 }
 
-/* Validate RFC 3339 timestamp format */
+/* n ASCII digits at s as a number, or -1 if any of them is not '0'-'9'. */
+static int ts_digits(const char *s, int n) {
+    int v = 0;
+    for (int i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    return v;
+}
+
+/* Validate an RFC 3339 timestamp (see utils.h for the exact rules). */
 bool validate_timestamp(const char *timestamp_str) {
     if (!timestamp_str) {
         return false;
     }
-
-    regex_t regex;
-    const char *pattern = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$";
-
-    if (regcomp(&regex, pattern, REG_EXTENDED) != 0) {
+    const char *s = timestamp_str;
+    size_t len = strnlen(s, TIMESTAMP_MAX_LEN + 1);
+    if (len > TIMESTAMP_MAX_LEN || len < 20) {   /* shortest: YYYY-MM-DDTHH:MM:SSZ */
         return false;
     }
-
-    int result = regexec(&regex, timestamp_str, 0, NULL, 0);
-    regfree(&regex);
-
-    return result == 0;
+    /* YYYY-MM-DDTHH:MM:SS: fixed positions, so a short string fails on its NUL */
+    if (s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':') {
+        return false;
+    }
+    int year = ts_digits(s, 4), month = ts_digits(s + 5, 2), day = ts_digits(s + 8, 2);
+    int hour = ts_digits(s + 11, 2), minute = ts_digits(s + 14, 2), second = ts_digits(s + 17, 2);
+    if (year < 0 || month < 1 || month > 12 || day < 1 || hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 || second < 0 || second > 60) {
+        return false;
+    }
+    static const int days_in_month[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    int last_day = days_in_month[month - 1] + (month == 2 && leap ? 1 : 0);
+    if (day > last_day) {
+        return false;
+    }
+    size_t i = 19;
+    if (s[i] == '.') {                              /* time-secfrac: "." 1*DIGIT */
+        size_t start = ++i;
+        while (s[i] >= '0' && s[i] <= '9') i++;
+        if (i == start) {
+            return false;
+        }
+    }
+    if (s[i] == 'Z') {
+        return s[i + 1] == '\0';
+    }
+    if (s[i] != '+' && s[i] != '-') {
+        return false;
+    }
+    /* +HH:MM needs 6 bytes; len bounds the reads, so s[i+1..i+5] are in the string */
+    if (len - i != 6 || s[i + 3] != ':') {
+        return false;
+    }
+    int off_h = ts_digits(s + i + 1, 2), off_m = ts_digits(s + i + 4, 2);
+    return off_h >= 0 && off_h <= 23 && off_m >= 0 && off_m <= 59;
 }
 
 /* Get human-readable language name */

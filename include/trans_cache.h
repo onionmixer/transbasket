@@ -95,11 +95,21 @@ struct TransCache {
  * Public API (backend-agnostic)
  * ============================================================================ */
 
+/* Options of the SQLite backend: TRANS_CACHE_SQLITE_JOURNAL_MODE / _SYNC
+ * (PLAN_CODE_ISSUES_4.md 1). NULL options or a NULL field means WAL / NORMAL,
+ * which is what cache_tool and the tests use. Names outside the loader's lists
+ * are refused by the backend as well; only canonical names reach SQL. */
+typedef struct {
+    const char *journal_mode;   /* DELETE TRUNCATE PERSIST MEMORY WAL OFF */
+    const char *synchronous;    /* OFF NORMAL FULL EXTRA */
+} SqliteCacheOptions;
+
 /* Initialize translation cache with specified backend type
  * Parameters:
  *   - type: Backend type (CACHE_BACKEND_TEXT, CACHE_BACKEND_SQLITE, etc.)
  *   - config_path: Configuration path (file path for text, DB path for sqlite, etc.)
- *   - options: Backend-specific options (can be NULL for defaults)
+ *   - options: Backend-specific options (can be NULL for defaults);
+ *     for CACHE_BACKEND_SQLITE a const SqliteCacheOptions *
  * Returns: Initialized cache or NULL on error
  */
 TransCache *trans_cache_init_with_backend(CacheBackendType type,

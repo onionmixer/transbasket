@@ -55,14 +55,12 @@ void trans_cache_calculate_hash(const char *from_lang,
 TransCache *trans_cache_init_with_backend(CacheBackendType type,
                                           const char *config_path,
                                           void *options) {
-    (void)options;  /* Not used yet */
-
     switch (type) {
         case CACHE_BACKEND_TEXT:
             return text_backend_init(config_path);
 
         case CACHE_BACKEND_SQLITE:
-            return sqlite_backend_init(config_path);
+            return sqlite_backend_init(config_path, (const SqliteCacheOptions *)options);
 
         case CACHE_BACKEND_MONGODB:
             LOG_INFO("MongoDB backend not yet implemented, using text backend\n");

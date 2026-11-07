@@ -782,7 +782,7 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
     char *resolved_prompt_path = resolve_path(resolved_config_path, actual_prompt_path);
 
     if (!resolved_prompt_path) {
-        LOG_INFO( "Error: Could not resolve prompt prefix path: %s\n", prompt_prefix_path);
+        LOG_INFO( "Error: Could not resolve prompt prefix path: %s\n", actual_prompt_path ? actual_prompt_path : "(unset)");
         free(resolved_config_path);
         free_config(config);
         return NULL;

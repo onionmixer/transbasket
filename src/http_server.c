@@ -493,7 +493,9 @@ TranslationServer *translation_server_init(Config *config, int max_workers) {
     }
 
     if (cache_path) {
-        server->cache = trans_cache_init_with_backend(config->cache_type, cache_path, NULL);
+        /* TRANS_CACHE_SQLITE_JOURNAL_MODE / _SYNC (validated by the loader); ignored by text */
+        SqliteCacheOptions sqlite_opts = { config->cache_sqlite_journal_mode, config->cache_sqlite_sync };
+        server->cache = trans_cache_init_with_backend(config->cache_type, cache_path, &sqlite_opts);
         if (!server->cache) {
             LOG_INFO("Warning: Failed to initialize cache, continuing without cache");
         } else {

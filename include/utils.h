@@ -48,7 +48,16 @@ const char *iso_639_2_code_at(size_t i);
 /* UUID v4 validation (RFC 4122) */
 bool validate_uuid(const char *uuid_str);
 
-/* RFC 3339 timestamp validation */
+/* Longest accepted request timestamp in bytes; TranslationRequest.timestamp holds
+ * it plus the NUL, so an accepted value is never truncated (PLAN_CODE_ISSUES_4.md 2). */
+#define TIMESTAMP_MAX_LEN 63
+
+/* RFC 3339 date-time (section 5.6) with range checks: month 01-12, day within the
+ * month (Gregorian leap years, 0000 included), hour 00-23, minute 00-59, second
+ * 00-60 (60 accepted at any time - looser than section 5.7, which ties it to real
+ * leap seconds), optional "." and 1+ digits, then "Z" or +/-HH:MM (00-23, 00-59).
+ * Upper-case "T" and "Z" only, at most TIMESTAMP_MAX_LEN bytes. Specification:
+ * tests/timestamp_ref.py. */
 bool validate_timestamp(const char *timestamp_str);
 
 /* Get human-readable language name from a supported 3-letter code */

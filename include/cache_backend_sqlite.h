@@ -32,9 +32,10 @@ typedef struct {
  * Creates database and tables if they don't exist.
  *
  * @param db_path Path to SQLite database file
+ * @param opts    journal / synchronous mode, NULL = WAL / NORMAL
  * @return TransCache instance or NULL on error
  */
-TransCache *sqlite_backend_init(const char *db_path);
+TransCache *sqlite_backend_init(const char *db_path, const SqliteCacheOptions *opts);
 
 /* Fill entry->hint from the (source_hint, mixed, origin, hint_version) columns
  * starting at `col` of a row that LEFT JOINs trans_cache_source_hint; invalid

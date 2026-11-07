@@ -63,6 +63,8 @@ TranslationRequest *parse_translation_request(const char *json_str) {
         return NULL;
     }
 
+    /* validate_timestamp() accepts at most TIMESTAMP_MAX_LEN bytes, so this never cuts */
+    _Static_assert(sizeof(req->timestamp) == TIMESTAMP_MAX_LEN + 1, "timestamp buffer");
     strncpy(req->timestamp, timestamp->valuestring, sizeof(req->timestamp) - 1);
 
     /* Parse UUID */

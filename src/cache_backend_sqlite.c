@@ -264,27 +264,88 @@ fail:
 }
 
 /* Apply PRAGMA optimizations */
+/* Canonical name for an accepted journal / synchronous value, or NULL. Same lists
+ * as the loader (config_loader.c); only these literals are ever put into SQL. */
+static const char *canonical_name(const char *v, const char *const *names, size_t n) {
+    for (size_t i = 0; v && i < n; i++) {
+        if (strcasecmp(v, names[i]) == 0) return names[i];
+    }
+    return NULL;
+}
+
+static const char *const JOURNAL_MODES[] = { "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF" };
+static const char *const SYNC_MODES[] = { "OFF", "NORMAL", "FULL", "EXTRA" };
+
 static int apply_pragmas(sqlite3 *db, const char *journal_mode, const char *sync_mode) {
     char *err_msg = NULL;
     char pragma_sql[256];
     int rc;
 
-    /* Set journal mode (WAL, DELETE, etc.) */
-    snprintf(pragma_sql, sizeof(pragma_sql), "PRAGMA journal_mode=%s;", journal_mode);
-    rc = sqlite3_exec(db, pragma_sql, NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) {
-        LOG_DEBUG("Error setting journal_mode: %s\n", err_msg);
-        sqlite3_free(err_msg);
-        return -1;
+    const char *jm = canonical_name(journal_mode ? journal_mode : "WAL", JOURNAL_MODES, 6);
+    const char *sm = canonical_name(sync_mode ? sync_mode : "NORMAL", SYNC_MODES, 4);
+    if (!jm) {   /* the loader already refused it; defensive */
+        LOG_INFO("Warning: unsupported SQLite journal mode, using WAL");
+        jm = "WAL";
+    }
+    if (!sm) {
+        LOG_INFO("Warning: unsupported SQLite synchronous mode, using NORMAL");
+        sm = "NORMAL";
     }
 
-    /* Set synchronous mode (FULL, NORMAL, OFF) */
-    snprintf(pragma_sql, sizeof(pragma_sql), "PRAGMA synchronous=%s;", sync_mode);
+    /* Set journal mode. The pragma returns the mode now in effect: SQLite keeps
+     * the old one (or e.g. "memory" for an in-memory database) when it cannot
+     * switch, which is a warning, not a failure; an SQL error still fails the
+     * cache initialisation as before. */
+    char actual_jm[32] = "";
+    snprintf(pragma_sql, sizeof(pragma_sql), "PRAGMA journal_mode=%s;", jm);
+    sqlite3_stmt *st = NULL;
+    rc = sqlite3_prepare_v2(db, pragma_sql, -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(st);
+        if (rc == SQLITE_ROW) {
+            const unsigned char *m = sqlite3_column_text(st, 0);
+            snprintf(actual_jm, sizeof(actual_jm), "%s", m ? (const char *)m : "");
+            rc = SQLITE_OK;
+        } else if (rc == SQLITE_DONE) {
+            rc = SQLITE_OK;
+        }
+    }
+    if (rc != SQLITE_OK) {
+        LOG_DEBUG("Error setting journal_mode: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(st);
+        return -1;
+    }
+    sqlite3_finalize(st);
+    if (strcasecmp(actual_jm, jm) != 0) {
+        LOG_INFO("Warning: SQLite journal_mode is %s, not the configured %s", actual_jm[0] ? actual_jm : "unknown", jm);
+    }
+
+    /* Set synchronous mode (OFF, NORMAL, FULL, EXTRA) */
+    snprintf(pragma_sql, sizeof(pragma_sql), "PRAGMA synchronous=%s;", sm);
     rc = sqlite3_exec(db, pragma_sql, NULL, NULL, &err_msg);
     if (rc != SQLITE_OK) {
         LOG_DEBUG("Error setting synchronous: %s\n", err_msg);
         sqlite3_free(err_msg);
         return -1;
+    }
+
+    /* What is in effect on this connection (synchronous is per connection). */
+    static const char *const SYNC_BY_LEVEL[] = { "OFF", "NORMAL", "FULL", "EXTRA" };
+    int level = -1;
+    if (sqlite3_prepare_v2(db, "PRAGMA synchronous;", -1, &st, NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        level = sqlite3_column_int(st, 0);
+    }
+    if (level < 0 || level > 3) {   /* an SQL error, as for the pragmas above: fail the init */
+        LOG_DEBUG("Error reading synchronous: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(st);
+        return -1;
+    }
+    sqlite3_finalize(st);
+    LOG_INFO("SQLite journal_mode=%s, synchronous=%s", actual_jm[0] ? actual_jm : "unknown", SYNC_BY_LEVEL[level]);
+    if (strcasecmp(actual_jm, "memory") == 0 || strcasecmp(actual_jm, "off") == 0 || level == 0) {
+        LOG_INFO("Warning: SQLite journal_mode=%s / synchronous=%s can corrupt the cache on a crash",
+                 actual_jm, SYNC_BY_LEVEL[level]);
     }
 
     /* Set cache size (2000 pages = ~2MB with 1KB page size) */
@@ -393,7 +454,7 @@ static int prepare_statements(SqliteBackendContext *ctx) {
 }
 
 /* Initialize SQLite backend */
-TransCache *sqlite_backend_init(const char *db_path) {
+TransCache *sqlite_backend_init(const char *db_path, const SqliteCacheOptions *opts) {
     if (!db_path) {
         LOG_DEBUG("Error: NULL database path\n");
         return NULL;
@@ -444,8 +505,8 @@ TransCache *sqlite_backend_init(const char *db_path) {
         return NULL;
     }
 
-    /* Apply PRAGMA optimizations (defaults: WAL, NORMAL) */
-    if (apply_pragmas(ctx->db, "WAL", "NORMAL") != 0) {
+    /* Apply PRAGMA settings after the schema work, as before (configured, else WAL / NORMAL) */
+    if (apply_pragmas(ctx->db, opts ? opts->journal_mode : NULL, opts ? opts->synchronous : NULL) != 0) {
         LOG_DEBUG("Error: Failed to apply PRAGMA settings\n");
         sqlite3_close(ctx->db);
         free(ctx->db_path);
