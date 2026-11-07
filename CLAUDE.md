@@ -347,6 +347,31 @@ Four items left out of earlier plans, fixed 2026-11-07 (each has a `make test-*`
   checked again on `sqlite3_db_filename()` after both are open, because SQLite folds `missing-dir/..` itself) is refused -
   outside WAL it blocks itself (measured with a hard link and with `./missing/../a.db`: every entry failed).
 
+### Fault-injection tests - PLAN_FAULT_INJECTION.md
+
+Paths that coverage (gcov, branch level) showed no test reached, tested 2026-11-07, with two fixes:
+
+- **Prompt building** (`test-fault-codex`): `build_instruction_message()` returns NULL when any substitution fails
+  (`str_replace()` is NULL only when it cannot allocate), for explicit sources too - before, a prompt with
+  `[TARGET LANGUAGE]`/`{SOURCE_LANG}`/`{TEXT}` still in it went to the model and could be cached. Never go on with a
+  placeholder left. The harness `#include`s `prompt_builder.c` and `backend_codex.c` with counting allocation macros
+  (system and project headers first, the two `.c` files left out of the link list) and fails every allocation in turn,
+  once ("single") and from there on ("persistent"); other translation units (cJSON, logging) are not counted.
+- **Stuck SQLite connection** (`test-fault-store`): `sqlite_backend_store_result()` first ends a transaction left open by
+  a failed ROLLBACK (`rollback_all()`) and then **skips that store (-1)**: its `cached` copy may come from a lookup that
+  saw the rolled-back writes (measured: it committed A x2 with the copy at B x2). The write lock is released and the
+  next lookup reads committed data again; before, every store failed until a restart. A row re-inserted because it
+  vanished since the lookup also clears the copy's hint when no new hint was written (its old hint was deleted with it). Only failures leave such a transaction: no caller may hold an explicit transaction on the
+  cache connection around `store_result` (the only other explicit one is the startup migration). The harness refuses
+  single statements through `sqlite3_set_authorizer()` (SAVEPOINT/RELEASE/ROLLBACK TO = `SQLITE_SAVEPOINT`,
+  BEGIN/COMMIT/ROLLBACK = `SQLITE_TRANSACTION`; refused = not executed), fails SQLite's own allocations through
+  `SQLITE_CONFIG_MALLOC` (must be set before the first open; lookaside off) and calls the backends' `store_result`
+  directly to reach their own deadline checks. The committed state is read through a second connection.
+- `test-fault-server`: no per-request temp cwd (run dir 0500 after startup) -> codex without `-C`/`-o`/`--output-schema`
+  in the server's cwd, plain prompt, script hint. **A release build logs nothing about that fallback** (the line is
+  `LOG_DEBUG`, compiled only with `-DDEBUG`). S1 at startup: exit 1 with `Error: Memory allocation failed`, never bound.
+- `cache_backend_sqlite.c` store loop: the "both attempts `continue`" exit is unreachable (both `continue`s clear the hint).
+
 ### Open-issue fixes - PLAN_OPEN_ISSUES.md
 
 Invariants added 2026-11-06 (each has a `make test-*` target):

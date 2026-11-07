@@ -703,6 +703,17 @@ SSE 주석, 루트 값 뒤의 (NUL 이 아닌) 잔여 바이트 — 요청 본�
   본문 (curl 명령, 원문 포함), codex 는 프롬프트 (원문 포함)·결과·codex stderr 꼬리.
   추적 템플릿의 기본값은 `DEBUG=no` 입니다.
 
+#### 메모리 부족·SQL 실패 (2026-11-07 실패 주입 시험)
+
+- 프롬프트를 만들다 메모리가 모자라면 그 요청은 실패합니다 (normal·codex 모두 `502`, 캐시 없음). 예전에는 명시적 원문 언어 요청에서
+  `[TARGET LANGUAGE]`·`{TEXT}` 같은 자리표시자가 그대로 남은 프롬프트로 번역해 그 결과를 `200` 으로 캐시할 수 있었습니다.
+- SQLite 캐시 연결이 ROLLBACK 에도 실패해 트랜잭션 안에 남으면 (`Error: cache connection is stuck in a transaction` 로그), 다음 저장이
+  먼저 그 트랜잭션을 끝내고 그 저장 자체는 건너뜁니다 (`Cache write skipped: ended a transaction an earlier failure left open` —
+  그 사이의 조회가 되돌려진 값을 봤을 수 있어서). 그 다음 저장부터 정상입니다. 예전에는 재시작 전까지 모든 캐시 쓰기가 실패하고 쓰기 잠금을 쥐어 `cache_tool` 도 막혔습니다.
+- codex 의 요청별 임시 디렉터리를 만들 수 없으면 (`CODEX_RUN_DIR` 에 쓸 수 없음) codex 는 서버의 작업 디렉터리에서 `-C`·`-o` 없이 실행되고
+  structured 출력 대신 plain 을 씁니다. 이 대체는 일반 빌드에서는 **로그에 남지 않습니다** — 기동 시점에 이미 쓸 수 없으면
+  `Warning: CODEX_RUN_DIR ...` 한 줄이 있을 뿐, 그 뒤에 생긴 문제는 아무 줄도 남기지 않습니다.
+
 #### 시간 한계
 
 | 항목 | 값 | 비고 |
