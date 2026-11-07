@@ -173,11 +173,12 @@ PORT="8889"
 | `SEED` | `42` | normal 요청 본문에 |
 | `REASONING_EFFORT` | `none` | normal 요청 본문에 (codex 는 `CODEX_REASONING_EFFORT`) |
 | `STREAM` | 끔 | `yes`·`1`·`true` 면 SSE 로 받음 (아래 "스트리밍 응답") |
+| `NORMAL_UNESCAPE` | `yes` | normal 번역문에 이스케이프 해제를 한 번 더 할지. `yes`·`1`·`true` / `no`·`0`·`false` (대소문자 무시), 그 밖의 값은 경고 후 `yes` (아래 "normal 백엔드 후처리") |
 | `DEBUG` | 끔 | `yes`·`1` 만 켬 (`true` 는 꺼짐). 켜면 `./trace/` 에 요청별 trace (아래 "로그") |
 | `TRANS_CACHE_TYPE` | `text` | `text` (JSONL) 또는 `sqlite`. `mongodb`·`redis` 는 미구현이라 경고 후 `text` |
 | `TRANS_CACHE_FILE` | `./trans_dictionary.txt` | text 캐시 파일 (cwd 기준) |
 | `TRANS_CACHE_SQLITE_PATH` | `./trans_cache.db` | SQLite 캐시 파일 (cwd 기준) |
-| `TRANS_CACHE_SQLITE_JOURNAL_MODE`, `TRANS_CACHE_SQLITE_SYNC` | `WAL`, `NORMAL` | journal: `DELETE` `TRUNCATE` `PERSIST` `MEMORY` `WAL` `OFF`, synchronous: `OFF` `NORMAL` `FULL` `EXTRA` (대소문자 무시, 그 밖의 값은 경고 후 기본값). 기동 로그 `SQLite journal_mode=..., synchronous=...` 에 실효값. SQLite 가 요청한 모드로 바꾸지 못하면 경고. `MEMORY`·`OFF`·synchronous `OFF` 는 충돌 시 캐시가 깨질 수 있다는 경고. 파일에 남는 것은 WAL 뿐이라, `cache_tool` (항상 WAL/NORMAL 로 엶) 은 다른 모드의 DB 를 WAL 로 바꾸려 합니다 (2026-11-07 전에는 이 두 키가 적용되지 않았음) |
+| `TRANS_CACHE_SQLITE_JOURNAL_MODE`, `TRANS_CACHE_SQLITE_SYNC` | `WAL`, `NORMAL` | journal: `DELETE` `TRUNCATE` `PERSIST` `MEMORY` `WAL` `OFF`, synchronous: `OFF` `NORMAL` `FULL` `EXTRA` (대소문자 무시, 그 밖의 값은 경고 후 기본값). 기동 로그 `SQLite journal_mode=..., synchronous=...` 에 실효값. SQLite 가 요청한 모드로 바꾸지 못하면 경고. `MEMORY`·`OFF`·synchronous `OFF` 는 충돌 시 캐시가 깨질 수 있다는 경고. 파일에 남는 것은 WAL 뿐입니다. `cache_tool` 은 journal 모드를 바꾸지 않습니다 (아래 "cache_tool.c"; 2026-11-07 전에는 이 두 키가 적용되지 않았고, `cache_tool` 이 DB 를 WAL 로 바꿨음) |
 | `TRANS_CACHE_THRESHOLD` | `5` | 같은 번역 결과가 나온 횟수 (캐시 사용 포함) 가 이 값 이상이어야 캐시를 씀. 결과가 달라지면 1 로 되돌아감. 1 미만은 5. codex 는 1 권장 |
 | `TRANS_CACHE_CLEANUP_ENABLED` | 켬 | `yes`·`1`·`true` 면 켬. 기간은 `TRANS_CACHE_CLEANUP_DAYS` (아래 "시간 한계") |
 
@@ -518,14 +519,15 @@ SQLite의 기존 버전 0/1 DB는 시작 시 버전 2로 이전하며, 기존 �
 - `timestamp` (string): 요청의 타임스탬프 (원본 그대로 반환)
 - `uuid` (string): 요청의 UUID (원본 그대로 반환)
 - `translatedText` (string): 번역된 텍스트
-  - `MODEL_TYPE="normal"`: 이스케이프 해제 + 이모지/단축코드 제거 + 공백 정규화. 길이로 잘리지 않습니다 (upstream 응답 본문이 4 MB 를 넘으면 `502`, 아래 한계 표)
+  - `MODEL_TYPE="normal"`: 이스케이프 해제 (`NORMAL_UNESCAPE`, 기본 켬) + 이모지/단축코드 제거 + 공백 정규화. 길이로 잘리지 않습니다 (upstream 응답 본문이 4 MB 를 넘으면 `502`, 아래 한계 표)
   - `MODEL_TYPE="codex"`: 앞뒤 공백 제거와 전체 코드펜스 언랩만 적용. codex 결과가 4 MB (`CODEX_OUT_MAX`) 를 넘으면 잘리지 않고 `502`
 
 **Status Codes:**
 - `200 OK`: 번역 성공
+- `413 Content Too Large`: 요청 본문이 1 MiB (1,048,576 바이트) 를 넘음 (`errorCode` `PAYLOAD_TOO_LARGE`, 아래 "크기 한계")
 - `422 Unprocessable Entity`: JSON 파싱 실패 또는 유효하지 않은 UUID, 언어 코드, 타임스탬프, 텍스트.
-  U+0000 으로 디코드되는 `\u` 이스케이프(`\u0000`, 또는 `\u00ZZ` 처럼 뒤 4바이트가 16진수가 아닌 것)가 본문 어디에든 있는 경우도 포함
-  (아래 "문자열 무결성" 참고)
+  U+0000 으로 디코드되는 `\u` 이스케이프(`\u0000`, 또는 `\u00ZZ` 처럼 뒤 4바이트가 16진수가 아닌 것)가 본문 어디에든 있는 경우,
+  본문 어디에든 원시 NUL 바이트가 있는 경우도 포함 (아래 "문자열 무결성" 참고)
 - `500 Internal Server Error`: 예상치 못한 내부 오류
 - `502 Bad Gateway`: OpenAI API 4xx 오류 (재시도 불가). 그 밖에 upstream 응답이 4 MB 를 넘거나, 깨진 SSE 이벤트·`error` 이벤트,
   비어 있는 번역, U+0000 으로 잘릴 응답도 `502` 입니다 (아래 "한계와 보장")
@@ -619,9 +621,22 @@ normal의 전체 시간 초과는 503, codex는 504입니다. 전체 예산 내 
 | 요청 `text` 길이 | **10,000 바이트** (`MAX_TEXT_LENGTH`) | `422 VALIDATION_ERROR` (명시적 거부) |
 | 요청 `timestamp` 길이 | **63 바이트** (`TIMESTAMP_MAX_LEN`) | `422` (2026-11-07 전에는 63바이트로 잘린 값이 응답에 들어갔음) |
 | 요청 `text` 최소 길이 | 1 바이트 | `422` |
-| HTTP 요청 본문 전체 크기 | **상한 없음** | 서버가 메모리에 그대로 누적. 신뢰할 수 없는 클라이언트에 노출할 때는 앞단(리버스 프록시)에서 제한 필요 |
+| HTTP 요청 본문 전체 크기 (`/translate`) | **1 MiB** (1,048,576 바이트, `MAX_REQUEST_BODY`) | `413 PAYLOAD_TOO_LARGE`. 아래 참고 |
 | upstream 응답 본문 — `normal` (비스트리밍·스트리밍) | **4 MB** (`MAX_UPSTREAM_RESPONSE`) | 절단이 아니라 오류(`502`), 재시도·캐시 없음 |
 | 응답 길이 — `codex` | **4 MB** (`CODEX_OUT_MAX`) | 넘으면 절단이 아니라 오류(`502`). structured 모드는 JSON 전체가 이 한도 안에 들어야 함 |
+
+요청 본문 상한 (2026-11-07 부터, `src/http_server.c`):
+
+- 정상 요청의 최대 크기는 약 60,000 바이트입니다 (`text` 10,000 바이트를 모두 `\u00XX` 로 써도). 1 MiB 는 그 17배쯤입니다.
+- `Expect: 100-continue` 와 함께 1 MiB 를 넘는 `Content-Length` 를 보내면 본문을 받기 전에 바로 413 을 보내고 연결을 닫습니다
+  (`100 Continue` 없음). 그 밖의 경우 (Content-Length 만, 또는 `Transfer-Encoding: chunked`) 는 상한을 넘은 뒤의 바이트를 저장하지 않고
+  끝까지 받아서 버린 뒤 413 을 보내며, keep-alive 연결은 그대로 다음 요청을 받습니다 — 이미 보내고 있는 클라이언트의 연결을 끊으면
+  413 대신 연결 리셋을 받을 수 있기 때문입니다.
+- 메모리는 연결당 1 MiB 남짓으로 묶이지만, **연결 점유는 막지 못합니다**: MHD 연결 타임아웃 120초는 무활동 기준이라 조금씩 계속
+  보내는 클라이언트는 연결을 오래 잡을 수 있습니다. 신뢰할 수 없는 클라이언트에 노출할 때는 앞단(리버스 프록시)의 제한을 유지하세요.
+- 실측 (수정 전 → 후): 64 MiB 본문 200·약 4 s·최대 RSS 약 155 MiB → 413·RSS 증가 없음. 예전 누적 (청크마다 `strlen` 과 정확한 크기의
+  `realloc`) 은 16 MiB → 64 MiB 에서 시간이 28~31배 (선형 4배, 제곱 16배) 로 늘었습니다. 1 MiB 이하에서는 예전에도 빨랐으므로
+  (0.01 s 안팎), 이 비용을 막는 것은 상한이고, 새 누적 (길이 기록, 용량 2배씩) 은 상한 안에서 선형입니다.
 
 > **2026-11-06 이전**: `normal` 백엔드는 번역문을 **8,191 바이트에서 조용히** 잘라 200 으로 응답·캐시했고(문자 중간에서
 > 끊기기도 함), 스트리밍은 65,535 바이트에서 멈췄습니다. 지금은 후처리 버퍼를 입력 길이로 잡아 잘리지 않습니다
@@ -640,8 +655,11 @@ cJSON 1.7.15 는 `\u0000` 과, 뒤 4바이트가 16진수가 아닌 모든 `\u` 
 | codex exec 출력(plain)에 원시 NUL 바이트 | `502`, 캐시 없음 |
 | codex structured 출력 | 기존대로 `strict_json_validate()` 가 거부 (`502`) |
 
+요청 본문에 **원시 NUL 바이트** (이스케이프가 아닌 0x00) 가 어디든 있으면 `422` 입니다 (2026-11-07 부터). JSON 에는 원시 NUL 이 올 수 없는데,
+예전에는 본문을 C 문자열로 다뤄 NUL 뒤를 조용히 버렸기 때문에 `올바른 JSON + NUL + 아무 바이트` 가 200 이었습니다. 1 MiB 를 넘으면 413 이 우선합니다.
+
 영향이 없는 것: 백슬래시를 이스케이프한 문자 그대로의 `\\u0000`, `\u00e9`·서로게이트 짝 같은 정상 이스케이프,
-SSE 주석, 비스트리밍 본문의 루트 값 뒤 잔여 바이트. (SSE 의 깨진 이벤트는 2026-11-06 부터 `502` — 아래 "스트리밍 응답".)
+SSE 주석, 루트 값 뒤의 (NUL 이 아닌) 잔여 바이트 — 요청 본문과 비스트리밍 응답 모두 cJSON 이 무시합니다. (SSE 의 깨진 이벤트는 2026-11-06 부터 `502` — 아래 "스트리밍 응답".)
 
 #### 스트리밍 응답 (`STREAM=yes`, `normal`)
 
@@ -666,7 +684,14 @@ SSE 주석, 비스트리밍 본문의 루트 값 뒤 잔여 바이트. (SSE 의 
   (2026-11-06 이전에는 `at 10:30` → `at 10`, `http://` → `http//` 처럼 콜론을 지웠습니다). 남는 것: `:+1:`, `:Smile:`, `word:smile:`.
   지워지는 것: URL 경로 `/:id:/`, 백틱 안 `` `:symbol:` ``, `가:smile:나`.
 - 잘못된 UTF-8 바이트는 그대로 둡니다 (overlong·서로게이트·범위 밖 포함).
-- cJSON 이 이미 디코드한 문자열에 `\n`·`\t` 등의 이스케이프 해제를 한 번 더 적용합니다 — 번역문 속 글자 그대로의 `\n` 은 줄바꿈이 됩니다 (기존 동작, 유지).
+- 기본 (`NORMAL_UNESCAPE=yes`) 으로 cJSON 이 이미 디코드한 문자열에 이스케이프 해제를 한 번 더 적용합니다: `\n` `\t` `\r` `\\` `\"` `\'`
+  여섯 가지 (`\u`·`\/`·모르는 이스케이프·끝의 백슬래시는 그대로). 그래서 번역문 속 글자 그대로의 백슬래시가 바뀝니다 —
+  `C:\new\table` 은 줄바꿈·탭이 되고, `\\` 는 `\` 하나가 됩니다 (정규식·LaTeX·Windows 경로). 첫 버전부터 있던 동작이고 기본값은 그대로입니다.
+- `NORMAL_UNESCAPE=no` 면 이 두 번째 해제를 하지 않고 디코드된 그대로 둡니다 (이모지·단축코드 제거와 공백 정리는 그대로 — 그래서 `\t`·`\r`
+  이 실제 탭·CR 이 되든 안 되든 결국 공백으로 정리되고, 차이가 나는 것은 주로 줄바꿈과 백슬래시입니다). 줄바꿈을 `\n` 두 글자로 내는
+  모델이면 `yes` 가 필요할 수 있으니 실제 출력을 보고 정하세요. 비스트리밍·SSE 둘 다 같습니다.
+- **이미 캐시된 번역은 바뀌지 않습니다.** 캐시 키는 원문만으로 만들어지므로 `no` 로 바꿔 재시작해도 `yes` 때 저장된 번역 (잃은 백슬래시 포함)
+  이 계속 나옵니다. 새 처리로 다시 받으려면 normal 캐시를 비우세요 (`cache_tool clear` 또는 파일 교체, 되돌릴 수 없음).
 
 #### 로그
 
@@ -697,6 +722,9 @@ SSE 주석, 비스트리밍 본문의 루트 값 뒤 잔여 바이트. (SSE 의 
 - 서로 다른 활성 번역 키는 `INFLIGHT_MAX_KEYS`로 제한하며, 같은 키의 요청은 한 작업을 공유합니다.
 - codex 백엔드에서 **실제로 동시에 번역되는 요청 수는 `CODEX_MAX_CONCURRENCY`** 입니다. 초과분은 즉시 거부되지 않고
   슬롯을 기다립니다. 병합 대기 한도와 전체 작업 마감도 함께 적용됩니다.
+- 슬롯 대기는 **선착순** 입니다 (2026-11-07 부터, `src/slot_gate.c`): 대기열에 들어온 순서대로 슬롯을 받고, 기다리는 요청이 있으면 새로 온
+  요청도 줄을 섭니다. 순서는 대기열에 들어간 순서이지 HTTP 도착 순서가 아닙니다 (보통 같음). 예전에는 대기자가 20 ms 마다 다시 시도해서,
+  먼저 기다린 요청이 마감에 걸리고 나중에 온 요청이 슬롯을 가져가는 일이 있었습니다 (실측: 슬롯 1개·느린 요청 4개에서 마지막 요청이 슬롯을 얻음).
 - **요청 간 격리는 보장됩니다.** 응답의 `uuid`/`timestamp` 는 그 요청의 값이며, 다른 요청의 번역문이 섞이지 않습니다.
   (실측: 서로 다른 12개 원문을 동시 200 스레드로 1,200건 호출 시 불일치 0건, keep-alive 연결 재사용 240건 불일치 0건,
   codex 실호출 동시 8건 8/8 일치)
@@ -740,7 +768,7 @@ transbasket/
 │   ├── utils.h  config_loader.h  json_handler.h
 │   ├── http_client.h  http_server.h  codex_exec.h  codex_driver.h
 │   ├── backend_normal.h  backend_codex.h  prompt_builder.h  trace_file.h
-│   ├── inflight_translation.h  translation_control.h
+│   ├── inflight_translation.h  translation_control.h  slot_gate.h
 │   ├── language_table.h
 │   └── trans_cache.h  cache_backend_text.h  cache_backend_sqlite.h
 ├── src/                        # Source files
@@ -748,6 +776,7 @@ transbasket/
 │   ├── http_client.c  http_server.c  codex_exec.c  codex_driver_exec.c
 │   ├── backend_normal.c  backend_codex.c  prompt_builder.c  trace_file.c
 │   ├── inflight_translation.c   # Shared running translations and waiter lifetime
+│   ├── slot_gate.c             # FIFO codex concurrency slots
 │   ├── language_table.c
 │   ├── trans_cache.c  cache_backend_text.c  cache_backend_sqlite.c
 │   └── cache_tool.c            # Cache management tool (separate binary)
@@ -797,7 +826,7 @@ transbasket/
 - normal: OpenAI API communication with libcurl, SSE parsing, retry with exponential backoff
 
 ### backend_codex.c
-- codex: concurrency semaphore, per-request temp cwd, delimiter-isolated prompt, structured output,
+- codex: FIFO concurrency slots (`slot_gate.c`), per-request temp cwd, delimiter-isolated prompt, structured output,
   post-processing and status codes; runs codex through a driver (`codex_driver.h`, today `codex exec`)
 
 ### prompt_builder.c / trace_file.c
@@ -816,7 +845,7 @@ transbasket/
 - HTTP server with libmicrohttpd
 - Thread-per-connection model
 - Health check endpoint
-- Translation endpoint
+- Translation endpoint (request body up to 1 MiB, accumulated linearly; 413 above, 422 for a raw NUL)
 - Error response handling
 
 ### inflight_translation.c
@@ -850,6 +879,12 @@ transbasket/
 - `list`/`stats` show the source_hint of auto rows; `migrate` carries hints (an existing destination
   row keeps its translation, hints merge by priority: model > script)
 - `backfill-hints --backend <text|sqlite> --config <path> [--dry-run]` fills missing/outdated script hints
+- SQLite journal mode: `migrate` (source and destination) and `backfill-hints` (also `--dry-run`) **leave it as it is** - a
+  `DELETE` database stays `DELETE`, a `WAL` one stays `WAL` (the tool cannot know the server's
+  `TRANS_CACHE_SQLITE_JOURNAL_MODE`; until 2026-11-07 it switched every database it opened to WAL). A database the tool creates
+  starts in SQLite's default `delete` and gets the server's setting when the server first opens it. Migrating a SQLite file onto
+  itself (same file - also through a symlink, a hard link or `dir/..`) is refused. Outside WAL mode, using the tool while the server runs on the same
+  database can make one wait for the other's lock
 - Language filters accept `auto` only as source, including case-insensitive `AUTO`
 
 text 캐시의 자동 감지 항목은 다음처럼 관리합니다. `-f` 등 전역 옵션은 명령 앞에 둡니다.

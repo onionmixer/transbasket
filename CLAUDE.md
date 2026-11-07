@@ -80,6 +80,7 @@ The C implementation follows a clear separation of concerns across these core mo
 9. **strict_json.c**: strict validator for codex structured output, run before cJSON
 10. **listen_address.c**: `LISTEN` parser and LISTEN line recognizer (see "LISTEN address" below)
 11. **daemon.c**: `-d` with a start report to the launcher (see "Open-issue fixes" below)
+12. **slot_gate.c**: FIFO concurrency slots for the codex backend (see "Out-of-scope fixes" below)
 
 (Cache and language-table concerns live in `trans_cache.c`, `cache_backend_*.c`, and `language_table.c`.)
 
@@ -107,7 +108,7 @@ Implementation in `http_server.c`:
 - `MHD_USE_THREAD_PER_CONNECTION` flag creates dedicated threads
 - `openai_translate()` called directly (no executor needed)
 
-Only a group's owner invokes the engine and, in codex mode, obtains a semaphore slot and spawns a child.
+Only a group's owner invokes the engine and, in codex mode, obtains a FIFO slot (`slot_gate.c`) and spawns a child.
 Followers block on a monotonic condition variable without starting their own engine invocation.
 
 ### Request Flow
@@ -208,7 +209,7 @@ codex backend specifics:
 - exec: `CODEX_APPROVAL_POLICY` / `CODEX_REASONING_EFFORT` become TOML `-c key="value"` overrides, so `validate_config()` restricts them to `[A-Za-z0-9._-]{1,64}`.
 - exec: `--ephemeral` is passed only if `codex exec --help` advertises it (keeps `$CODEX_HOME/sessions` from growing).
 - **MCP servers / plugins from the codex user's `config.toml` start on every translation** and their tools are not covered by `sandbox=read-only`, so untrusted text could steer codex into calling them (measured: 5 configured servers → 9 helper processes per request). `CODEX_IGNORE_USER_CONFIG=true` passes `--ignore-user-config`, which also drops the config's `model`, so `CODEX_MODEL` must be set — codex's built-in default model rejected `model_reasoning_effort="none"`. Default is `false` so existing deployments keep working; startup logs a warning listing the servers.
-- Concurrency is capped by a semaphore in `OpenAITranslator` (`CODEX_MAX_CONCURRENCY`, default = `MAX_WORKERS`); exhaustion → 503, call timeout → 504.
+- Concurrency is capped by a FIFO slot gate in `OpenAITranslator` (`codex_slots`, `CODEX_MAX_CONCURRENCY`, default = `MAX_WORKERS`); slot wait timeout → 503, call timeout → 504.
 - Untrusted text is isolated with a per-request random delimiter (uuid-based); `sandbox=read-only`/`approval-policy=never` are force-validated unless `CODEX_ALLOW_UNSAFE=true`.
 - Each request runs in a fresh `mkdtemp` cwd under `CODEX_RUN_DIR` (default `/var/lib/transbasket/run`, created 0700 at startup if missing), removed afterward. This is best effort: if `mkdtemp` fails, codex runs without `-C`/`-o` in the server's cwd and the result comes from stdout; structured mode needs the cwd and falls back to plain output.
 - codex output is **not** re-unescaped or emoji-stripped (would corrupt it), only trimmed + whole-output code-fence unwrapped.
@@ -320,6 +321,32 @@ Four defects found by the 2026-11-06 documentation review, fixed 2026-11-07:
   cache lookup, so a cached source text with a bad timestamp is a 422 too.
 - `load_config()` logs the prompt path it actually tried (it logged the `-p` argument, NULL without `-p`).
 
+### Out-of-scope fixes - PLAN_OUT_OF_SCOPE.md
+
+Four items left out of earlier plans, fixed 2026-11-07 (each has a `make test-*` target):
+
+- **Request body** (`test-request-body`, `BODY_OLD_BIN=`): `/translate` keeps a `RequestBody` (length, capacity doubling up
+  to `MAX_REQUEST_BODY` + 1, `too_large`, `has_nul`) - no `strlen` per chunk. Over 1 MiB the bytes are counted, not kept,
+  and the answer is 413 `PAYLOAD_TOO_LARGE` after the upload (keep-alive survives). Only `Expect: 100-continue` with a
+  Content-Length over the limit is refused on the headers-only first call (MHD skips the body, sends no 100, closes);
+  doing that without Expect loses the 413 to a reset (measured). A raw NUL anywhere is 422; 413 wins. The inactivity
+  timeout still lets a slow sender hold a connection - keep proxy limits.
+- **`NORMAL_UNESCAPE`** (`test-normal-unescape`): default `yes` = the old second `unescape_string()` pass over text cJSON
+  already decoded; `no` copies the decoded text. Emoji/shortcode strip and whitespace cleanup run either way. Cached
+  translations are not reprocessed (the key is the source text).
+- **FIFO codex slots** (`test-slot-gate` plain + TSan, `test-codex-fifo`, `FIFO_OLD_BIN=`): one mutex; a slot goes only to
+  the queue head; a newcomer queues whenever the queue is not empty; leave = unlink anywhere + broadcast; broadcast on
+  release and after a grant while slots remain; monotonic condvar. Order kept from the old `sem_trywait` loop: a free
+  slot is tried before the waiter's own deadline is looked at, but not after the total deadline/cancellation has hit
+  during a wait; waits are 20 ms slices cut to either deadline. FIFO = join order, not HTTP arrival order. The unit
+  test's mutants (signal instead of broadcast, missing wakes, overtaking, deadline orders) are all caught.
+- **cache_tool journal** (`test-cache-tool-journal`, `TOOL_OLD_BIN=`): `SqliteCacheOptions.keep_journal_mode` reads the
+  mode instead of setting it (no mismatch warning); `cache_tool` sets it for all three SQLite opens (migrate source and
+  destination, backfill incl. `--dry-run`). The server and harnesses keep NULL = WAL/NORMAL. A migrate whose source and
+  destination are the same file (`same_file()`: device+inode, or the parent's realpath for paths that do not exist yet;
+  checked again on `sqlite3_db_filename()` after both are open, because SQLite folds `missing-dir/..` itself) is refused -
+  outside WAL it blocks itself (measured with a hard link and with `./missing/../a.db`: every entry failed).
+
 ### Open-issue fixes - PLAN_OPEN_ISSUES.md
 
 Invariants added 2026-11-06 (each has a `make test-*` target):
@@ -383,8 +410,9 @@ the supported-code/name lists and Chinese tag parser, with a separate source-mod
 ### Error Handling Strategy
 
 **HTTP Status Code Mapping:**
+- 413: `/translate` body over 1 MiB (`PAYLOAD_TOO_LARGE`, see "Out-of-scope fixes")
 - 422: JSON parsing failures and validation errors (invalid UUID, language code, timestamp or text,
-  or an escape that cJSON would decode to U+0000 - see "cJSON NUL guard");
+  an escape that cJSON would decode to U+0000 - see "cJSON NUL guard" - or a raw NUL byte in the body);
   `handle_translate()` maps every failed `parse_translation_request()` to this status
 - 500: Unexpected internal errors
 - 502: OpenAI API 4xx errors (non-retryable); also a normal reply over 4 MB, a bad SSE event, an upstream
@@ -451,7 +479,8 @@ Implementation in `json_handler.c:create_translation_response()`.
 
 ### Emoji and Shortcode Stripping
 
-**Normal backend only.** `strip_emoji_and_shortcodes()` runs in `translate_via_openai()` and nowhere
+**Normal backend only.** Before it, `unescape_string()` runs a second escape pass unless `NORMAL_UNESCAPE=no`
+(default `yes`, see "Out-of-scope fixes"). `strip_emoji_and_shortcodes()` runs in `translate_via_openai()` and nowhere
 else; the codex path deliberately skips it (re-processing already-decoded output would corrupt it) and
 only trims plus unwraps a whole-output code fence. Until 2026-11-06 this was also where normal replies were
 cut at 8,191 bytes and where every `:` was swallowed (`10:30` -> `10`); see "Open-issue fixes".
@@ -473,6 +502,7 @@ Public-facing copies live in `README.md` → "한계와 보장"; keep both in sy
 
 | Constant | File | Value | Behaviour at the limit |
 |---|---|---|---|
+| `MAX_REQUEST_BODY` | `http_server.c` | 1 MiB (1,048,576 bytes) | 413 `PAYLOAD_TOO_LARGE`; bytes past it are drained, not kept |
 | `MAX_TEXT_LENGTH` | `json_handler.c` | 10,000 bytes | request rejected with 422 (explicit) |
 | `TIMESTAMP_MAX_LEN` | `utils.h` | 63 bytes | request rejected with 422 (the field is `char[64]`; a `_Static_assert` ties them) |
 | `MIN_TEXT_LENGTH` | `json_handler.c` | 1 byte | 422 |
@@ -484,7 +514,7 @@ Public-facing copies live in `README.md` → "한계와 보장"; keep both in sy
 
 The codex path deliberately bypasses `unescape_string()`/`strip_emoji_and_shortcodes()`. The old `normal` caps (16 KB unescape, 8 KB cleaned, 64 KB stream - all silent) were removed on 2026-11-06; measured since: 40,000-byte replies and 96,000-byte streams come back whole.
 
-There is **no cap on the accumulated HTTP request body** (`handle_translate()` reallocs per chunk); only the parsed `text` field is length-checked. The accumulation also uses `strlen()` per chunk, so it is O(n²) in body size and stops at the first NUL byte.
+Until 2026-11-07 there was **no cap on the accumulated HTTP request body**, and the accumulation used `strlen()` plus an exact-size `realloc` per chunk (16 -> 64 MiB took 28-31x the time) and stopped at the first NUL byte. Now the body is capped at `MAX_REQUEST_BODY` and accumulated linearly; below 1 MiB the old code was fast too, so the cap is what removes the cost.
 
 ### Known thread-safety caveats (accepted, documented)
 

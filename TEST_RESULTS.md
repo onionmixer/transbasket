@@ -1,9 +1,26 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **코드 문제 4건 수정 검증 2026-11-07** 이고, 그 아래가 **번역 백엔드 모듈 분리 검증 2026-11-06**, 그 아래가 **레거시 MCP 제거 검증 2026-11-06**, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
+> 최신 기록은 바로 아래의 **범위 밖 4건 수정 검증 2026-11-07** 이고, 그 아래가 **코드 문제 4건 수정 검증 2026-11-07**, 그 아래가 **번역 백엔드 모듈 분리 검증 2026-11-06**, 그 아래가 **레거시 MCP 제거 검증 2026-11-06**, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
+
+## 범위 밖 4건 수정 검증 2026-11-07
+
+설계·결정 (사용자: 권장안)·codex 판정 (계획 1회, 구현 1회) 은 [PLAN_OUT_OF_SCOPE.md](PLAN_OUT_OF_SCOPE.md).
+수정 전 대조는 `1348a53` 빌드.
+
+| 대상 | 명령 | 결과 |
+|---|---|---|
+| 요청 본문 (A) | `make test-request-body BODY_OLD_BIN=<이전>` | 11건 통과: 1 MiB 경계 (상한 −1·상한 200, +1 413 — Content-Length·chunked 각각), `Expect: 100-continue` 초과는 본문 없이 413·100 없음·연결 닫힘, 미만은 100 뒤 200, keep-alive 413/200/413/200, 64 MiB 5건 모두 413·최대 RSS +0 KiB (하나)·+3,208 KiB (넷 동시), 원시 NUL 3위치 422·상한 넘는 NUL 413, 거부 요청 (처음 보내는 원문) 의 upstream 호출 0·저장된 캐시에 없음, 쓰기 크기 1 B~64 KiB 같은 응답, 중도 끊김 뒤 정상. 수정 전: NUL+잔여 200, 상한 +1 200. 64 MiB 는 수정 전 200·3.93 s/3.97 s·최대 RSS 154.6/155.7 MiB (158,268/159,388 KiB), 16→64 MiB 시간 ×28.1/×30.5. 1 MiB 이하는 수정 전에도 0.01 s 안팎 (처음 기록한 4.98 s 는 종료 시간을 잰 시험 버그) |
+| `NORMAL_UNESCAPE` (B) | `make test-normal-unescape` | 13건 통과: 기본·`yes`·`no`·`NO`·`0`·잘못된 값 (경고 후 `yes`) × JSON·SSE (이벤트 경계에 걸친 이스케이프), 기대 바이트는 `tests/strip_ref.py`, 탭만 남는 응답 (`yes` 502·`no` 200), 캐시 값, `yes` 때 캐시된 번역이 `no` 재시작 뒤에도 upstream 호출 없이 그대로. 이전 바이너리는 이 키를 경고 없이 무시 (기동 확인) |
+| FIFO 슬롯 (C) | `make test-slot-gate` (plain + TSan), `make test-codex-fifo FIFO_OLD_BIN=<이전>` | 단위 13항목 × 2 통과: 넣은 순서 (슬롯 1·3), 머리·가운데·꼬리 이탈 (제때, 순서·슬롯 유지), 끼어들기 없음, 취소 최악 20 ms, 전체 마감 뒤 풀린 슬롯 받지 않음, 전체 마감에 0 ms 늦게 끝남, 자기 마감 직후 풀린 슬롯은 받음, hand-off 최악 1 ms, 300회 무작위. 변이 9/9 검출 (signal 대신 broadcast 는 3슬롯 경우 200회로 10/10). 서버: 슬롯 1·느린 요청 4개 3회 모두 [504, 504, 503, 503]; 수정 전은 5회 모두 [504, 503, 503, 504] (마지막 요청이 슬롯을 얻음) |
+| cache_tool journal (D) | `make test-cache-tool-journal TOOL_OLD_BIN=<이전>` | DELETE·WAL × backfill (hint 3건)·dry-run (행 그대로)·migrate 원본·새 대상 (`delete` 로 시작, 서버가 열면 `wal`)·기존 DELETE/WAL 대상 모두 모드 유지, 같은 파일 거부 6가지 (같은 경로·심볼릭·하드 링크·상대 경로·`없는디렉터리/..`·아직 없는 경로, 파일 안 만듦), 서로 다른 새 파일 둘은 허용, 서버가 DELETE DB 를 연 채 backfill 완료. 수정 전 `--dry-run` 이 DELETE DB 를 `wal` 로. 같은 파일 판정 변이 3개 검출 |
+| 회귀 | `make test-*` 30종, `test_config_limits.py`, 프롬프트 회귀 24건, parity 13 시나리오 (일반·ASan), ASan 서버 3종 + 새 서버 시험 3종, ASan `test-codex-backend` | 모두 통과, 빌드 경고 0, sanitizer 보고 0. 템플릿 주석 추가 뒤 `test-config-syntax` 다시 통과, cache_tool 사후 검사 추가 뒤 cache_tool 을 쓰는 시험 6종 다시 통과 |
+| 메모리 | valgrind | 서버 (`NORMAL_UNESCAPE=no`, 200·413 세 경로·NUL 422 두 경우·상한 앞뒤 중도 끊김): 오류 0, 종료 때 힙 전부 해제. cache_tool (migrate·backfill·dry-run·같은 파일 거부 2경우): 오류 0 |
+| 배포 설정 3개 | 사본을 네임스페이스에서 수정 전·후 바이너리로 기동 | 모두 기동, 경고·오류 0, 수정 전과 같은 줄 |
+
+동작 변화: `/translate` 본문 1 MiB 초과 413, 원시 NUL 422, codex 슬롯은 대기열 순서, `cache_tool` 은 journal 모드를 바꾸지 않고 같은 파일 migrate 를 거부. `NORMAL_UNESCAPE` 기본값은 예전 동작.
 
 ## 코드 문제 4건 수정 검증 2026-11-07
 
