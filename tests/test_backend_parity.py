@@ -159,6 +159,10 @@ MASKS = [
     (re.compile(r"tb-[A-Za-z0-9]{6}"), "tb-XXXXXX"),
 ]
 BACKGROUND = ("Cache background thread", "Saving translation cache", "Translation cache saved", "SQLite cache")
+# The one start line added by PLAN_CONNECTION_LIMIT.md (none of the scenarios sets HTTP_MAX_CONNECTIONS): it is
+# taken out before the comparison, and main() checks that the new binary printed it exactly once and the old
+# one at most once (a binary from before 2026-11-09 prints none).
+LIMIT_LINE = "[T][INFO] HTTP connection limit: 1020 (libmicrohttpd default)"
 
 
 def norm(text, d, port):
@@ -247,9 +251,12 @@ def run(binary, scen, workroot):
         for f in sorted((d / "trace").iterdir()):
             traces[f.name] = norm(f.read_text(errors="replace"), d, port)
     lines = norm((d / "log").read_text(errors="replace"), d, port)
+    limit_lines = lines.count(LIMIT_LINE)
+    lines = [l for l in lines if l != LIMIT_LINE]
     bodies = sorted(MASKS[2][0].sub("===SRC-D===", b.decode(errors="replace")) for b in UP.bodies)
     shutil.rmtree(d)
-    return {"replies": replies, "calls": calls, "log": split_log(lines), "traces": traces, "upstream": bodies}
+    return {"replies": replies, "calls": calls, "log": split_log(lines), "traces": traces, "upstream": bodies,
+            "limit_lines": limit_lines}
 
 
 FULL = "--skip-git-repo-check --color --ephemeral --ignore-user-config -o --output-last-message --output-schema"
@@ -332,6 +339,9 @@ def main():
                   f"{sum(map(len, a['log'][0].values())) + len(a['log'][1]) + sum(a['log'][2].values())}")
             if scen.get("unordered") and sorted(statuses) != scen["unordered"]:
                 FAILURES.append(f"{scen['name']}: statuses {sorted(statuses)}, expected {scen['unordered']}")
+            if b["limit_lines"] != 1 or a["limit_lines"] > 1:
+                FAILURES.append(f"{scen['name']}: connection limit start line old {a['limit_lines']}x, "
+                                f"new {b['limit_lines']}x (want new 1, old 0 or 1)")
             if not same:
                 FAILURES.append(scen["name"])
     print("parity:", "OK" if not FAILURES else f"FAILED {FAILURES}")

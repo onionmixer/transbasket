@@ -9,6 +9,7 @@
 #include "language_table.h"
 #include "trans_cache.h"
 #include "inflight_translation.h"
+#include "conn_watch.h"
 
 /* Translation server structure */
 typedef struct {
@@ -23,6 +24,11 @@ typedef struct {
     TransCache *cache;
     pthread_t cache_bg_thread;
     atomic_bool cache_bg_running;
+
+    /* Occupied HTTP connection slots (PLAN_CONNECTION_LIMIT.md 2.2), set up by
+     * translation_server_start() before the daemon exists. */
+    ConnWatch conn_watch;
+    bool conn_watch_inited;
 } TranslationServer;
 
 /* Initialize translation server */

@@ -249,12 +249,16 @@ char *translate_via_codex(OpenAITranslator *translator, const char *from_lang,
         sem_held = true;
     }
 
-    /* 2. Per-request temp cwd (best-effort: NULL cwd if run_dir unusable). */
+    /* 2. Per-request temp cwd (best-effort: NULL cwd if run_dir unusable). The
+     *    fallback changes how codex runs, so it is logged at INFO on every failed
+     *    attempt, like the schema-file failure below (PLAN_CONNECTION_LIMIT.md 2.1). */
     snprintf(tmpl, sizeof(tmpl), "%s/tb-XXXXXX", cfg->codex_run_dir);
     temp_cwd = mkdtemp(tmpl);
     if (!temp_cwd) {
-        LOG_DEBUG("[%s] mkdtemp under %s failed (%s), using no explicit cwd\n",
-                request_uuid, cfg->codex_run_dir, strerror(errno));
+        int mkdtemp_errno = errno;
+        LOG_INFO("[%s] cannot create a temp directory under %s (%s); running codex in the server's working "
+                 "directory without -C/-o/--output-schema",
+                 request_uuid, cfg->codex_run_dir, strerror(mkdtemp_errno));
     }
 
     /* 3+4. Structured mode only with everything it needs; a schema-file failure
@@ -341,7 +345,8 @@ cleanup:
     }
     if (temp_cwd) {
         if (rmdir(temp_cwd) != 0) {
-            LOG_DEBUG("[%s] failed to remove temp cwd %s: %s\n", request_uuid, temp_cwd, strerror(errno));
+            int rmdir_errno = errno;
+            LOG_INFO("[%s] cannot remove temp directory %s (%s)", request_uuid, temp_cwd, strerror(rmdir_errno));
         }
     }
 

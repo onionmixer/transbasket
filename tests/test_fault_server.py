@@ -7,9 +7,14 @@ startup; run as an ordinary user): codex runs without -C, -o and --output-schema
 the server's cwd, gets the plain prompt on stdin and answers on stdout; the reply is
 200, SOURCE_HINT_MODE=model falls back to the script hint, nothing is left in
 CODEX_RUN_DIR. Explicit-source requests too. With the permission back, the next
-request uses -C/-o/--output-schema again. A release build logs nothing about the
-fallback (the line is LOG_DEBUG, compiled only with -DDEBUG) - the check assumes the
-release build `make test-fault-server` uses.
+request uses -C/-o/--output-schema again. Every failed attempt logs one INFO line
+"cannot create a temp directory under <run dir> (Permission denied); ..." - exactly
+one per failed attempt, none for the others (PLAN_CONNECTION_LIMIT.md 2.1; until
+2026-11-09 it was LOG_DEBUG and a release build logged nothing).
+
+F1b - the temp cwd cannot be removed (the fake codex leaves a file in its -C
+directory): the reply is still 200, one INFO line "cannot remove temp directory
+<that directory> (Directory not empty)", and the directory stays.
 
 F3 - the exec driver's state cannot be allocated (TB_TEST_FAIL_DRIVER_INIT in the
 hooks build): exit code 1, "Error: Memory allocation failed" then "Error: Failed to
@@ -47,6 +52,8 @@ if a and a[0] == "exec":
         out = "plain answer"
     if "-o" in a:
         Path(a[a.index("-o") + 1]).write_text(out)
+    if os.environ.get("FAKE_LEAVE") and "-C" in a:
+        Path(a[a.index("-C") + 1], "left-behind.txt").write_text("x")
     print(out)
     sys.exit(0)
 sys.exit(3)
@@ -164,8 +171,45 @@ def f1(binary):
               f"F1: SOURCE_HINT_MODE=model fell back to the script hint without a cwd "
               f"({a.get('hint_origin')}, baseline {by.get('最初の文', {}).get('hint_origin')})")
         text = (d / "server.log").read_text(errors="replace")
-        check("mkdtemp" not in text, "F1: a release build logs nothing about the fallback (LOG_DEBUG only)")
+        want = (f"[550e8400-e29b-41d4-a716-446655440000] cannot create a temp directory under {d / 'run'} "
+                f"(Permission denied); running codex in the server's working directory without -C/-o/--output-schema")
+        lines = [l for l in text.splitlines() if "cannot create a temp directory" in l]
+        check(len(lines) == 2 and all(l.endswith(want) for l in lines),
+              f"F1: exactly one INFO line per failed attempt (2), none for the baseline/recovery ({lines})")
+        check(all("[INFO]" in l for l in lines), "F1: logged at INFO (a release build shows it)")
+        check("cannot remove temp directory" not in text, "F1: no removal failure was logged")
         check("cannot write the output schema" not in text, "F1: no schema file was attempted without a cwd")
+
+
+def f1b(binary):
+    with tempfile.TemporaryDirectory(prefix="fault-rmdir-") as w:
+        d = Path(w)
+        port = free_port()
+        setup(d, port)
+        log = d / "fake.log"
+        env = dict(os.environ, FAKE_LOG=str(log), FAKE_LEAVE="1")
+        out = open(d / "server.log", "wb")
+        p = subprocess.Popen([binary, "-c", str(d / "t.conf"), "-r", "r.txt"], cwd=d, env=env, stdout=out,
+                             stderr=subprocess.STDOUT)
+        try:
+            check(wait_port(port, p), "F1b: server up")
+            st, j = ask(port, "五番目の文", "auto")
+            c = calls(log)[-1]
+            cwd = c["argv"][c["argv"].index("-C") + 1] if "-C" in c["argv"] else ""
+            check(st == 200 and j.get("translatedText") == "structured answer",
+                  f"F1b: the reply is still 200 from the -o file ({st}, {j.get('translatedText')!r})")
+        finally:
+            p.terminate()
+            p.wait(timeout=20)
+            out.close()
+        left = sorted(os.listdir(d / "run"))
+        check(cwd != "" and left == [Path(cwd).name] and os.listdir(cwd) == ["left-behind.txt"],
+              f"F1b: that -C directory stays, with the file in it ({left})")
+        text = (d / "server.log").read_text(errors="replace")
+        lines = [l for l in text.splitlines() if "cannot remove temp directory" in l]
+        want = f"[550e8400-e29b-41d4-a716-446655440000] cannot remove temp directory {cwd} (Directory not empty)"
+        check(len(lines) == 1 and lines[0].endswith(want) and "[INFO]" in lines[0],
+              f"F1b: one INFO line naming that directory ({lines})")
 
 
 def f3(hooks):
@@ -202,6 +246,7 @@ def main():
         print("  skip  F1 needs an ordinary user (root ignores the 0500 directory)")
     else:
         f1(binary)
+    f1b(binary)
     f3(hooks)
     print("OK" if not FAILURES else f"FAILED: {len(FAILURES)}")
     return 1 if FAILURES else 0

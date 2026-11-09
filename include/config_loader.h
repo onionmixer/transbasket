@@ -3,6 +3,14 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <sys/select.h>
+
+/* Highest HTTP_MAX_CONNECTIONS accepted: libmicrohttpd's own default for POSIX
+ * sockets (daemon.c MHD_MAX_CONNECTIONS_DEFAULT = FD_SETSIZE - 4, 1020 here). The
+ * server uses select(), which cannot take descriptors >= FD_SETSIZE anyway. It is
+ * a policy bound, not a capacity: other descriptors use numbers too
+ * (PLAN_CONNECTION_LIMIT.md 2.2). */
+#define HTTP_MAX_CONNECTIONS_MAX (FD_SETSIZE - 4)
 
 /* Cache backend type enumeration */
 typedef enum {
@@ -64,6 +72,7 @@ typedef struct {
     int inflight_max_keys;         /* 0 (unset) = MAX_WORKERS */
     int inflight_max_waiters;      /* default 256 */
     int inflight_max_waiters_per_key; /* default 64 */
+    int http_max_connections;      /* HTTP_MAX_CONNECTIONS: 0 = unset (libmicrohttpd default), -1 = invalid */
     SourceHintMode source_hint_mode;  /* SOURCE_HINT_MODE, default script */
     bool cache_cleanup_enabled;  /* Enable automatic cleanup (default: true) */
     int cache_cleanup_days;  /* Cleanup entries older than N days (default: 60) */

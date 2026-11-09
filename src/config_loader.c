@@ -370,6 +370,12 @@ int validate_config(const Config *config) {
         return -1;
     }
 
+    /* 0 = unset. Checked for both backends: the HTTP server is the same. */
+    if (config->http_max_connections < 0 || config->http_max_connections > HTTP_MAX_CONNECTIONS_MAX) {
+        LOG_INFO("Error: HTTP_MAX_CONNECTIONS must be an integer from 1 to %d", HTTP_MAX_CONNECTIONS_MAX);
+        return -1;
+    }
+
     /* Validate SYSTEM_ROLE */
     if (!config->system_role || strlen(config->system_role) == 0) {
         LOG_INFO( "Error: SYSTEM_ROLE is required");
@@ -671,6 +677,8 @@ Config *load_config(const char *config_path, const char *prompt_prefix_path, con
             config->inflight_max_waiters = positive_integer(value);
         } else if (strcmp(key, "INFLIGHT_MAX_WAITERS_PER_KEY") == 0) {
             config->inflight_max_waiters_per_key = positive_integer(value);
+        } else if (strcmp(key, "HTTP_MAX_CONNECTIONS") == 0) {
+            config->http_max_connections = positive_integer(value);   /* range checked in validate_config() */
         } else if (strcmp(key, "TRANS_CACHE_THRESHOLD") == 0) {
             config->cache_threshold = config_int(key, value);
             if (config->cache_threshold < 1) {

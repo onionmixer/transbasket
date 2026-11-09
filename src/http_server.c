@@ -23,6 +23,7 @@
 #include "utils.h"
 #include "trans_cache.h"
 #include "source_hint.h"
+#include "translation_control.h"
 
 /* libmicrohttpd 0.9.74 renamed the 422 constant and deprecated the old name.
  * Define the new name ourselves on older releases so both versions build clean. */
@@ -662,6 +663,38 @@ static void log_bound_address(struct MHD_Daemon *daemon) {
     }
 }
 
+/* libmicrohttpd connection notifications, from its polling thread: STARTED when a
+ * connection took a slot, CLOSED when cleanup gives it back. Only the slot count
+ * and the "limit reached" lines (conn_watch.h); the log call runs after the
+ * watch's mutex is released. */
+static void notify_connection(void *cls, struct MHD_Connection *connection,
+                              void **socket_context, enum MHD_ConnectionNotificationCode toe) {
+    (void)connection;
+    (void)socket_context;
+    TranslationServer *server = cls;
+    if (toe == MHD_CONNECTION_NOTIFY_STARTED) {
+        uint64_t unreported = 0;
+        if (conn_watch_started(&server->conn_watch, translation_now_ms(), &unreported) == CONN_WATCH_REACHED) {
+            if (unreported > 0) {
+                LOG_INFO("HTTP connection limit %u reached; new connections wait in the listen backlog "
+                         "(%llu more times since the last report)",
+                         server->conn_watch.limit, (unsigned long long)unreported);
+            } else {
+                LOG_INFO("HTTP connection limit %u reached; new connections wait in the listen backlog",
+                         server->conn_watch.limit);
+            }
+        }
+    } else if (toe == MHD_CONNECTION_NOTIFY_CLOSED) {
+        int64_t episode_ms = 0;
+        bool stopping = false;
+        if (conn_watch_closed(&server->conn_watch, translation_now_ms(), &episode_ms, &stopping) == CONN_WATCH_BELOW) {
+            LOG_INFO("HTTP connection count below the limit again after %lld.%01lld s%s",
+                     (long long)(episode_ms / 1000), (long long)(episode_ms % 1000 / 100),
+                     stopping ? " (during shutdown)" : "");
+        }
+    }
+}
+
 /* Start translation server */
 int translation_server_start(TranslationServer *server) {
     if (!server) {
@@ -691,6 +724,26 @@ int translation_server_start(TranslationServer *server) {
     LOG_INFO("Starting HTTP server (LISTEN %s, PORT %d)...",
             server->config->listen, server->config->port);
 
+    /* HTTP_MAX_CONNECTIONS: passed only when set, so an unset key keeps exactly
+     * libmicrohttpd's own default (FD_SETSIZE - 4 = HTTP_MAX_CONNECTIONS_MAX).
+     * Over the limit, connections wait in the listen backlog: NOTIFY_COMPLETED
+     * with thread-per-connection gives MHD an ITC, and then it stops watching
+     * the listening socket while all slots are taken (PLAN_CONNECTION_LIMIT.md 1.1). */
+    int configured_limit = server->config->http_max_connections;
+    unsigned int limit = configured_limit > 0 ? (unsigned int)configured_limit
+                                              : (unsigned int)HTTP_MAX_CONNECTIONS_MAX;
+    struct MHD_OptionItem limit_opts[] = {
+        { configured_limit > 0 ? MHD_OPTION_CONNECTION_LIMIT : MHD_OPTION_END, (intptr_t)limit, NULL },
+        { MHD_OPTION_END, 0, NULL }
+    };
+    if (!server->conn_watch_inited) {
+        if (conn_watch_init(&server->conn_watch, limit) != 0) {
+            LOG_INFO("Error: Could not initialize the HTTP connection count");
+            return -1;
+        }
+        server->conn_watch_inited = true;
+    }
+
     atomic_store(&mhd_start_returned, false);
     /* The bind uses the port inside addr; the port argument only appears in MHD's
      * error messages, so it gets the same value. The logger must be the first option. */
@@ -702,7 +755,9 @@ int translation_server_start(TranslationServer *server) {
         MHD_OPTION_EXTERNAL_LOGGER, &mhd_log, NULL,
         MHD_OPTION_SOCK_ADDR, (struct sockaddr *)&addr,
         MHD_OPTION_NOTIFY_COMPLETED, &request_completed, NULL,
+        MHD_OPTION_NOTIFY_CONNECTION, &notify_connection, server,
         MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)120,
+        MHD_OPTION_ARRAY, limit_opts,
         MHD_OPTION_END
     );
     atomic_store(&mhd_start_returned, true);
@@ -713,6 +768,11 @@ int translation_server_start(TranslationServer *server) {
     }
 
     log_bound_address(server->daemon);
+    if (configured_limit > 0) {
+        LOG_INFO("HTTP connection limit: %u (HTTP_MAX_CONNECTIONS)", limit);
+    } else {
+        LOG_INFO("HTTP connection limit: %u (libmicrohttpd default)", limit);
+    }
 
     return 0;
 }
@@ -725,6 +785,9 @@ void translation_server_stop(TranslationServer *server) {
 
     LOG_INFO("Stopping HTTP server...");
 
+    if (server->conn_watch_inited) {
+        conn_watch_set_stopping(&server->conn_watch);   /* a "below" line from here on says so */
+    }
     inflight_shutdown(server->inflight);
     if (server->daemon) {
         MHD_stop_daemon(server->daemon);
@@ -767,6 +830,10 @@ void translation_server_free(TranslationServer *server) {
 
     if (server->lang_table) {
         language_table_free(server->lang_table);
+    }
+
+    if (server->conn_watch_inited) {   /* the daemon is stopped: no more notifications */
+        conn_watch_destroy(&server->conn_watch);
     }
 
     free(server);

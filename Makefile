@@ -224,6 +224,17 @@ test-fault-server: all directories
 	$(CC) $(CFLAGS) -DTRANSBASKET_TEST_HOOKS $(INCLUDES) $(LDFLAGS) -o $(TEST_HOOKS_BIN) $(SERVER_SRCS) $(LIBS)
 	python3 -I tests/test_fault_server.py $(abspath $(TARGET)) $(abspath $(TEST_HOOKS_BIN))
 
+# PLAN_CONNECTION_LIMIT.md: the limit-reached log rule (C, supplied times; plain + TSan) and
+# HTTP_MAX_CONNECTIONS through the real server (offline; one case waits ~65 s for the 60 s rule)
+test-conn-watch: directories
+	$(CC) $(CFLAGS) $(INCLUDES) $(TEST_SANITIZERS) -o $(OBJ_DIR)/test_conn_watch tests/test_conn_watch.c src/conn_watch.c -lpthread
+	$(OBJ_DIR)/test_conn_watch
+	$(CC) $(CFLAGS) $(INCLUDES) -fsanitize=thread -fno-omit-frame-pointer -g -o $(OBJ_DIR)/test_conn_watch_tsan tests/test_conn_watch.c src/conn_watch.c -lpthread
+	TSAN_OPTIONS=halt_on_error=1 $(OBJ_DIR)/test_conn_watch_tsan
+
+test-connection-limit: all
+	python3 -I tests/test_connection_limit.py $(abspath $(TARGET))
+
 # PLAN_FAULT_INJECTION.md F4/F5/F6/Q1: failures inside the result + hint store of both backends
 # (SQL statements refused, SQLite's and the backends' own allocations failed, the backend's deadline check).
 test-fault-store: directories
@@ -272,4 +283,4 @@ test-cache-tool-hints: all
 	$(CC) $(CFLAGS) $(INCLUDES) -DSOURCE_HINT_VERSION=2 $(LDFLAGS) -o $(OBJ_DIR)/cache_tool_hint_v2 $(CACHE_TOOL_SRCS) -lcjson -lssl -lcrypto -luuid -lsqlite3
 	python3 tests/test_cache_tool_hints.py ./cache_tool $(OBJ_DIR)/cache_tool_hint_v2
 
-.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity test-codex-backend test-timestamp test-sqlite-pragmas test-timestamp-server test-slot-gate test-cache-tool-journal test-request-body test-normal-unescape test-codex-fifo test-fault-codex test-fault-store test-fault-server
+.PHONY: all directories cache-tool clean rebuild install uninstall debug check-deps test-auto test-inflight-unit test-coalescing test-source-hint test-source-hint-store test-source-hint-server test-cache-tool-hints test-strict-json test-structured-hint test-cleanup-days test-cjson-nul test-nul-guard test-listen-parse test-listen-address test-config-syntax test-config-numbers test-strip test-normal-output test-sse test-log-safety test-daemon test-codex-interface test-backend-parity test-codex-backend test-timestamp test-sqlite-pragmas test-timestamp-server test-slot-gate test-cache-tool-journal test-request-body test-normal-unescape test-codex-fifo test-fault-codex test-fault-store test-fault-server test-conn-watch test-connection-limit
