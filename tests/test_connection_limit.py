@@ -464,6 +464,8 @@ def validation():
         dl = (d / "daemon.log").read_text(errors="replace") if (d / "daemon.log").exists() else ""
         check(rc == 1 and not bound(s.port) and (msg in dl or msg in s.log()),
               f"-d with an invalid value: launcher exit 1, nothing bound ({rc})")
+        stray = _stop_daemons(d / "t.conf")      # a broken build may have started one: never leave it behind
+        check(not stray, f"-d with an invalid value: no daemon was left running ({stray})")
         s.stop()
     with tmp() as w:
         d = Path(w)
@@ -475,12 +477,23 @@ def validation():
         dl = (d / "daemon.log").read_text(errors="replace") if (d / "daemon.log").exists() else ""
         check(rc == 0 and "HTTP connection limit: 3 (HTTP_MAX_CONNECTIONS)" in dl,
               f"-d with a valid value: launcher exit 0, start line in the -l file ({rc})")
-        pids = [int(p) for p in os.listdir("/proc") if p.isdigit() and _cmd_has(p, str(d / "t.conf"))]
-        for pid in pids:
-            os.kill(pid, signal.SIGTERM)
-        check(len(pids) == 1 and wait_for(lambda: not os.path.exists(f"/proc/{pids[0]}"), 20),
-              f"the daemon (pid {pids}) stopped")
+        pids = _stop_daemons(d / "t.conf")
+        check(len(pids) == 1, f"the daemon (pid {pids}) stopped")
         s.stop()
+
+
+def _stop_daemons(conf):
+    """SIGTERM every process started with this test's own config path (only this
+    test's daemons carry it), wait for them; returns their pids."""
+    pids = [int(p) for p in os.listdir("/proc") if p.isdigit() and _cmd_has(p, str(conf))]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    for pid in pids:
+        wait_for(lambda: not os.path.exists(f"/proc/{pid}"), 20)
+    return pids
 
 
 def _cmd_has(pid, needle):
