@@ -8,7 +8,7 @@
 ## HTTP 연결 상한·임시 디렉터리 로그 2026-11-09
 
 계획·결정 (사용자: 넘친 연결은 backlog 대기, 기본 1020 유지, 닿을 때·풀릴 때 기록)·codex 판정 (계획 16건, 기록 설계 9건) 은
-[PLAN_CONNECTION_LIMIT.md](PLAN_CONNECTION_LIMIT.md). 비교 기준은 `2d44be9` 빌드 (dkfs 가 쓰는 실행 파일과 같은 바이트).
+[PLAN_CONNECTION_LIMIT.md](PLAN_CONNECTION_LIMIT.md). 비교 기준은 `2d44be9` 빌드 (그때 dkfs 가 쓰던 실행 파일과 같은 바이트).
 
 | 대상 | 명령 | 결과 |
 |---|---|---|
@@ -18,6 +18,7 @@
 | 이전 빌드와 같음 | `make test-backend-parity PARITY_OLD_BIN=<2d44be9>` | 13 시나리오: 응답·argv·프롬프트·schema·upstream 본문·trace·로그 같음. 다른 것은 새 기동 줄 `HTTP connection limit: 1020 (libmicrohttpd default)` 하나 (새 빌드에 정확히 1번). ASan 빌드도 통과 |
 | 변이 | `scratchpad/connlimit/mutants.py` | 12개 모두 잡음 (옵션 미전달, N+1, 1021 허용, 무효를 미설정으로, mkdtemp·rmdir 줄 DEBUG, 도달 하나 일찍, 60 s 억제 없음, 첫 도달 특례 없음, 짝 규칙 없음, K 초기화 없음, 정지 표시 없음). "하나 일찍" 은 처음엔 단위 시험만 잡아 통합 시험에 "연결 하나일 때 줄 없음" 을 더함 |
 | 회귀 | `make test-*` 35종, `test_config_limits.py`, 프롬프트 회귀 24건, parity (일반·ASan), ASan 서버 4종, ASan `test-codex-backend`·`test-conn-watch` | 모두 통과, 빌드 경고 0. 운영 바이너리의 `TB_TEST_` 문자열 0 |
+| 배포 설정 (dkfs·pge4 = 10) | 두 설정 사본 (LISTEN 127.0.0.1·포트만 바꿈) 기동 | 둘 다 `HTTP connection limit: 10 (HTTP_MAX_CONNECTIONS)`·`/health` 200. 사용자가 dkfs 재시작 후 같은 줄 확인, 실행 파일 sha256 = 시험한 빌드. fd 예산 46 / 1024 (python, [PLAN §8](PLAN_CONNECTION_LIMIT.md)) |
 
 실측으로 정한 것 (libmicrohttpd 0.9.75, 원본 소스와 함께):
 - 상한을 넘은 연결은 끊기지 않고 **backlog 에서 기다린다** — `NOTIFY_COMPLETED` 가 ITC 를 켜기 때문. 그 옵션이 없는 probe 로 처음 쟀을 때는

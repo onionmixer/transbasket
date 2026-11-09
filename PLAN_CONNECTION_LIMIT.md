@@ -40,7 +40,7 @@ codex 는 코딩 전 계획 검토 입력일 뿐, 별도 worktree, 모든 기준
     핸들러가 2.0 s 에 그 요청을 실행 (`mhd_probe3.c`, `abandon.py`). transbasket 이면 떠난 클라이언트의 번역이 나중에 돈다
     (결과는 캐시에 남지만 엔진 호출은 쓰인다). MHD 무활동 타임아웃 (120 s) 은 accept 뒤부터라 backlog 대기에는 안 걸린다
     (`microhttpd.h:1578-1585`). listen backlog 는 `SOMAXCONN` (`daemon.c:6524-6527`), 커널 `net.core.somaxconn` 4096.
-- 운영 값: dkfs (PID 1015134) `open files` soft 1024 / hard 1048576, 지금 fd 8개. 즉 지금 상한은 사실상 "fd 가 바닥나는 지점"
+- 운영 값 (계획 시점): dkfs (PID 1015134) `open files` soft 1024 / hard 1048576, 지금 fd 8개. 즉 지금 상한은 사실상 "fd 가 바닥나는 지점"
   (1020 근처) 이고, 거기서는 거절이 아니라 번역 실패 (normal 503) 와 지연이 난다.
 - 이미 있는 한도와의 관계: `INFLIGHT_MAX_KEYS` (기본 `MAX_WORKERS`) 는 서로 다른 번역 수, `INFLIGHT_MAX_WAITERS` (256) 는
   따라오는 요청 수를 막고 넘으면 503 + `Retry-After`. 캐시 적중·`/health`·keep-alive idle 연결은 이 한도에 안 걸린다.
@@ -200,3 +200,20 @@ codex (read-only, 2026-11-09) 16건. 각 건은 원문을 열거나 다시 재�
 | 7 | fd 고갈은 기본 L 의 도달 줄을 만들지 않고, 오히려 못 남기게 함 — 줄이 없다고 여유가 있는 것은 아님 | `M/daemon.c:3653-3685` (at_limit 는 알림 없음) | ✅ 채택 — 문서에 |
 | 8 | §3·§4 가 아직 "503" 을 허용 — 결정 A 와 어긋남; fd 비교에 번역 입장 503 이 섞일 수 있음 | 계획 해당 줄 다시 읽음; `INFLIGHT_MAX_KEYS` 입장 503 (`http_server.c:366-372`) 확인 | ✅ 채택 — §3·§4 고침 |
 | 9 | X 정밀 비교 금지 (준비·정리 시간 포함), K=1 시험은 다른 연결 없이, 상태 기계 단위 시험 | 스모크 실측: 붙잡은 1.0 s 에 "after 1.0 s" | ✅ 채택 — 구간 포함만 검사, 단위 시험 추가 |
+
+## 8. 배포 적용 (2026-11-09)
+
+사용자 지시: "`run_dkfs_codex.sh` 과 `run_pge4_codex.sh` 둘 다 동시연결은 10 이 되도록". 두 스크립트가 쓰는 미추적 설정
+`transbasket_dkfs_codex.conf`·`transbasket_pge4_codex.conf` 에 `INFLIGHT_MAX_WAITERS_PER_KEY` 다음으로 주석 2줄과
+`HTTP_MAX_CONNECTIONS="10"` 을 넣었다. 다른 줄은 그대로다 (원본과 diff 로 확인).
+
+- 확인: `ed7df6c` 빌드로 각 설정의 사본 (LISTEN 127.0.0.1·포트만 바꿈, 캐시·run dir 은 스크래치) 을 띄워 둘 다
+  `HTTP connection limit: 10 (HTTP_MAX_CONNECTIONS)` 줄과 `/health` 200. 그 뒤 사용자가 dkfs 를 `run_dkfs_codex.sh` 로 재시작하고
+  기동 줄을 확인했다. 실행 중인 dkfs 의 실행 파일은 시험한 빌드와 sha256 이 같다. pge4 는 이 호스트에서 실행 중이 아니다
+  (둘 다 `PORT="8889"`).
+- 10 일 때의 동작: 11번째 연결은 backlog 에서 기다린다. `/health`·캐시 적중·keep-alive idle 연결도 10 자리 중 하나를 쓰므로, 다 차면
+  헬스체크도 기다린다. codex 는 `CODEX_MAX_CONCURRENCY="4"` 라 동시에 4개만 돌고, 나머지 연결은 슬롯을 기다리거나 캐시 적중이다.
+  따라오는 요청은 많아야 9개라 `INFLIGHT_MAX_WAITERS="256"`·`_PER_KEY="64"` 에는 닿지 않는다 (해는 없음).
+- fd 예산 (python): 기동 fd 8 (재시작한 dkfs 실측) + codex 실행 중 4 × (클라이언트 1 + spawn 직후 파이프 3쌍 6
+  (`codex_exec.c:92`, 자식 쪽은 `:123-125` 에서 닫음) + `-o` 파일 1) + 나머지 6 × 1 = 46. soft 한도 1024 와 select 의 1024 미만
+  fd 번호 제한 모두 여유가 크다.
