@@ -1,11 +1,33 @@
 # Transbasket C Implementation - Test Results
 
-> 최신 기록은 바로 아래의 **실패 주입 시험 2026-11-07** 이고, 그 아래가 **범위 밖 4건 수정 검증 2026-11-07**, 그 아래가 **코드 문제 4건 수정 검증 2026-11-07**, 그 아래가 **번역 백엔드 모듈 분리 검증 2026-11-06**, 그 아래가 **레거시 MCP 제거 검증 2026-11-06**, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
+> 최신 기록은 바로 아래의 **HTTP 연결 상한·임시 디렉터리 로그 2026-11-09** 이고, 그 아래가 **실패 주입 시험 2026-11-07**, 그 아래가 **범위 밖 4건 수정 검증 2026-11-07**, 그 아래가 **코드 문제 4건 수정 검증 2026-11-07**, 그 아래가 **번역 백엔드 모듈 분리 검증 2026-11-06**, 그 아래가 **레거시 MCP 제거 검증 2026-11-06**, 그 아래가 **열린 이슈 수정 검증 2026-11-06** (데몬·로그·normal 출력·SSE·설정)입니다.
 > 이후 Build Information 및 1~5절은 2025-10-09 normal 백엔드 기록이며,
 > 중국어 스크립트와 codex MCP 검증은 2026-08-21 당시의 결과입니다.
 > 과거의 “전체 통과”·버퍼·스키마 설명은 해당 검증 시점에 한정됩니다.
 
-## 실패 주입 시험 2026-11-07
+## HTTP 연결 상한·임시 디렉터리 로그 2026-11-09
+
+계획·결정 (사용자: 넘친 연결은 backlog 대기, 기본 1020 유지, 닿을 때·풀릴 때 기록)·codex 판정 (계획 16건, 기록 설계 9건) 은
+[PLAN_CONNECTION_LIMIT.md](PLAN_CONNECTION_LIMIT.md). 비교 기준은 `2d44be9` 빌드 (dkfs 가 쓰는 실행 파일과 같은 바이트).
+
+| 대상 | 명령 | 결과 |
+|---|---|---|
+| 상한 도달 기록 규칙 | `make test-conn-watch` | 시각을 넣은 상태 기계: 첫 도달은 늘 기록, 59,999 ms 숨김·60,000 ms 기록, 숨긴 횟수 K 와 초기화, 숨긴 도달은 풀림 줄 없음, 정지 표시, 0 아래로 안 내려감, limit 1. TSan·ASan 통과 |
+| `HTTP_MAX_CONNECTIONS` (실제 서버) | `make test-connection-limit` | 미설정: 6개 동시 처리, `1020 (libmicrohttpd default)`. N=2: 연결 하나로는 줄 없음, 둘이면 `reached` 한 줄, 세 번째 연결 (`/health`) 은 1.5 s 동안 응답 없고 upstream 에도 안 감, 놓으면 **그 연결이** 200, `below ... after 1.5 s` 가 잰 구간 안. 캐시 적중도 기다림 (upstream 안 감). keep-alive idle 연결이 자리를 잡고 닫으면 풀림, 요청 없이 닫은 연결은 자리를 돌려줌. `::` 에서 IPv4·IPv6 가 한 상한. 값 12종 거부 (exit 1·문구·바인드 안 함), `1`·`1020`·`0010`·따옴표 없는 `7` 기동, 마지막 줄 우선, codex 도 같은 검사, `-d` 무효 → 1·유효 → 0 + `-l` 파일에 기동 줄. 60 s 규칙 (~65 s): 둘째 도달 줄 없음, 셋째 `(1 more times since the last report)`. 상한에서 SIGTERM → `(during shutdown)`. fd 예산 (`ulimit -n 64`): 미설정 503 10~24건 (시험 6회), 상한 12 → 80/80. 릴리스·ASan 통과 (sanitizer 보고 0) |
+| 임시 cwd 로그 (F1·F1b) | `make test-fault-server` | 실패한 시도마다 `cannot create a temp directory under <run> (Permission denied); ...` INFO 정확히 한 줄 (2건), 기준·회복 시도에는 없음. F1b: fake codex 가 `-C` 디렉터리에 파일을 남기면 응답은 200, `cannot remove temp directory <그 디렉터리> (Directory not empty)` 한 줄, 디렉터리 남음 |
+| 이전 빌드와 같음 | `make test-backend-parity PARITY_OLD_BIN=<2d44be9>` | 13 시나리오: 응답·argv·프롬프트·schema·upstream 본문·trace·로그 같음. 다른 것은 새 기동 줄 `HTTP connection limit: 1020 (libmicrohttpd default)` 하나 (새 빌드에 정확히 1번). ASan 빌드도 통과 |
+| 변이 | `scratchpad/connlimit/mutants.py` | 12개 모두 잡음 (옵션 미전달, N+1, 1021 허용, 무효를 미설정으로, mkdtemp·rmdir 줄 DEBUG, 도달 하나 일찍, 60 s 억제 없음, 첫 도달 특례 없음, 짝 규칙 없음, K 초기화 없음, 정지 표시 없음). "하나 일찍" 은 처음엔 단위 시험만 잡아 통합 시험에 "연결 하나일 때 줄 없음" 을 더함 |
+| 회귀 | `make test-*` 35종, `test_config_limits.py`, 프롬프트 회귀 24건, parity (일반·ASan), ASan 서버 4종, ASan `test-codex-backend`·`test-conn-watch` | 모두 통과, 빌드 경고 0. 운영 바이너리의 `TB_TEST_` 문자열 0 |
+
+실측으로 정한 것 (libmicrohttpd 0.9.75, 원본 소스와 함께):
+- 상한을 넘은 연결은 끊기지 않고 **backlog 에서 기다린다** — `NOTIFY_COMPLETED` 가 ITC 를 켜기 때문. 그 옵션이 없는 probe 로 처음 쟀을 때는
+  즉시 reset 이었다 (내 실측 오류, codex 지적, 원문·재측정으로 확인). 기다리다 포기한 요청도 나중에 처리된다.
+- fd 고갈 때: accept 가 멈췄다가 연결이 끝나면 다시 받고, normal 은 upstream 소켓을 못 열어 재시도 뒤 503. 처음 본 "영구 정지" 는 probe 의
+  stderr 를 읽지 않은 내 시험의 인공물이었다.
+- normal 번역 중인 연결 하나 = fd **4개** (클라이언트, upstream, libcurl 7.81 의 전송별 socketpair 2). 처음 2개로 셈한 상한 25 는 전체 회귀에서
+  503 1건 (ASan 8건) — 소켓을 상대 포트·`/proc/net/unix` 로 나눠 원인을 찾고 시험·문서를 4개로 고침 (최대 fd 53 = 5 + 12×4).
+- `/health` 는 첫 호출에서 답하므로 libmicrohttpd 가 연결을 닫는다 (keep-alive 아님) — 예전부터의 동작.
+
 
 계획·결정 (사용자: Q1·Q2 고침)·codex 판정 (계획 1회, 구현 1회) 은 [PLAN_FAULT_INJECTION.md](PLAN_FAULT_INJECTION.md).
 대상은 커버리지 (gcov 분기, 시험 31종) 로 "어느 시험도 지나지 않는" 것을 실측해 골랐다. 수정 전 대조는 `61cc36f` 빌드.

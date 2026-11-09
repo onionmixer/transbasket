@@ -81,6 +81,7 @@ The C implementation follows a clear separation of concerns across these core mo
 10. **listen_address.c**: `LISTEN` parser and LISTEN line recognizer (see "LISTEN address" below)
 11. **daemon.c**: `-d` with a start report to the launcher (see "Open-issue fixes" below)
 12. **slot_gate.c**: FIFO concurrency slots for the codex backend (see "Out-of-scope fixes" below)
+13. **conn_watch.c**: occupied HTTP connection slots and the limit-reached log rule (see "HTTP connection limit" below)
 
 (Cache and language-table concerns live in `trans_cache.c`, `cache_backend_*.c`, and `language_table.c`.)
 
@@ -97,9 +98,8 @@ This approach is efficient because:
 - No async complexity needed (blocking calls are fine in dedicated threads)
 - Simple to reason about and debug
 
-⚠ **`MAX_WORKERS` does not limit concurrent connections.** `MHD_start_daemon()` is called without
-`MHD_OPTION_CONNECTION_LIMIT` or `MHD_OPTION_THREAD_POOL_SIZE` (`http_server.c`), so the connection
-count is bounded by libmicrohttpd's own default, not by this setting. Since request coalescing,
+⚠ **`MAX_WORKERS` does not limit concurrent connections.** `HTTP_MAX_CONNECTIONS` does (since 2026-11-09,
+"HTTP connection limit" below); unset, the connection count is bounded by libmicrohttpd's own default (1020). Since request coalescing,
 `MAX_WORKERS` supplies the defaults for both `INFLIGHT_MAX_KEYS` and `CODEX_MAX_CONCURRENCY`.
 Distinct active translations are limited by `INFLIGHT_MAX_KEYS`; same-key followers consume separate
 waiter slots and connection threads. The earlier 500-request measurements predate these limits.
@@ -368,9 +368,37 @@ Paths that coverage (gcov, branch level) showed no test reached, tested 2026-11-
   `SQLITE_CONFIG_MALLOC` (must be set before the first open; lookaside off) and calls the backends' `store_result`
   directly to reach their own deadline checks. The committed state is read through a second connection.
 - `test-fault-server`: no per-request temp cwd (run dir 0500 after startup) -> codex without `-C`/`-o`/`--output-schema`
-  in the server's cwd, plain prompt, script hint. **A release build logs nothing about that fallback** (the line is
-  `LOG_DEBUG`, compiled only with `-DDEBUG`). S1 at startup: exit 1 with `Error: Memory allocation failed`, never bound.
+  in the server's cwd, plain prompt, script hint. Every failed attempt logs one INFO line `cannot create a temp directory under
+  ...` (since 2026-11-09, PLAN_CONNECTION_LIMIT.md 2.1; before, it was `LOG_DEBUG` and a release build logged nothing); a temp
+  cwd that cannot be removed logs `cannot remove temp directory <path> (<reason>)` (F1b). S1 at startup: exit 1 with
+  `Error: Memory allocation failed`, never bound.
 - `cache_backend_sqlite.c` store loop: the "both attempts `continue`" exit is unreachable (both `continue`s clear the hint).
+
+### HTTP connection limit - PLAN_CONNECTION_LIMIT.md
+
+`HTTP_MAX_CONNECTIONS` (2026-11-09). Invariants:
+
+- Unset (0) passes **no** `MHD_OPTION_CONNECTION_LIMIT` (it goes through `MHD_OPTION_ARRAY`, END when unset), so libmicrohttpd's
+  own default applies; `HTTP_MAX_CONNECTIONS_MAX` = `FD_SETSIZE - 4` = that default (1020). A parsed value that is not an integer
+  or outside 1..1020 stops startup in both backends (`validate_config()`); an overlong or unparsable line is ignored like any
+  other key; the last line wins. The start line `HTTP connection limit: N (...)` follows `HTTP server listening on`.
+- Over the limit, connections **wait in the kernel listen backlog**, they are not refused: `MHD_OPTION_NOTIFY_COMPLETED` with
+  thread-per-connection gives MHD an ITC, and with it MHD stops watching the listening socket while all slots are taken. Do not
+  drop `NOTIFY_COMPLETED` without re-measuring - without the ITC the same limit **resets** extra connections (measured with a probe
+  that lacked it). Waiting counts toward no deadline (not the translation budget, not MHD's 120 s inactivity timeout), and a
+  request whose client gave up while queued is still handled. `/health` is answered on the first call, which makes MHD close the
+  connection (no keep-alive there).
+- `conn_watch.c` counts occupied slots from `MHD_OPTION_NOTIFY_CONNECTION` (STARTED after MHD counted the connection, CLOSED in
+  cleanup after the join, before MHD's decrement; all on the polling thread, also during stop). It is set up before
+  `MHD_start_daemon()` (the polling thread starts inside it). Log rule: the first `limit-1 -> limit` always reports, later ones only
+  60 s after the last report (the suppressed count rides on the next report), a `below` line only ends a reported episode, a stop
+  marks it `(during shutdown)`. Log calls happen after the watch's mutex is released. fd exhaustion (`at_limit`) produces no line.
+- 1020 is a policy bound, not a capacity: select refuses descriptors >= 1024, and other descriptors (upstream sockets, codex pipes)
+  use numbers too. With `LimitNOFILE` 1024 the descriptors run out first: accept pauses and normal translations fail with 503 after
+  their retries (measured). README "동시성" has the budget rule.
+- `make test-conn-watch` (state machine with supplied times, plain + TSan), `make test-connection-limit` (real server: waiting,
+  `/health` and cache hits wait too, keep-alive idle holds a slot, dual stack shares one limit, values, `-d`, the 60 s rule ~65 s,
+  shutdown, fd budget under `ulimit -n 64`). Parity takes out exactly the one start line.
 
 ### Open-issue fixes - PLAN_OPEN_ISSUES.md
 
@@ -534,6 +562,7 @@ Public-facing copies live in `README.md` → "한계와 보장"; keep both in sy
 | `MAX_UPSTREAM_RESPONSE` | `backend_normal.c` | 4 MB | normal reply body (both modes) **errors** ("Upstream response too large" -> 502, not retried, not cached); post-processing buffers are sized from the reply, no other cap |
 | `CODEX_OUT_MAX` | `codex_exec.c` | 4 MB | exec path **errors** ("codex response too large" → 502) rather than truncating |
 | MHD connection timeout | `http_server.c` | 120 s | connection closed |
+| `HTTP_MAX_CONNECTIONS` | config, `HTTP_MAX_CONNECTIONS_MAX` (`config_loader.h`) | unset = libmicrohttpd's 1020; 1..1020 | new connections wait in the listen backlog (no 503); outside the range startup fails |
 | curl timeout (`normal`) | `backend_normal.c` | min(60 s, remaining total budget), up to 3 attempts | 503 for timeout |
 | Total translation budget | `TRANSLATION_TOTAL_TIMEOUT` | default 110 s, configurable 1..110 | normal 503, codex 504; no follower deadline extension |
 

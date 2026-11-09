@@ -181,6 +181,7 @@ PORT="8889"
 | `TRANS_CACHE_SQLITE_JOURNAL_MODE`, `TRANS_CACHE_SQLITE_SYNC` | `WAL`, `NORMAL` | journal: `DELETE` `TRUNCATE` `PERSIST` `MEMORY` `WAL` `OFF`, synchronous: `OFF` `NORMAL` `FULL` `EXTRA` (대소문자 무시, 그 밖의 값은 경고 후 기본값). 기동 로그 `SQLite journal_mode=..., synchronous=...` 에 실효값. SQLite 가 요청한 모드로 바꾸지 못하면 경고. `MEMORY`·`OFF`·synchronous `OFF` 는 충돌 시 캐시가 깨질 수 있다는 경고. 파일에 남는 것은 WAL 뿐입니다. `cache_tool` 은 journal 모드를 바꾸지 않습니다 (아래 "cache_tool.c"; 2026-11-07 전에는 이 두 키가 적용되지 않았고, `cache_tool` 이 DB 를 WAL 로 바꿨음) |
 | `TRANS_CACHE_THRESHOLD` | `5` | 같은 번역 결과가 나온 횟수 (캐시 사용 포함) 가 이 값 이상이어야 캐시를 씀. 결과가 달라지면 1 로 되돌아감. 1 미만은 5. codex 는 1 권장 |
 | `TRANS_CACHE_CLEANUP_ENABLED` | 켬 | `yes`·`1`·`true` 면 켬. 기간은 `TRANS_CACHE_CLEANUP_DAYS` (아래 "시간 한계") |
+| `HTTP_MAX_CONNECTIONS` | 없음 (libmicrohttpd 기본 1020) | 동시에 열린 HTTP 연결 수의 상한, 1~1020. 넘친 연결은 거절되지 않고 기다립니다. 정수가 아니거나 범위 밖이면 기동 오류 (normal·codex 모두). 아래 "동시성" (2026-11-09 부터) |
 
 #### `LISTEN` - 바인드 주소
 
@@ -711,8 +712,10 @@ SSE 주석, 루트 값 뒤의 (NUL 이 아닌) 잔여 바이트 — 요청 본�
   먼저 그 트랜잭션을 끝내고 그 저장 자체는 건너뜁니다 (`Cache write skipped: ended a transaction an earlier failure left open` —
   그 사이의 조회가 되돌려진 값을 봤을 수 있어서). 그 다음 저장부터 정상입니다. 예전에는 재시작 전까지 모든 캐시 쓰기가 실패하고 쓰기 잠금을 쥐어 `cache_tool` 도 막혔습니다.
 - codex 의 요청별 임시 디렉터리를 만들 수 없으면 (`CODEX_RUN_DIR` 에 쓸 수 없음) codex 는 서버의 작업 디렉터리에서 `-C`·`-o` 없이 실행되고
-  structured 출력 대신 plain 을 씁니다. 이 대체는 일반 빌드에서는 **로그에 남지 않습니다** — 기동 시점에 이미 쓸 수 없으면
-  `Warning: CODEX_RUN_DIR ...` 한 줄이 있을 뿐, 그 뒤에 생긴 문제는 아무 줄도 남기지 않습니다.
+  structured 출력 대신 plain 을 씁니다. 실패한 시도마다 INFO 한 줄을 남깁니다 (2026-11-09 부터; 예전에는 일반 빌드에서 아무 줄도 없었음):
+  `[uuid] cannot create a temp directory under <CODEX_RUN_DIR> (<원인>); running codex in the server's working directory without -C/-o/--output-schema`.
+  캐시 적중·병합 대기 요청은 임시 디렉터리를 만들지 않으므로 줄도 없습니다. 끝난 뒤 그 디렉터리를 지우지 못하면
+  `[uuid] cannot remove temp directory <경로> (<원인>)` 를 남깁니다 (원인이 `Directory not empty` 면 디렉터리가 `CODEX_RUN_DIR` 에 남습니다).
 
 #### 시간 한계
 
@@ -728,8 +731,29 @@ SSE 주석, 루트 값 뒤의 (NUL 이 아닌) 잔여 바이트 — 요청 본�
 #### 동시성
 
 - 연결마다 전용 스레드가 생성됩니다(`MHD_USE_THREAD_PER_CONNECTION`).
-- **`MAX_WORKERS` 는 동시 연결 수를 제한하지 않습니다.** MHD 에 `CONNECTION_LIMIT`/`THREAD_POOL_SIZE` 를
-  전달하지 않기 때문입니다. 이 값은 `INFLIGHT_MAX_KEYS`와 `CODEX_MAX_CONCURRENCY` 미설정 시의 기본값입니다.
+- **`MAX_WORKERS` 는 동시 연결 수를 제한하지 않습니다.** 이 값은 `INFLIGHT_MAX_KEYS`와 `CODEX_MAX_CONCURRENCY` 미설정 시의 기본값입니다.
+- **동시 연결 수의 상한은 `HTTP_MAX_CONNECTIONS`** (2026-11-09 부터, [PLAN_CONNECTION_LIMIT.md](PLAN_CONNECTION_LIMIT.md)). 설정하지 않으면
+  예전과 같이 libmicrohttpd 기본값 1020 (FD_SETSIZE − 4) 입니다. 기동 로그 `HTTP connection limit: N (HTTP_MAX_CONNECTIONS)` 또는
+  `HTTP connection limit: 1020 (libmicrohttpd default)` 에 실효값이 나옵니다.
+  - 상한에 닿으면 새 연결은 **거절되지 않고 커널 listen backlog 에서 기다리다가**, 연결 하나가 정리되면 들어옵니다 (503 없음, 실측).
+    `/health` 와 캐시 적중도 같이 기다립니다. 기다리는 시간은 번역 예산 (`TRANSLATION_TOTAL_TIMEOUT`) 에도, MHD 무활동 타임아웃 120초에도
+    들어가지 않으므로 클라이언트·프록시의 타임아웃이 한도가 됩니다. **기다리다 포기한 요청도 나중에 처리됩니다** (요청을 다 보낸 뒤 끊으면
+    서버는 그 번역을 실행합니다 — 실측).
+  - 연결 수에는 keep-alive 로 열어 둔 idle 연결도 들어갑니다 (120초 무활동이면 닫힘). `/health` 응답은 연결을 닫습니다 (libmicrohttpd 가
+    본문 없이 첫 호출에서 답한 요청에는 keep-alive 를 하지 않음). `LISTEN="::"` 이면 IPv4 와 IPv6 가 한 상한을 나눠 씁니다.
+  - 상한에 닿을 때 `HTTP connection limit N reached; new connections wait in the listen backlog`, 풀릴 때
+    `HTTP connection count below the limit again after X.Y s` 를 남깁니다 (INFO). 닿는 줄은 60초에 한 번까지이고, 그 사이 숨긴 횟수는 다음
+    줄에 `(K more times since the last report)` 로 붙습니다. 숨긴 도달은 풀림 줄도 남기지 않아 두 줄은 늘 짝입니다. 상한에 닿은 채 종료하면
+    풀림 줄에 `(during shutdown)` 이 붙습니다. 연결 스레드를 만들지 못한 연결도 잠깐 자리를 차지했다 돌려줄 수 있어, 아주 짧은 도달·풀림이
+    찍힐 수 있습니다.
+  - **fd 예산:** 1020 은 정책상 최댓값이지 보장 수용량이 아닙니다. 서버는 select 를 써서 fd 번호 1024 이상인 연결을 받지 못하고, 다른 fd
+    (listen, 캐시, 로그, normal 의 upstream 소켓, codex 의 파이프 3개) 도 번호를 씁니다. 프로세스의 열 수 있는 파일 수 (`ulimit -n`, systemd
+    `LimitNOFILE`) 가 1024 이면 연결이 1020 에 닿기 전에 fd 가 바닥납니다. 그때는 accept 가 잠시 멈추고, normal 은 upstream 소켓을 못 열어
+    재시도 뒤 **503** 이 납니다 (실측: `ulimit -n 64`·80 동시 → 503 10~32건, 7회). 상한 도달 줄은 이 경우 나오지 않습니다 — 줄이 없다고 여유가
+    있다는 뜻은 아닙니다. normal 에서 번역 중인 연결 하나는 fd 4개를 씁니다 (클라이언트 소켓, upstream 소켓, libcurl 7.81 이 전송마다
+    여는 socketpair 2개 — 실측). 그래서 대략 `HTTP_MAX_CONNECTIONS ≤ (열 수 있는 파일 수 − 기동 직후 fd 수 − 여유) ÷ 4` 로 두면 fd 가
+    바닥나기 전에 기다림이 먼저 옵니다 (실측: `ulimit -n 64`, 기동 fd 5, 상한 12 → 80건 모두 200, 최대 fd 53 = 5 + 12×4; 상한 25 는
+    가끔 503). codex 는 요청마다 파이프 3개라 `CODEX_MAX_CONCURRENCY` 만큼 더 듭니다. 기동 직후 fd 수는 `ls /proc/<PID>/fd | wc -l` 로 봅니다.
 - 서로 다른 활성 번역 키는 `INFLIGHT_MAX_KEYS`로 제한하며, 같은 키의 요청은 한 작업을 공유합니다.
 - codex 백엔드에서 **실제로 동시에 번역되는 요청 수는 `CODEX_MAX_CONCURRENCY`** 입니다. 초과분은 즉시 거부되지 않고
   슬롯을 기다립니다. 병합 대기 한도와 전체 작업 마감도 함께 적용됩니다.
@@ -858,6 +882,10 @@ transbasket/
 - Health check endpoint
 - Translation endpoint (request body up to 1 MiB, accumulated linearly; 413 above, 422 for a raw NUL)
 - Error response handling
+
+### conn_watch.c
+- Occupied HTTP connection slots from libmicrohttpd's connection notifications
+- The "limit reached" / "below the limit" log rule (one report per 60 s, lines always paired)
 
 ### inflight_translation.c
 - One owner per normalized language pair and cleaned source text, with cache recheck
